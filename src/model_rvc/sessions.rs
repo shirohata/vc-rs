@@ -7,7 +7,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use ort::ep;
 use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
-use ort::value::{Tensor, ValueType};
+use ort::value::{Tensor, TensorRef, ValueType};
 use tracing::{debug, info};
 
 use crate::cli::Provider;
@@ -137,7 +137,10 @@ impl HubertEmbedderSession {
         audio_16k: &[f32],
         input_shape: &[usize; 2],
     ) -> Result<FeatureTensor> {
-        let input = Tensor::from_array((*input_shape, audio_16k.to_vec()))?;
+        // Borrow the worker-owned input slice for synchronous ORT runs. Using
+        // Tensor::from_array here would allocate and copy the full waveform on
+        // every realtime chunk.
+        let input = TensorRef::from_array_view((*input_shape, audio_16k))?;
         let run_start = Instant::now();
         let outputs = self
             .session
@@ -408,8 +411,9 @@ impl RmvpePitchSession {
         threshold: f32,
         waveform_shape: &[usize; 2],
     ) -> Result<Vec<f32>> {
-        let waveform = Tensor::from_array((*waveform_shape, audio_16k.to_vec()))?;
-        let threshold = Tensor::from_array(([1usize], vec![threshold]))?;
+        let threshold_value = [threshold];
+        let waveform = TensorRef::from_array_view((*waveform_shape, audio_16k))?;
+        let threshold = TensorRef::from_array_view(([1usize], threshold_value.as_slice()))?;
         let run_start = Instant::now();
         let outputs = self.session.run(ort::inputs![
             "waveform" => waveform,
@@ -743,11 +747,13 @@ impl RvcModelSession {
         speaker_id: i64,
         pitch_shape: &[usize; 2],
     ) -> Result<Vec<f32>> {
-        let feats = Tensor::from_array((feats_shape.to_vec(), feats.to_vec()))?;
-        let p_len = Tensor::from_array(([1usize], vec![frame_len as i64]))?;
-        let pitch = Tensor::from_array((*pitch_shape, pitch.to_vec()))?;
-        let pitchf = Tensor::from_array((*pitch_shape, pitchf.to_vec()))?;
-        let sid = Tensor::from_array(([1usize], vec![speaker_id]))?;
+        let p_len_value = [frame_len as i64];
+        let sid_value = [speaker_id];
+        let feats = TensorRef::from_array_view((feats_shape, feats))?;
+        let p_len = TensorRef::from_array_view(([1usize], p_len_value.as_slice()))?;
+        let pitch = TensorRef::from_array_view((*pitch_shape, pitch))?;
+        let pitchf = TensorRef::from_array_view((*pitch_shape, pitchf))?;
+        let sid = TensorRef::from_array_view(([1usize], sid_value.as_slice()))?;
         let run_start = Instant::now();
         let outputs = self.session.run(ort::inputs![
             "feats" => feats,
