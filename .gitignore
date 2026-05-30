@@ -1,0 +1,26 @@
+/target/
+
+*.wav
+*.engine
+*.dll
+*.lib
+*.whl
+*.zip
+
+# Rust / Windows build artifacts
+*.pdb
+*.exe
+
+# Local/editor artifacts
+.DS_Store
+Thumbs.db
+*.log
+
+# Local model assets (do not redistribute by default)
+*.onnx
+*.pth
+*.pt
+models/
+
+tmp
+assets/
