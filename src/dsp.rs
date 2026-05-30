@@ -5,6 +5,7 @@ use audioadapter_buffers::direct::SequentialSlice;
 use rubato::{Fft, FixedSync, Resampler};
 
 const STREAM_RESAMPLE_CHUNK: usize = 480;
+const STREAM_RESAMPLE_COMPACT_THRESHOLD: usize = STREAM_RESAMPLE_CHUNK * 8;
 
 pub fn i16_to_f32(input: &[i16]) -> Vec<f32> {
     let mut output = vec![0.0; input.len()];
@@ -50,15 +51,28 @@ pub fn rms(input: &[f32]) -> f32 {
     (sum / input.len() as f32).sqrt()
 }
 
+#[derive(Default)]
+pub struct RmsMixScratch {
+    input_rms: Vec<f32>,
+    output_rms: Vec<f32>,
+}
+
 pub fn compute_rms_envelope(input: &[f32], sample_rate: usize) -> Vec<f32> {
+    let mut envelope = Vec::new();
+    compute_rms_envelope_into(input, sample_rate, &mut envelope);
+    envelope
+}
+
+pub fn compute_rms_envelope_into(input: &[f32], sample_rate: usize, output: &mut Vec<f32>) {
+    output.clear();
     if input.is_empty() {
-        return Vec::new();
+        return;
     }
 
     let hop_len = (sample_rate / 100).max(1);
     let frame_len = hop_len.saturating_mul(4).max(1);
     let frame_count = input.len().div_ceil(hop_len);
-    let mut envelope = Vec::with_capacity(frame_count);
+    output.reserve(frame_count);
 
     for frame in 0..frame_count {
         let start = frame * hop_len;
@@ -74,10 +88,8 @@ pub fn compute_rms_envelope(input: &[f32], sample_rate: usize) -> Vec<f32> {
         // starts and treating missing tail samples as zero padding. Do not
         // change this to a short-frame denominator without retuning tests and
         // comparing the SOLA-before envelope behavior.
-        envelope.push((sum / frame_len as f32).sqrt());
+        output.push((sum / frame_len as f32).sqrt());
     }
-
-    envelope
 }
 
 pub fn linear_resample_envelope(points: &[f32], output_len: usize) -> Vec<f32> {
@@ -114,6 +126,23 @@ pub fn apply_rms_mix(
     sample_rate: usize,
     rms_mix_rate: f32,
 ) {
+    let mut scratch = RmsMixScratch::default();
+    apply_rms_mix_with_scratch(
+        input_reference,
+        output,
+        sample_rate,
+        rms_mix_rate,
+        &mut scratch,
+    );
+}
+
+pub fn apply_rms_mix_with_scratch(
+    input_reference: &[f32],
+    output: &mut [f32],
+    sample_rate: usize,
+    rms_mix_rate: f32,
+    scratch: &mut RmsMixScratch,
+) {
     if input_reference.is_empty() || output.is_empty() {
         return;
     }
@@ -126,19 +155,21 @@ pub fn apply_rms_mix(
         return;
     }
 
-    let input_rms = linear_resample_envelope(
-        &compute_rms_envelope(input_reference, sample_rate),
-        output.len(),
-    );
-    let output_rms =
-        linear_resample_envelope(&compute_rms_envelope(output, sample_rate), output.len());
+    // Keep only the frame-rate RMS envelopes in reusable scratch. Expanding
+    // them to per-sample Vecs here used to allocate two output-length buffers
+    // on every model chunk.
+    compute_rms_envelope_into(input_reference, sample_rate, &mut scratch.input_rms);
+    compute_rms_envelope_into(output, sample_rate, &mut scratch.output_rms);
     let exponent = 1.0 - rms_mix_rate;
+    let output_len = output.len();
 
-    for ((sample, &in_rms), &out_rms) in output.iter_mut().zip(&input_rms).zip(&output_rms) {
+    for (index, sample) in output.iter_mut().enumerate() {
         if !sample.is_finite() {
             *sample = 0.0;
             continue;
         }
+        let in_rms = linear_resample_envelope_at(&scratch.input_rms, index, output_len);
+        let out_rms = linear_resample_envelope_at(&scratch.output_rms, index, output_len);
         let out_rms = finite_nonnegative(out_rms).max(1e-3);
         let ratio = finite_nonnegative(in_rms) / out_rms;
         let gain = ratio.powf(exponent);
@@ -177,6 +208,7 @@ pub struct StreamingResampleMono {
     to_hz: usize,
     resampler: Option<Fft<f32>>,
     pending_input: Vec<f32>,
+    pending_input_start: usize,
     output_scratch: Vec<f32>,
     discard_output: usize,
 }
@@ -204,6 +236,7 @@ impl StreamingResampleMono {
             to_hz,
             resampler,
             pending_input: Vec::new(),
+            pending_input_start: 0,
             output_scratch: Vec::new(),
             discard_output,
         })
@@ -230,14 +263,19 @@ impl StreamingResampleMono {
             .ok_or_else(|| anyhow!("streaming resampler is not initialized"))?;
         self.pending_input.extend_from_slice(input);
         output.reserve(
-            (self.pending_input.len() as f64 * resampler.resample_ratio()).ceil() as usize,
+            (self.pending_input[self.pending_input_start..].len() as f64
+                * resampler.resample_ratio())
+            .ceil() as usize,
         );
 
-        while self.pending_input.len() >= resampler.input_frames_next() {
+        while self.pending_input[self.pending_input_start..].len() >= resampler.input_frames_next()
+        {
             let input_frames = resampler.input_frames_next();
             let output_frames = resampler.output_frames_next();
+            let input_start = self.pending_input_start;
+            let input_end = input_start + input_frames;
             let input_adapter =
-                SequentialSlice::new(&self.pending_input[..input_frames], 1, input_frames)?;
+                SequentialSlice::new(&self.pending_input[input_start..input_end], 1, input_frames)?;
             self.output_scratch.resize(output_frames, 0.0);
             let mut output_adapter = SequentialSlice::new_mut(
                 &mut self.output_scratch[..output_frames],
@@ -246,14 +284,38 @@ impl StreamingResampleMono {
             )?;
             let (used_in, produced_out) =
                 resampler.process_into_buffer(&input_adapter, &mut output_adapter, None)?;
-            self.pending_input.drain(..used_in);
+            if used_in == 0 {
+                break;
+            }
+            self.pending_input_start += used_in;
 
             let skip = self.discard_output.min(produced_out);
             self.discard_output -= skip;
             output.extend_from_slice(&self.output_scratch[skip..produced_out]);
         }
 
+        self.compact_pending_input();
         Ok(())
+    }
+
+    fn compact_pending_input(&mut self) {
+        if self.pending_input_start == 0 {
+            return;
+        }
+        if self.pending_input_start >= self.pending_input.len() {
+            self.pending_input.clear();
+            self.pending_input_start = 0;
+            return;
+        }
+        // The resampler consumes fixed-size chunks. Keep a logical head so the
+        // common path does not memmove the pending buffer after every chunk;
+        // compact only when the skipped prefix has grown large enough to matter.
+        if self.pending_input_start >= STREAM_RESAMPLE_COMPACT_THRESHOLD
+            && self.pending_input_start * 2 >= self.pending_input.len()
+        {
+            self.pending_input.drain(..self.pending_input_start);
+            self.pending_input_start = 0;
+        }
     }
 }
 
@@ -320,6 +382,25 @@ fn finite_nonnegative(value: f32) -> f32 {
     } else {
         0.0
     }
+}
+
+fn linear_resample_envelope_at(points: &[f32], index: usize, output_len: usize) -> f32 {
+    if output_len == 0 || points.is_empty() {
+        return 0.0;
+    }
+    if points.len() == 1 || output_len == 1 {
+        return finite_nonnegative(points[0]);
+    }
+
+    let last_point = points.len() - 1;
+    let last_output = output_len - 1;
+    let position = index as f32 * last_point as f32 / last_output as f32;
+    let left = position.floor() as usize;
+    let right = (left + 1).min(last_point);
+    let frac = position - left as f32;
+    let left_value = finite_nonnegative(points[left]);
+    let right_value = finite_nonnegative(points[right]);
+    left_value + (right_value - left_value) * frac
 }
 
 #[cfg(test)]

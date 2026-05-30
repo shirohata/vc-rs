@@ -3,8 +3,8 @@ use anyhow::{anyhow, Result};
 use crate::dsp;
 
 use super::shape::{
-    feature_len_for_samples, keep_tail_in_place, samples_between_rates, tail_or_left_pad,
-    tensor_rt_convert_size_16k, Rounding, EMBEDDER_SAMPLE_RATE, RVC_SAMPLE_RATE,
+    feature_len_for_samples, keep_tail_in_place, samples_between_rates, tensor_rt_convert_size_16k,
+    Rounding, EMBEDDER_SAMPLE_RATE, RVC_SAMPLE_RATE,
 };
 
 pub(super) const VOLUME_DECAY: f32 = 0.97;
@@ -19,18 +19,20 @@ pub(super) struct RvcStreamInput {
 }
 
 impl RvcStreamState {
-    pub(super) fn output_reference_audio(
-        &self,
+    pub(super) fn output_reference_audio<'a>(
+        &'a self,
         input_sample_rate: u32,
         output_sample_rate: u32,
         output_samples: usize,
-    ) -> Result<Vec<f32>> {
+        scratch: &'a mut Vec<f32>,
+    ) -> Result<&'a [f32]> {
+        scratch.clear();
         if self.audio_buffer.is_empty()
             || output_samples == 0
             || input_sample_rate == 0
             || output_sample_rate == 0
         {
-            return Ok(Vec::new());
+            return Ok(scratch.as_slice());
         }
 
         let input_samples = samples_between_rates(
@@ -42,18 +44,36 @@ impl RvcStreamState {
         .max(1);
         let start = self.audio_buffer.len().saturating_sub(input_samples);
         let input_tail = &self.audio_buffer[start..];
-        let reference = if input_sample_rate == output_sample_rate {
-            input_tail.to_vec()
+        if input_sample_rate == output_sample_rate && input_tail.len() >= output_samples {
+            return Ok(&input_tail[input_tail.len() - output_samples..]);
+        }
+
+        if input_sample_rate == output_sample_rate {
+            scratch.extend_from_slice(input_tail);
         } else {
-            dsp::resample_mono(
+            let reference = dsp::resample_mono(
                 input_tail,
                 input_sample_rate as usize,
                 output_sample_rate as usize,
-            )?
-        };
+            )?;
+            scratch.extend_from_slice(&reference);
+        }
+        keep_tail_in_place(scratch, output_samples);
+        left_pad_to_len_in_place(scratch, output_samples);
 
-        Ok(tail_or_left_pad(reference, output_samples))
+        Ok(scratch.as_slice())
     }
+}
+
+fn left_pad_to_len_in_place(values: &mut Vec<f32>, len: usize) {
+    if values.len() >= len {
+        return;
+    }
+    let old_len = values.len();
+    let pad = len - old_len;
+    values.resize(len, 0.0);
+    values.copy_within(0..old_len, pad);
+    values[..pad].fill(0.0);
 }
 
 pub(super) struct RvcStreamState {

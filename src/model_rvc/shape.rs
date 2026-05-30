@@ -48,17 +48,6 @@ pub(super) fn keep_tail_in_place<T>(values: &mut Vec<T>, len: usize) {
     }
 }
 
-pub(super) fn tail_or_left_pad(mut values: Vec<f32>, len: usize) -> Vec<f32> {
-    keep_tail_in_place(&mut values, len);
-    if values.len() < len {
-        let mut padded = vec![0.0; len - values.len()];
-        padded.extend(values);
-        padded
-    } else {
-        values
-    }
-}
-
 #[cfg(test)]
 pub(super) fn aligned_rvc_input_len(
     chunk_len: usize,

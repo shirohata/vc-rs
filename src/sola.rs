@@ -41,6 +41,7 @@ pub(crate) struct SolaChunkJoiner {
     sola_search_samples: usize,
     tail_discard_samples: usize,
     sola_buffer: Vec<f32>,
+    weighted_reference: Vec<f32>,
 }
 
 impl SolaChunkJoiner {
@@ -56,6 +57,7 @@ impl SolaChunkJoiner {
             sola_search_samples,
             tail_discard_samples,
             sola_buffer: Vec::new(),
+            weighted_reference: Vec::new(),
         }
     }
 
@@ -65,7 +67,9 @@ impl SolaChunkJoiner {
             self.sola_buffer.clear();
             return;
         }
-        self.sola_buffer = tail_slice(audio, self.crossfade_samples).to_vec();
+        self.sola_buffer.clear();
+        self.sola_buffer
+            .extend_from_slice(tail_slice(audio, self.crossfade_samples));
     }
 
     fn process(&mut self, audio: &[f32]) -> SmoothedAudio {
@@ -122,9 +126,10 @@ impl SolaChunkJoiner {
             .min(audio.len().saturating_sub(target_len));
         let candidate_len = (crossfade_len + max_offset).min(audio.len());
         let reference = &self.sola_buffer[self.sola_buffer.len() - crossfade_len..];
-        let weighted_reference = vcclient_prev_strength(reference);
+        vcclient_prev_strength_into(reference, &mut self.weighted_reference);
+        let weighted_reference = self.weighted_reference.as_slice();
         let sola_offset = if max_offset > 0 {
-            select_offset(&audio[..candidate_len], &weighted_reference, max_offset).min(max_offset)
+            select_offset(&audio[..candidate_len], weighted_reference, max_offset).min(max_offset)
         } else {
             0
         };
@@ -181,13 +186,15 @@ impl SolaChunkJoiner {
         } else {
             tail_slice(audio, self.crossfade_samples)
         };
-        self.sola_buffer = candidate.to_vec();
+        self.sola_buffer.clear();
+        self.sola_buffer.extend_from_slice(candidate);
     }
 }
 
 pub(crate) struct PsolaChunkJoiner {
     inner: SolaChunkJoiner,
     sample_rate: u32,
+    pitch_mark_weights: Vec<f32>,
 }
 
 impl PsolaChunkJoiner {
@@ -206,6 +213,7 @@ impl PsolaChunkJoiner {
                 tail_discard_samples,
             ),
             sample_rate,
+            pitch_mark_weights: Vec::new(),
         }
     }
 
@@ -222,18 +230,25 @@ impl PsolaChunkJoiner {
         // PSOLA is deliberately kept in the worker-side model domain. Moving
         // this into the audio callback would add allocation and O(search*fade)
         // work to the real-time path.
+        let pitch_mark_weights = &mut self.pitch_mark_weights;
         self.inner.process_with_offset_selector(
             audio,
             |candidate, weighted_reference, max_offset| {
-                psola_offset_with_period(candidate, weighted_reference, max_offset, period_samples)
-                    .unwrap_or_else(|| {
-                        dsp::sola_offset_with_threshold(
-                            candidate,
-                            weighted_reference,
-                            max_offset,
-                            PSOLA_MIN_RMS,
-                        )
-                    })
+                psola_offset_with_period_with_scratch(
+                    candidate,
+                    weighted_reference,
+                    max_offset,
+                    period_samples,
+                    pitch_mark_weights,
+                )
+                .unwrap_or_else(|| {
+                    dsp::sola_offset_with_threshold(
+                        candidate,
+                        weighted_reference,
+                        max_offset,
+                        PSOLA_MIN_RMS,
+                    )
+                })
             },
         )
     }
@@ -314,27 +329,29 @@ fn stable_pitch_period_samples(pitchf: &[f32], sample_rate: u32) -> Option<usize
         return None;
     }
 
-    let voiced: Vec<f32> = pitchf
+    let (voiced_count, voiced_sum) = pitchf
         .iter()
         .copied()
         .filter(|f0| f0.is_finite() && (PSOLA_MIN_F0_HZ..=PSOLA_MAX_F0_HZ).contains(f0))
-        .collect();
-    if voiced.len() * 2 < pitchf.len() || voiced.is_empty() {
+        .fold((0usize, 0.0f32), |(count, sum), f0| (count + 1, sum + f0));
+    if voiced_count * 2 < pitchf.len() || voiced_count == 0 {
         return None;
     }
 
-    let mean = voiced.iter().sum::<f32>() / voiced.len() as f32;
+    let mean = voiced_sum / voiced_count as f32;
     if mean <= 0.0 {
         return None;
     }
-    let variance = voiced
+    let variance = pitchf
         .iter()
+        .copied()
+        .filter(|f0| f0.is_finite() && (PSOLA_MIN_F0_HZ..=PSOLA_MAX_F0_HZ).contains(f0))
         .map(|f0| {
-            let delta = *f0 - mean;
+            let delta = f0 - mean;
             delta * delta
         })
         .sum::<f32>()
-        / voiced.len() as f32;
+        / voiced_count as f32;
     if variance.sqrt() / mean > PSOLA_MAX_RELATIVE_F0_STDDEV {
         return None;
     }
@@ -343,11 +360,23 @@ fn stable_pitch_period_samples(pitchf: &[f32], sample_rate: u32) -> Option<usize
     (period >= 2).then_some(period)
 }
 
+#[cfg(test)]
 fn psola_offset_with_period(
     candidate: &[f32],
     reference: &[f32],
     search: usize,
     period: usize,
+) -> Option<usize> {
+    let mut weights = Vec::new();
+    psola_offset_with_period_with_scratch(candidate, reference, search, period, &mut weights)
+}
+
+fn psola_offset_with_period_with_scratch(
+    candidate: &[f32],
+    reference: &[f32],
+    search: usize,
+    period: usize,
+    weights: &mut Vec<f32>,
 ) -> Option<usize> {
     let frame = reference.len().min(candidate.len());
     if frame == 0 || period < 2 {
@@ -362,12 +391,12 @@ fn psola_offset_with_period(
         return None;
     }
 
-    let weights = psola_pitch_mark_weights(&reference[..frame], period)?;
+    psola_pitch_mark_weights_into(&reference[..frame], period, weights)?;
     let mut best_offset = 0;
     let mut best_score = f32::MIN;
     for offset in 0..=max_offset {
         let window = &candidate[offset..offset + frame];
-        let pitch_score = weighted_correlation(window, &reference[..frame], &weights);
+        let pitch_score = weighted_correlation(window, &reference[..frame], weights);
         let full_score = normalized_correlation(window, &reference[..frame]);
         let score = pitch_score * 0.8 + full_score * 0.2;
         if score.is_finite() && score > best_score {
@@ -379,7 +408,12 @@ fn psola_offset_with_period(
     (best_score >= PSOLA_MIN_SCORE).then_some(best_offset)
 }
 
-fn psola_pitch_mark_weights(reference: &[f32], period: usize) -> Option<Vec<f32>> {
+fn psola_pitch_mark_weights_into(
+    reference: &[f32],
+    period: usize,
+    weights: &mut Vec<f32>,
+) -> Option<()> {
+    weights.clear();
     let (center, peak) = reference
         .iter()
         .enumerate()
@@ -390,10 +424,10 @@ fn psola_pitch_mark_weights(reference: &[f32], period: usize) -> Option<Vec<f32>
     }
 
     let radius = (period / 6).max(1);
-    let mut weights = vec![0.0; reference.len()];
+    weights.resize(reference.len(), 0.0);
     let mut mark = center;
     loop {
-        add_pitch_mark_weight(&mut weights, mark, radius);
+        add_pitch_mark_weight(weights, mark, radius);
         if mark < period {
             break;
         }
@@ -401,11 +435,11 @@ fn psola_pitch_mark_weights(reference: &[f32], period: usize) -> Option<Vec<f32>
     }
     mark = center + period;
     while mark < reference.len() {
-        add_pitch_mark_weight(&mut weights, mark, radius);
+        add_pitch_mark_weight(weights, mark, radius);
         mark += period;
     }
 
-    Some(weights)
+    Some(())
 }
 
 fn add_pitch_mark_weight(weights: &mut [f32], mark: usize, radius: usize) {
@@ -444,13 +478,16 @@ fn weighted_correlation(a: &[f32], b: &[f32], weights: &[f32]) -> f32 {
     nom / (a_energy * b_energy + 1e-9).sqrt()
 }
 
-fn vcclient_prev_strength(input: &[f32]) -> Vec<f32> {
+fn vcclient_prev_strength_into(input: &[f32], output: &mut Vec<f32>) {
     let n = input.len();
-    input
-        .iter()
-        .enumerate()
-        .map(|(i, &sample)| sample * vcclient_crossfade_gains(i, n).0)
-        .collect()
+    output.clear();
+    output.reserve(n);
+    output.extend(
+        input
+            .iter()
+            .enumerate()
+            .map(|(i, &sample)| sample * vcclient_crossfade_gains(i, n).0),
+    );
 }
 
 fn vcclient_crossfade(prev_tail: &[f32], current: &mut [f32]) {

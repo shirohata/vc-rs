@@ -11,8 +11,8 @@ use crate::dsp;
 use super::api::{ModelOutput, VoiceModel};
 use super::inspect::{inspect_contentvec_input_name, inspect_rvc_model};
 use super::pitch::{
-    align_pitchf_to_features, center_crop_pitchf_to_features, coarse_pitch, pitchf_tail_for_output,
-    voiced_ratio,
+    align_pitchf_to_features_into, center_crop_pitchf_to_features_into, coarse_pitch_into,
+    pitchf_tail_for_output, voiced_ratio,
 };
 use super::sessions::{HubertEmbedderSession, RmvpePitchSession, RvcModelSession};
 use super::shape::{
@@ -46,6 +46,11 @@ pub struct RvcPipeline {
     target_output_rms: f32,
     max_output_gain: f32,
     stream_state: RvcStreamState,
+    input_reference_scratch: Vec<f32>,
+    rms_mix_scratch: dsp::RmsMixScratch,
+    pitchf_untrimmed_scratch: Vec<f32>,
+    pitchf_scratch: Vec<f32>,
+    pitch_scratch: Vec<i64>,
 }
 
 pub struct RvcPipelineConfig<'a> {
@@ -124,6 +129,11 @@ impl RvcPipeline {
             target_output_rms: config.target_output_rms,
             max_output_gain: config.max_output_gain,
             stream_state: RvcStreamState::new(),
+            input_reference_scratch: Vec::new(),
+            rms_mix_scratch: dsp::RmsMixScratch::default(),
+            pitchf_untrimmed_scratch: Vec::new(),
+            pitchf_scratch: Vec::new(),
+            pitch_scratch: Vec::new(),
         })
     }
 
@@ -351,6 +361,11 @@ impl RvcPipeline {
             target_output_rms: config.target_output_rms,
             max_output_gain: config.max_output_gain,
             stream_state: RvcStreamState::new(),
+            input_reference_scratch: Vec::new(),
+            rms_mix_scratch: dsp::RmsMixScratch::default(),
+            pitchf_untrimmed_scratch: Vec::new(),
+            pitchf_scratch: Vec::new(),
+            pitch_scratch: Vec::new(),
         })
     }
 }
@@ -439,11 +454,17 @@ impl VoiceModel for RvcPipeline {
         // not expose the same frame count for the same waveform. First center
         // crop to the untrimmed ContentVec grid so a 183->180 case uses
         // pitchf[1..181], then apply the existing tail crop for silence_front.
-        let pitchf_untrimmed = center_crop_pitchf_to_features(
+        center_crop_pitchf_to_features_into(
             &self.stream_state.pitchf_buffer,
             feature_len_before_trim,
+            &mut self.pitchf_untrimmed_scratch,
         );
-        let pitchf = align_pitchf_to_features(&pitchf_untrimmed, feature_len);
+        align_pitchf_to_features_into(
+            &self.pitchf_untrimmed_scratch,
+            feature_len,
+            &mut self.pitchf_scratch,
+        );
+        let pitchf = self.pitchf_scratch.as_slice();
         debug!(
             "pitch update: audio_16k_samples={}, pitchf_raw_len={}, pitchf_buffer_len={}, feature_len={}",
             self.stream_state.audio_16k_buffer.len(),
@@ -451,8 +472,9 @@ impl VoiceModel for RvcPipeline {
             self.stream_state.pitchf_buffer.len(),
             feature_len,
         );
-        let voiced_ratio = voiced_ratio(&pitchf);
-        let pitch = coarse_pitch(&pitchf);
+        let voiced_ratio = voiced_ratio(pitchf);
+        coarse_pitch_into(pitchf, &mut self.pitch_scratch);
+        let pitch = self.pitch_scratch.as_slice();
 
         if SKIP_SILENT_CHUNKS && output_silent {
             // If previous chunk was also silent, keep returning silence without running the model to reduce CPU usage and avoid latency spikes from the embedder when silence ends.
@@ -485,14 +507,14 @@ impl VoiceModel for RvcPipeline {
             &features.data,
             &features.shape,
             feature_len,
-            &pitch,
-            &pitchf,
+            pitch,
+            pitchf,
             self.speaker_id,
         )?;
         let rvc_time = rvc_start.elapsed();
         let raw_output_samples = converted.len();
         keep_tail_in_place(&mut converted, stream_input.out_size);
-        let output_pitchf = pitchf_tail_for_output(&pitchf, converted.len(), RVC_SAMPLE_RATE);
+        let output_pitchf = pitchf_tail_for_output(pitchf, converted.len(), RVC_SAMPLE_RATE);
         converted.iter_mut().for_each(|x| *x = x.clamp(-1.0, 1.0));
         if self.volume_envelope {
             let envelope = stream_input.volume.sqrt().clamp(0.0, 1.0);
@@ -510,17 +532,19 @@ impl VoiceModel for RvcPipeline {
                 sample_rate,
                 RVC_SAMPLE_RATE,
                 converted.len(),
+                &mut self.input_reference_scratch,
             )?;
-            dsp::apply_rms_mix(
-                &input_reference,
+            dsp::apply_rms_mix_with_scratch(
+                input_reference,
                 &mut converted,
                 RVC_SAMPLE_RATE as usize,
                 self.rms_mix_rate,
+                &mut self.rms_mix_scratch,
             );
             debug!(
                 "rms_mix_rate={:.3} input_ref_rms={:.8} output_rms_before_mix={:.8} output_rms_after_mix={:.8}",
                 self.rms_mix_rate,
-                dsp::rms(&input_reference),
+                dsp::rms(input_reference),
                 output_rms_before_mix,
                 dsp::rms(&converted)
             );

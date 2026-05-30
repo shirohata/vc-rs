@@ -291,24 +291,26 @@ fn keeps_only_requested_output_tail() {
 fn output_reference_audio_uses_tail_matching_trimmed_output() {
     let mut state = RvcStreamState::new();
     state.audio_buffer = (0..8).map(|value| value as f32).collect();
+    let mut scratch = Vec::new();
 
     let reference = state
-        .output_reference_audio(RVC_SAMPLE_RATE, RVC_SAMPLE_RATE, 5)
+        .output_reference_audio(RVC_SAMPLE_RATE, RVC_SAMPLE_RATE, 5, &mut scratch)
         .unwrap();
 
-    assert_eq!(reference, vec![3.0, 4.0, 5.0, 6.0, 7.0]);
+    assert_eq!(reference, &[3.0, 4.0, 5.0, 6.0, 7.0]);
 }
 
 #[test]
 fn output_reference_audio_left_pads_when_history_is_short() {
     let mut state = RvcStreamState::new();
     state.audio_buffer = vec![1.0, 2.0];
+    let mut scratch = Vec::new();
 
     let reference = state
-        .output_reference_audio(RVC_SAMPLE_RATE, RVC_SAMPLE_RATE, 4)
+        .output_reference_audio(RVC_SAMPLE_RATE, RVC_SAMPLE_RATE, 4, &mut scratch)
         .unwrap();
 
-    assert_eq!(reference, vec![0.0, 0.0, 1.0, 2.0]);
+    assert_eq!(reference, &[0.0, 0.0, 1.0, 2.0]);
 }
 
 #[test]
