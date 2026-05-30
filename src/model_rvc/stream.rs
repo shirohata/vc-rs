@@ -2,7 +2,6 @@ use anyhow::{anyhow, Result};
 
 use crate::dsp;
 
-use super::feature::FeatureTensor;
 use super::shape::{
     feature_len_for_samples, keep_tail_in_place, samples_between_rates, tail_or_left_pad,
     tensor_rt_convert_size_16k, Rounding, EMBEDDER_SAMPLE_RATE, RVC_SAMPLE_RATE,
@@ -61,8 +60,6 @@ pub(super) struct RvcStreamState {
     pub(super) audio_buffer: Vec<f32>,
     pub(super) audio_16k_buffer: Vec<f32>,
     pub(super) pitchf_buffer: Vec<f32>,
-    pub(super) feature_buffer: Vec<f32>,
-    pub(super) feature_channels: usize,
     pub(super) prev_vol: f32,
     pub(super) prev_silence: bool,
     pub(super) sample_rate: u32,
@@ -70,13 +67,11 @@ pub(super) struct RvcStreamState {
 }
 
 impl RvcStreamState {
-    pub(super) fn new(feature_channels: i64) -> Self {
+    pub(super) fn new() -> Self {
         Self {
             audio_buffer: Vec::new(),
             audio_16k_buffer: Vec::new(),
             pitchf_buffer: Vec::new(),
-            feature_buffer: Vec::new(),
-            feature_channels: feature_channels.max(0) as usize,
             prev_vol: 0.0,
             prev_silence: false,
             sample_rate: 0,
@@ -96,7 +91,6 @@ impl RvcStreamState {
             self.audio_buffer.clear();
             self.audio_16k_buffer.clear();
             self.pitchf_buffer.clear();
-            self.feature_buffer.clear();
             self.prev_vol = 0.0;
             self.prev_silence = false;
             self.sample_rate = sample_rate;
@@ -114,18 +108,12 @@ impl RvcStreamState {
         );
         let new_feature_len = feature_len_for_samples(new_audio_16k_samples, EMBEDDER_SAMPLE_RATE);
         self.audio_buffer.extend_from_slice(new_audio);
-        let new_audio_16k = self
-            .resampler_16k
+        self.resampler_16k
             .as_mut()
             .ok_or_else(|| anyhow!("16kHz stream resampler is not initialized"))?
-            .process(new_audio)?;
-        self.audio_16k_buffer.extend_from_slice(&new_audio_16k);
+            .process_into(new_audio, &mut self.audio_16k_buffer)?;
         self.pitchf_buffer
             .extend(std::iter::repeat_n(0.0, new_feature_len));
-        self.feature_buffer.extend(std::iter::repeat_n(
-            0.0,
-            new_feature_len * self.feature_channels,
-        ));
 
         let extra_16k_samples = samples_between_rates(
             extra_convert_samples,
@@ -181,17 +169,10 @@ impl RvcStreamState {
             padded.extend_from_slice(&self.pitchf_buffer);
             self.pitchf_buffer = padded;
         }
-        let feature_sample_size = feature_size * self.feature_channels;
-        if self.feature_buffer.len() < feature_sample_size {
-            let mut padded = vec![0.0; feature_sample_size - self.feature_buffer.len()];
-            padded.extend_from_slice(&self.feature_buffer);
-            self.feature_buffer = padded;
-        }
 
         keep_tail_in_place(&mut self.audio_buffer, convert_size);
         keep_tail_in_place(&mut self.audio_16k_buffer, convert_size_16k);
         keep_tail_in_place(&mut self.pitchf_buffer, feature_size);
-        keep_tail_in_place(&mut self.feature_buffer, feature_sample_size);
 
         let crop_len = new_audio.len() + volume_excluded_input_samples;
         let crop_end = volume_excluded_input_samples;
@@ -225,17 +206,5 @@ impl RvcStreamState {
         // tail of f0 instead shifts the pitch contour later in time.
         let dst_start = self.pitchf_buffer.len() - n;
         self.pitchf_buffer[dst_start..].copy_from_slice(&f0[..n]);
-    }
-
-    pub(super) fn update_feature_buffer(&mut self, features: &FeatureTensor, feature_len: usize) {
-        if self.feature_channels == 0 || features.data.is_empty() {
-            return;
-        }
-        let frames = feature_len.min(features.data.len() / self.feature_channels);
-        let samples = frames * self.feature_channels;
-        if samples == 0 {
-            return;
-        }
-        self.feature_buffer = features.data[features.data.len() - samples..].to_vec();
     }
 }

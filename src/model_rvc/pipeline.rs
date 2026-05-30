@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -122,7 +123,7 @@ impl RvcPipeline {
             auto_output_gain: config.auto_output_gain,
             target_output_rms: config.target_output_rms,
             max_output_gain: config.max_output_gain,
-            stream_state: RvcStreamState::new(expected_feat_channels),
+            stream_state: RvcStreamState::new(),
         })
     }
 
@@ -349,7 +350,7 @@ impl RvcPipeline {
             auto_output_gain: config.auto_output_gain,
             target_output_rms: config.target_output_rms,
             max_output_gain: config.max_output_gain,
-            stream_state: RvcStreamState::new(expected_feat_channels),
+            stream_state: RvcStreamState::new(),
         })
     }
 }
@@ -358,19 +359,22 @@ impl VoiceModel for RvcPipeline {
     fn process(&mut self, audio: &[f32], sample_rate: u32) -> Result<ModelOutput> {
         let total_start = Instant::now();
         let input_gain = self.input_gain.max(0.0);
-        let audio = if (input_gain - 1.0).abs() > f32::EPSILON {
-            audio
-                .iter()
-                .map(|sample| (*sample * input_gain).clamp(-1.0, 1.0))
-                .collect::<Vec<_>>()
+        let input_audio: Cow<'_, [f32]> = if (input_gain - 1.0).abs() > f32::EPSILON {
+            Cow::Owned(
+                audio
+                    .iter()
+                    .map(|sample| (*sample * input_gain).clamp(-1.0, 1.0))
+                    .collect::<Vec<_>>(),
+            )
         } else {
-            audio.to_vec()
+            Cow::Borrowed(audio)
         };
-        let input_rms = dsp::rms(&audio);
+        let input_audio = input_audio.as_ref();
+        let input_rms = dsp::rms(input_audio);
         let output_extra_len = ms_to_samples(RVC_SAMPLE_RATE, self.output_extra_ms);
         let volume_excluded_len = ms_to_samples(RVC_SAMPLE_RATE, self.volume_excluded_ms);
         let stream_input = self.stream_state.generate_input(
-            &audio,
+            input_audio,
             sample_rate,
             output_extra_len,
             volume_excluded_len,
@@ -384,32 +388,42 @@ impl VoiceModel for RvcPipeline {
         // Features
         let embedder_start = Instant::now();
         let mut features = self.embedder.extract(&self.stream_state.audio_16k_buffer)?;
-        features.repeat_frames(2)?;
-        let embedder_time = embedder_start.elapsed();
-        let feature_len = features
+        let raw_feature_len = features
             .shape
             .get(1)
             .copied()
             .context("embedder output must be rank-3 [1, frames, channels]")?;
-        if feature_len <= 0 {
+        if raw_feature_len <= 0 {
             bail!("embedder produced zero frames");
         }
-        let feature_len_before_trim =
-            usize::try_from(feature_len).context("embedder frame length does not fit in usize")?;
+        let raw_feature_len = usize::try_from(raw_feature_len)
+            .context("embedder frame length does not fit in usize")?;
+        let feature_len_before_trim = raw_feature_len
+            .checked_mul(2)
+            .context("repeated embedder frame length overflowed")?;
 
         let silence_front_frames = onnx_silence_front_feature_frames(self.extra_convert_samples);
         if silence_front_frames > 0 && silence_front_frames < feature_len_before_trim {
-            features.trim_front_frames(silence_front_frames)?;
+            if silence_front_frames.is_multiple_of(2) {
+                // `silence_front_frames` is on RVC's repeated 10 ms grid. Drop
+                // the equivalent ContentVec frames before repeat so discarded
+                // context is not duplicated and shifted every chunk.
+                features.trim_front_frames(silence_front_frames / 2)?;
+                features.repeat_frames(2)?;
+            } else {
+                features.repeat_frames(2)?;
+                features.trim_front_frames(silence_front_frames)?;
+            }
+        } else {
+            features.repeat_frames(2)?;
         }
+        let embedder_time = embedder_start.elapsed();
         let feature_len = features
             .shape
             .get(1)
             .copied()
             .and_then(|len| usize::try_from(len).ok())
             .context("trimmed embedder frame length does not fit in usize")?;
-        self.stream_state
-            .update_feature_buffer(&features, feature_len);
-
         // Pitch
         let pitch_start = Instant::now();
         let pitchf_raw = self.pitch.extract(

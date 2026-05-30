@@ -176,9 +176,19 @@ pub fn run_realtime(args: RunArgs) -> Result<()> {
         let mut input_acc = Vec::<f32>::with_capacity(chunk_samples * 2);
         while worker_running.load(Ordering::SeqCst) {
             while input_acc.len() < chunk_samples {
-                match input_consumer.pop() {
-                    Ok(sample) => input_acc.push(sample),
-                    Err(_) => break,
+                let needed = chunk_samples - input_acc.len();
+                let available = input_consumer.slots().min(needed);
+                if available == 0 {
+                    break;
+                }
+                let old_len = input_acc.len();
+                input_acc.resize(old_len + available, 0.0);
+                if input_consumer
+                    .pop_entire_slice(&mut input_acc[old_len..])
+                    .is_err()
+                {
+                    input_acc.truncate(old_len);
+                    break;
                 }
             }
             if input_acc.len() < chunk_samples {
@@ -186,14 +196,20 @@ pub fn run_realtime(args: RunArgs) -> Result<()> {
                 continue;
             }
 
-            let chunk: Vec<f32> = input_acc.drain(..chunk_samples).collect();
+            let chunk = &input_acc[..chunk_samples];
             if capture_debug_input {
                 if let Ok(mut debug) = worker_debug_input_samples.lock() {
-                    debug.extend_from_slice(&chunk);
+                    debug.extend_from_slice(chunk);
                 }
             }
 
-            match model.process(&chunk, sample_rate) {
+            // `input_acc` is the worker-owned chunk scratch. Keep the model input
+            // borrowed from it so the realtime-adjacent worker does not allocate
+            // and copy a fresh Vec for every chunk.
+            let processed = model.process(chunk, sample_rate);
+            input_acc.clear();
+
+            match processed {
                 Ok(out) => {
                     if out.inference_time.as_millis() > 150 {
                         debug!("model inference took {} ms (embedder: {} ms, pitch: {} ms, rvc: {} ms)", out.inference_time.as_millis(), out.embedder_time.as_millis(), out.pitch_time.as_millis(), out.rvc_time.as_millis());
@@ -305,16 +321,20 @@ pub fn run_realtime(args: RunArgs) -> Result<()> {
                             }
                         }
                     } else {
-                        match dsp::resample_mono(
-                            &out.audio,
-                            output_sample_rate as usize,
-                            sample_rate as usize,
-                        ) {
-                            Ok(audio) => audio,
-                            Err(err) => {
-                                error!("output resampling failed: {err:#}");
-                                worker_running.store(false, Ordering::SeqCst);
-                                break;
+                        if output_sample_rate == sample_rate {
+                            out.audio
+                        } else {
+                            match dsp::resample_mono(
+                                &out.audio,
+                                output_sample_rate as usize,
+                                sample_rate as usize,
+                            ) {
+                                Ok(audio) => audio,
+                                Err(err) => {
+                                    error!("output resampling failed: {err:#}");
+                                    worker_running.store(false, Ordering::SeqCst);
+                                    break;
+                                }
                             }
                         }
                     };
@@ -332,14 +352,11 @@ pub fn run_realtime(args: RunArgs) -> Result<()> {
                     {
                         debug!("model output is silent, pushing silence to output buffer to reduce latency");
                     } else {
-                        for sample in audio {
-                            if output_producer.push(sample).is_err() {
-                                // rtrb is SPSC and only the consumer can pop, so on full buffer
-                                // we discard the new sample (latest) instead of forcibly evicting
-                                // the oldest sample as the previous VecDeque implementation did.
-                                dropped += 1;
-                            }
-                        }
+                        let (_, remainder) = output_producer.push_partial_slice(&audio);
+                        // rtrb is SPSC and only the consumer can pop, so on full buffer
+                        // we discard the new sample tail instead of forcibly evicting
+                        // older queued audio as the previous VecDeque implementation did.
+                        dropped = remainder.len() as u64;
                     }
                     if dropped > 0 {
                         worker_metrics
@@ -365,12 +382,8 @@ pub fn run_realtime(args: RunArgs) -> Result<()> {
         if !input_running.load(Ordering::Relaxed) {
             return;
         }
-        let mut dropped = 0u64;
-        for sample in samples {
-            if input_producer.push(*sample).is_err() {
-                dropped += 1;
-            }
-        }
+        let (_, remainder) = input_producer.push_partial_slice(samples);
+        let dropped = remainder.len() as u64;
         if dropped > 0 {
             input_metrics.input_overruns.fetch_add(1, Ordering::Relaxed);
             input_metrics
@@ -386,21 +399,15 @@ pub fn run_realtime(args: RunArgs) -> Result<()> {
             out.fill(0.0);
             return;
         }
-        let mut underrun = false;
-        let mut underrun_samples = 0u64;
-        for sample in out {
-            if let Ok(next) = output_consumer.pop() {
-                *sample = next;
-            } else {
-                *sample = 0.0;
-                underrun = true;
-                underrun_samples += 1;
-            }
+        let (_, remainder) = output_consumer.pop_partial_slice(out);
+        let underrun_samples = remainder.len() as u64;
+        if underrun_samples > 0 {
+            remainder.fill(0.0);
         }
         output_metrics
             .output_buffer_samples
             .store(output_consumer.cached_slots() as u64, Ordering::Relaxed);
-        if underrun {
+        if underrun_samples > 0 {
             output_metrics
                 .output_underruns
                 .fetch_add(1, Ordering::Relaxed);

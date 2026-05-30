@@ -535,6 +535,18 @@ fn resample_to_output_domain(
     dsp::resample_mono(audio, from_sample_rate as usize, to_sample_rate as usize)
 }
 
+fn resample_owned_to_output_domain(
+    audio: Vec<f32>,
+    from_sample_rate: u32,
+    to_sample_rate: u32,
+) -> Result<Vec<f32>> {
+    if from_sample_rate == to_sample_rate {
+        Ok(audio)
+    } else {
+        resample_to_output_domain(&audio, from_sample_rate, to_sample_rate)
+    }
+}
+
 fn fit_to_len_in_place(input: &mut Vec<f32>, len: usize) {
     pad_to_len_in_place(input, len);
     input.truncate(len);
@@ -580,15 +592,20 @@ pub(crate) fn prepare_model_output(
             .saturating_add(joiner.chunk_samples())
             .min(candidate.len());
         final_tail.clear();
-        final_tail.extend(resample_to_output_domain(
-            &candidate[tail_start..],
-            model_sample_rate,
-            output_sample_rate,
-        )?);
+        let tail = &candidate[tail_start..];
+        if model_sample_rate == output_sample_rate {
+            final_tail.extend_from_slice(tail);
+        } else {
+            final_tail.extend(resample_to_output_domain(
+                tail,
+                model_sample_rate,
+                output_sample_rate,
+            )?);
+        }
     }
 
     let mut audio =
-        resample_to_output_domain(&smoothed.audio, model_sample_rate, output_sample_rate)?;
+        resample_owned_to_output_domain(smoothed.audio, model_sample_rate, output_sample_rate)?;
     fit_to_len_in_place(&mut audio, output_chunk_samples);
     Ok(PreparedModelAudio {
         audio,

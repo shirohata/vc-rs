@@ -289,7 +289,7 @@ fn keeps_only_requested_output_tail() {
 
 #[test]
 fn output_reference_audio_uses_tail_matching_trimmed_output() {
-    let mut state = RvcStreamState::new(2);
+    let mut state = RvcStreamState::new();
     state.audio_buffer = (0..8).map(|value| value as f32).collect();
 
     let reference = state
@@ -301,7 +301,7 @@ fn output_reference_audio_uses_tail_matching_trimmed_output() {
 
 #[test]
 fn output_reference_audio_left_pads_when_history_is_short() {
-    let mut state = RvcStreamState::new(2);
+    let mut state = RvcStreamState::new();
     state.audio_buffer = vec![1.0, 2.0];
 
     let reference = state
@@ -334,7 +334,7 @@ fn derives_output_len_like_reference_pipeline() {
 
 #[test]
 fn stream_state_aligns_convert_size_to_16k_hop_samples() {
-    let mut state = RvcStreamState::new(768);
+    let mut state = RvcStreamState::new();
     let input = vec![0.0; 24_000];
     let out = state
         .generate_input(&input, 48_000, 1_536, 1_536, 4_096)
@@ -344,7 +344,7 @@ fn stream_state_aligns_convert_size_to_16k_hop_samples() {
 
 #[test]
 fn stream_state_derives_out_size_from_extra_convert_size() {
-    let mut state = RvcStreamState::new(768);
+    let mut state = RvcStreamState::new();
     let input = vec![0.0; 24_000];
     let out = state
         .generate_input(&input, 48_000, 1_536, 1_536, 4_096)
@@ -354,7 +354,7 @@ fn stream_state_derives_out_size_from_extra_convert_size() {
 
 #[test]
 fn stream_state_zero_pads_initial_buffer() {
-    let mut state = RvcStreamState::new(2);
+    let mut state = RvcStreamState::new();
     let out = state
         .generate_input(&[1.0, 2.0, 3.0, 4.0], 48_000, 0, 0, 4_096)
         .unwrap();
@@ -370,7 +370,7 @@ fn stream_state_zero_pads_initial_buffer() {
 
 #[test]
 fn stream_state_keeps_16k_history_for_embedder() {
-    let mut state = RvcStreamState::new(2);
+    let mut state = RvcStreamState::new();
     let input = vec![0.25; 4_800];
 
     state.generate_input(&input, 48_000, 0, 0, 0).unwrap();
@@ -385,7 +385,7 @@ fn stream_state_keeps_16k_history_for_embedder() {
 
 #[test]
 fn stream_state_volume_excludes_crossfade_not_sola_search() {
-    let mut state = RvcStreamState::new(2);
+    let mut state = RvcStreamState::new();
     let mut input = vec![1.0; 80];
     input.extend(std::iter::repeat_n(0.0, 80));
 
@@ -396,7 +396,7 @@ fn stream_state_volume_excludes_crossfade_not_sola_search() {
 
 #[test]
 fn stream_state_volume_keeps_decay_from_previous_chunk() {
-    let mut state = RvcStreamState::new(2);
+    let mut state = RvcStreamState::new();
     let loud = vec![1.0; 160];
     let quiet = vec![0.0; 160];
 
@@ -436,7 +436,7 @@ fn pitchf_tail_for_output_matches_10ms_output_frames() {
 
 #[test]
 fn stream_state_updates_pitchf_buffer_like_vcclient() {
-    let mut state = RvcStreamState::new(2);
+    let mut state = RvcStreamState::new();
     state.pitchf_buffer = vec![0.0, 1.0, 2.0];
 
     state.update_pitchf_from_rmvpe_frames(&[10.0, 20.0, 30.0, 40.0, 50.0]);
@@ -446,7 +446,7 @@ fn stream_state_updates_pitchf_buffer_like_vcclient() {
 
 #[test]
 fn stream_state_pitch_update_writes_short_rmvpe_to_tail() {
-    let mut state = RvcStreamState::new(2);
+    let mut state = RvcStreamState::new();
     state.pitchf_buffer = vec![1.0, 2.0, 3.0, 4.0, 5.0];
 
     state.update_pitchf_from_rmvpe_frames(&[10.0, 20.0, 30.0]);

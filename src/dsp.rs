@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use anyhow::{anyhow, Result};
-use audioadapter_buffers::direct::SequentialSliceOfVecs;
+use audioadapter_buffers::direct::SequentialSlice;
 use rubato::{Fft, FixedSync, Resampler};
 
 const STREAM_RESAMPLE_CHUNK: usize = 480;
@@ -157,11 +157,10 @@ pub fn resample_mono(input: &[f32], from_hz: usize, to_hz: usize) -> Result<Vec<
 
     let requested_chunk = 1024;
     let mut resampler = Fft::<f32>::new(from_hz, to_hz, requested_chunk, 1, 1, FixedSync::Both)?;
-    let input_channels = vec![input.to_vec()];
-    let input_adapter = SequentialSliceOfVecs::new(&input_channels, 1, input.len())?;
     let out_frames = resampler.process_all_needed_output_len(input.len()).max(1);
-    let mut output_channels = vec![vec![0.0; out_frames]];
-    let mut output_adapter = SequentialSliceOfVecs::new_mut(&mut output_channels, 1, out_frames)?;
+    let input_adapter = SequentialSlice::new(input, 1, input.len())?;
+    let mut output = vec![0.0; out_frames];
+    let mut output_adapter = SequentialSlice::new_mut(&mut output, 1, out_frames)?;
     let (_used_in, produced_out) = resampler.process_all_into_buffer(
         &input_adapter,
         &mut output_adapter,
@@ -169,11 +168,8 @@ pub fn resample_mono(input: &[f32], from_hz: usize, to_hz: usize) -> Result<Vec<
         None,
     )?;
 
-    let output = output_channels
-        .into_iter()
-        .next()
-        .ok_or_else(|| anyhow!("resampler returned no channel"))?;
-    Ok(output.into_iter().take(produced_out).collect())
+    output.truncate(produced_out);
+    Ok(output)
 }
 
 pub struct StreamingResampleMono {
@@ -181,6 +177,7 @@ pub struct StreamingResampleMono {
     to_hz: usize,
     resampler: Option<Fft<f32>>,
     pending_input: Vec<f32>,
+    output_scratch: Vec<f32>,
     discard_output: usize,
 }
 
@@ -207,16 +204,24 @@ impl StreamingResampleMono {
             to_hz,
             resampler,
             pending_input: Vec::new(),
+            output_scratch: Vec::new(),
             discard_output,
         })
     }
 
     pub fn process(&mut self, input: &[f32]) -> Result<Vec<f32>> {
+        let mut output = Vec::new();
+        self.process_into(input, &mut output)?;
+        Ok(output)
+    }
+
+    pub fn process_into(&mut self, input: &[f32], output: &mut Vec<f32>) -> Result<()> {
         if self.from_hz == self.to_hz {
-            return Ok(input.to_vec());
+            output.extend_from_slice(input);
+            return Ok(());
         }
         if input.is_empty() {
-            return Ok(Vec::new());
+            return Ok(());
         }
 
         let resampler = self
@@ -224,32 +229,31 @@ impl StreamingResampleMono {
             .as_mut()
             .ok_or_else(|| anyhow!("streaming resampler is not initialized"))?;
         self.pending_input.extend_from_slice(input);
-        let mut output = Vec::with_capacity(
+        output.reserve(
             (self.pending_input.len() as f64 * resampler.resample_ratio()).ceil() as usize,
         );
 
         while self.pending_input.len() >= resampler.input_frames_next() {
             let input_frames = resampler.input_frames_next();
             let output_frames = resampler.output_frames_next();
-            let input_channels = vec![self.pending_input[..input_frames].to_vec()];
-            let input_adapter = SequentialSliceOfVecs::new(&input_channels, 1, input_frames)?;
-            let mut output_channels = vec![vec![0.0; output_frames]];
-            let mut output_adapter =
-                SequentialSliceOfVecs::new_mut(&mut output_channels, 1, output_frames)?;
+            let input_adapter =
+                SequentialSlice::new(&self.pending_input[..input_frames], 1, input_frames)?;
+            self.output_scratch.resize(output_frames, 0.0);
+            let mut output_adapter = SequentialSlice::new_mut(
+                &mut self.output_scratch[..output_frames],
+                1,
+                output_frames,
+            )?;
             let (used_in, produced_out) =
                 resampler.process_into_buffer(&input_adapter, &mut output_adapter, None)?;
             self.pending_input.drain(..used_in);
 
-            let produced = output_channels
-                .into_iter()
-                .next()
-                .ok_or_else(|| anyhow!("resampler returned no channel"))?;
             let skip = self.discard_output.min(produced_out);
             self.discard_output -= skip;
-            output.extend(produced.into_iter().skip(skip).take(produced_out - skip));
+            output.extend_from_slice(&self.output_scratch[skip..produced_out]);
         }
 
-        Ok(output)
+        Ok(())
     }
 }
 
