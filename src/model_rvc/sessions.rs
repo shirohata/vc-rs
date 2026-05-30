@@ -5,8 +5,9 @@ use std::time::Instant;
 
 use anyhow::{anyhow, bail, Context, Result};
 use ort::ep;
+use ort::memory::Allocator;
 use ort::session::builder::GraphOptimizationLevel;
-use ort::session::Session;
+use ort::session::{IoBinding, Session};
 use ort::value::{Tensor, TensorRef, ValueType};
 use tracing::{debug, info};
 
@@ -62,7 +63,11 @@ impl HubertEmbedderSession {
         })
     }
 
-    pub(super) fn enable_tensorrt_binding(&mut self, output_shape: &[i64]) -> Result<()> {
+    pub(super) fn enable_tensorrt_binding(
+        &mut self,
+        output_shape: &[i64],
+        shared_waveform: Option<&TensorRtSharedWaveform>,
+    ) -> Result<()> {
         if !provider_uses_fixed_shape(self.provider) {
             return Ok(());
         }
@@ -89,6 +94,7 @@ impl HubertEmbedderSession {
                     input_shape,
                     self.output_name.as_str(),
                     &output_shape,
+                    shared_waveform,
                 )?;
                 binding.warmup_capture(
                     &mut self.session,
@@ -100,8 +106,12 @@ impl HubertEmbedderSession {
                 HubertTensorRtBinding::CudaGraph(binding)
             }
         };
+        let shared_waveform_input = match &binding {
+            HubertTensorRtBinding::Pinned(_) => false,
+            HubertTensorRtBinding::CudaGraph(binding) => binding.shared_waveform_input,
+        };
         info!(
-            "GPU IoBinding enabled backend={} model_role={} mode={} cuda_graph={} device_io={} input={} input_shape={} output={} output_shape={} host_input_memory=CUDA_PINNED/CPUInput host_output_memory=CUDA_PINNED/CPUOutput bound_input_memory={} bound_output_memory={}",
+            "GPU IoBinding enabled backend={} model_role={} mode={} cuda_graph={} device_io={} input={} input_shape={} output={} output_shape={} shared_waveform_input={} host_input_memory=CUDA_PINNED/CPUInput host_output_memory=CUDA_PINNED/CPUOutput bound_input_memory={} bound_output_memory={}",
             self.provider.label(),
             ModelRole::ContentVec.label(),
             self.tensor_rt_run_mode.label(),
@@ -111,6 +121,7 @@ impl HubertEmbedderSession {
             format_usize_shape(input_shape),
             self.output_name,
             format_usize_shape(&output_shape),
+            shared_waveform_input,
             self.tensor_rt_run_mode.bound_input_memory(),
             self.tensor_rt_run_mode.bound_output_memory()
         );
@@ -215,10 +226,9 @@ impl HubertEmbedderSession {
                 })
             }
             HubertTensorRtBinding::CudaGraph(binding) => {
-                let h2d_start = Instant::now();
-                copy_f32_tensor(&mut binding.host_audio, audio_16k, "audio")?;
-                copy_f32_tensor_to_device(&binding.host_audio, &mut binding.device_audio, "audio")?;
-                let h2d_us = h2d_start.elapsed().as_micros();
+                let h2d_us = binding
+                    .copy_audio_to_device_if_owned(audio_16k, self.input_name.as_str())?
+                    .unwrap_or(0);
                 let run_start = Instant::now();
                 let _outputs = self.session.run_binding(&binding.binding)?;
                 let run_us = run_start.elapsed().as_micros();
@@ -230,9 +240,10 @@ impl HubertEmbedderSession {
                 )?;
                 let d2h_us = d2h_start.elapsed().as_micros();
                 debug!(
-                    "embedder session.run_binding(device_io=true) backend={} cuda_graph={} input={} shape={} output={} output_shape={} h2d_us={} run_us={} d2h_us={} elapsed_us={}",
+                    "embedder session.run_binding(device_io=true) backend={} cuda_graph={} shared_waveform_input={} input={} shape={} output={} output_shape={} h2d_us={} run_us={} d2h_us={} elapsed_us={}",
                     self.provider.label(),
                     self.tensor_rt_run_mode.cuda_graph(),
+                    binding.shared_waveform_input,
                     self.input_name,
                     format_usize_shape(&binding.input_shape),
                     self.output_name,
@@ -335,6 +346,7 @@ impl RmvpePitchSession {
         &mut self,
         output_shape: &[i64],
         threshold: f32,
+        shared_waveform: Option<&TensorRtSharedWaveform>,
     ) -> Result<()> {
         if !provider_uses_fixed_shape(self.provider) {
             return Ok(());
@@ -360,6 +372,7 @@ impl RmvpePitchSession {
                     waveform_shape,
                     &output_shape,
                     threshold,
+                    shared_waveform,
                 )?;
                 binding.warmup_capture(
                     &mut self.session,
@@ -369,8 +382,12 @@ impl RmvpePitchSession {
                 RmvpeTensorRtBinding::CudaGraph(binding)
             }
         };
+        let shared_waveform_input = match &binding {
+            RmvpeTensorRtBinding::Pinned(_) => false,
+            RmvpeTensorRtBinding::CudaGraph(binding) => binding.shared_waveform_input,
+        };
         info!(
-            "GPU IoBinding enabled backend={} model_role={} mode={} cuda_graph={} device_io={} input=waveform input_shape={} output=pitchf output_shape={} host_input_memory=CUDA_PINNED/CPUInput host_output_memory=CUDA_PINNED/CPUOutput bound_input_memory={} bound_output_memory={}",
+            "GPU IoBinding enabled backend={} model_role={} mode={} cuda_graph={} device_io={} input=waveform input_shape={} output=pitchf output_shape={} shared_waveform_input={} host_input_memory=CUDA_PINNED/CPUInput host_output_memory=CUDA_PINNED/CPUOutput bound_input_memory={} bound_output_memory={}",
             self.provider.label(),
             ModelRole::Rmvpe.label(),
             self.tensor_rt_run_mode.label(),
@@ -378,6 +395,7 @@ impl RmvpePitchSession {
             self.tensor_rt_run_mode.device_io(),
             format_usize_shape(waveform_shape),
             format_usize_shape(&output_shape),
+            shared_waveform_input,
             self.tensor_rt_run_mode.bound_input_memory(),
             self.tensor_rt_run_mode.bound_output_memory()
         );
@@ -478,12 +496,9 @@ impl RmvpePitchSession {
             }
             RmvpeTensorRtBinding::CudaGraph(binding) => {
                 let h2d_start = Instant::now();
-                copy_f32_tensor(&mut binding.host_waveform, audio_16k, "waveform")?;
-                copy_f32_tensor_to_device(
-                    &binding.host_waveform,
-                    &mut binding.device_waveform,
-                    "waveform",
-                )?;
+                let waveform_h2d_us = binding
+                    .copy_waveform_to_device_if_owned(audio_16k)?
+                    .unwrap_or(0);
                 binding.copy_threshold_if_changed(threshold)?;
                 let h2d_us = h2d_start.elapsed().as_micros();
                 let run_start = Instant::now();
@@ -497,11 +512,13 @@ impl RmvpePitchSession {
                 )?;
                 let d2h_us = d2h_start.elapsed().as_micros();
                 debug!(
-                    "rmvpe session.run_binding(device_io=true) backend={} cuda_graph={} input=waveform shape={} output=pitchf output_shape={} h2d_us={} run_us={} d2h_us={} elapsed_us={}",
+                    "rmvpe session.run_binding(device_io=true) backend={} cuda_graph={} shared_waveform_input={} input=waveform shape={} output=pitchf output_shape={} waveform_h2d_us={} h2d_us={} run_us={} d2h_us={} elapsed_us={}",
                     self.provider.label(),
                     self.tensor_rt_run_mode.cuda_graph(),
+                    binding.shared_waveform_input,
                     format_usize_shape(&binding.waveform_shape),
                     format_usize_shape(&binding.output_shape),
+                    waveform_h2d_us,
                     h2d_us,
                     run_us,
                     d2h_us,
@@ -523,12 +540,53 @@ impl RmvpePitchSession {
     }
 }
 
+// CPU output binding is deliberately output-only: inputs still borrow the
+// worker-owned buffers for each synchronous run, while the RVC "audio" tensor
+// keeps stable preallocated storage across chunks with the same shapes.
+struct RvcCpuOutputBinding {
+    binding: IoBinding,
+    output: Tensor<f32>,
+    output_shape: Vec<usize>,
+    feats_shape: Vec<usize>,
+    pitch_shape: Vec<usize>,
+}
+
+impl RvcCpuOutputBinding {
+    fn new(
+        session: &Session,
+        feats_shape: &[usize],
+        pitch_shape: &[usize],
+        output_shape: &[usize],
+    ) -> Result<Self> {
+        let allocator = Allocator::default();
+        let mut output = Tensor::<f32>::new(&allocator, output_shape.to_vec())
+            .context("failed to allocate CPU RVC output 'audio'")?;
+        let mut binding = session
+            .create_binding()
+            .context("failed to create CPU RVC output IoBinding")?;
+        bind_output_tensor(&mut binding, "audio", &mut output)
+            .context("failed to bind CPU RVC output 'audio'")?;
+        Ok(Self {
+            binding,
+            output,
+            output_shape: output_shape.to_vec(),
+            feats_shape: feats_shape.to_vec(),
+            pitch_shape: pitch_shape.to_vec(),
+        })
+    }
+
+    fn matches_input(&self, feats_shape: &[usize], pitch_shape: &[usize]) -> bool {
+        self.feats_shape == feats_shape && self.pitch_shape == pitch_shape
+    }
+}
+
 pub(super) struct RvcModelSession {
     pub(super) session: Session,
     pub(super) provider: Provider,
     pub(super) tensor_rt_profile: Option<TensorRtSessionProfile>,
     pub(super) tensor_rt_run_mode: TensorRtRunMode,
     pub(super) tensor_rt_binding: Option<RvcTensorRtBinding>,
+    cpu_output_binding: Option<RvcCpuOutputBinding>,
     pub(super) expected_feat_channels: i64,
 }
 
@@ -563,6 +621,7 @@ impl RvcModelSession {
             tensor_rt_profile,
             tensor_rt_run_mode,
             tensor_rt_binding: None,
+            cpu_output_binding: None,
             expected_feat_channels,
         })
     }
@@ -689,6 +748,29 @@ impl RvcModelSession {
         Ok(())
     }
 
+    fn enable_cpu_output_binding(
+        &mut self,
+        feats_shape: &[usize],
+        pitch_shape: &[usize],
+        output_shape: &[usize],
+    ) -> Result<()> {
+        if self.provider != Provider::Cpu {
+            return Ok(());
+        }
+        let binding =
+            RvcCpuOutputBinding::new(&self.session, feats_shape, pitch_shape, output_shape)?;
+        info!(
+            "CPU output IoBinding enabled model_role={} inputs=feats:{},pitch:{},pitchf:{} output=audio output_shape={}",
+            ModelRole::Rvc.label(),
+            format_usize_shape(feats_shape),
+            format_usize_shape(pitch_shape),
+            format_usize_shape(pitch_shape),
+            format_usize_shape(output_shape)
+        );
+        self.cpu_output_binding = Some(binding);
+        Ok(())
+    }
+
     pub(super) fn infer(
         &mut self,
         feats: &[f32],
@@ -720,6 +802,23 @@ impl RvcModelSession {
         )?;
         if self.tensor_rt_binding.is_some() {
             return self.infer_with_binding(feats, frame_len, pitch, pitchf, speaker_id);
+        }
+        if self.provider == Provider::Cpu
+            && self
+                .cpu_output_binding
+                .as_ref()
+                .is_some_and(|binding| binding.matches_input(&feats_shape_usize, &pitch_shape))
+        {
+            return self.infer_with_cpu_output_binding(
+                feats,
+                feats_shape,
+                &feats_shape_usize,
+                frame_len,
+                pitch,
+                pitchf,
+                speaker_id,
+                &pitch_shape,
+            );
         }
         self.infer_with_session_run(
             feats,
@@ -754,25 +853,110 @@ impl RvcModelSession {
         let pitch = TensorRef::from_array_view((*pitch_shape, pitch))?;
         let pitchf = TensorRef::from_array_view((*pitch_shape, pitchf))?;
         let sid = TensorRef::from_array_view(([1usize], sid_value.as_slice()))?;
+        let (output_shape, output_data) = {
+            let run_start = Instant::now();
+            let outputs = self.session.run(ort::inputs![
+                "feats" => feats,
+                "p_len" => p_len,
+                "pitch" => pitch,
+                "pitchf" => pitchf,
+                "sid" => sid,
+            ])?;
+            debug!(
+                "rvc session.run backend={} feats_shape={} pitch_shape={} elapsed_us={}",
+                self.provider.label(),
+                format_usize_shape(feats_shape_usize),
+                format_usize_shape(pitch_shape),
+                run_start.elapsed().as_micros()
+            );
+            let value = outputs
+                .get("audio")
+                .ok_or_else(|| anyhow!("RVC output 'audio' not found"))?;
+            let (shape, data) = value.try_extract_tensor::<f32>()?;
+            let output_shape = i64_shape_to_usize(shape, "rvc output")?;
+            (output_shape, data.to_vec())
+        };
+        self.enable_cpu_output_binding(feats_shape_usize, pitch_shape, &output_shape)?;
+        Ok(output_data)
+    }
+
+    // Keep the RVC tensor inputs explicit here: collapsing them into an ad-hoc
+    // struct would obscure the ONNX input contract this function validates.
+    #[allow(clippy::too_many_arguments)]
+    fn infer_with_cpu_output_binding(
+        &mut self,
+        feats: &[f32],
+        feats_shape: &[i64],
+        feats_shape_usize: &[usize],
+        frame_len: usize,
+        pitch: &[i64],
+        pitchf: &[f32],
+        speaker_id: i64,
+        pitch_shape: &[usize; 2],
+    ) -> Result<Vec<f32>> {
+        let p_len_value = [frame_len as i64];
+        let sid_value = [speaker_id];
+        let feats = TensorRef::from_array_view((feats_shape, feats))?;
+        let p_len = TensorRef::from_array_view(([1usize], p_len_value.as_slice()))?;
+        let pitch = TensorRef::from_array_view((*pitch_shape, pitch))?;
+        let pitchf = TensorRef::from_array_view((*pitch_shape, pitchf))?;
+        let sid = TensorRef::from_array_view(([1usize], sid_value.as_slice()))?;
+        let provider = self.provider;
+        let binding = self
+            .cpu_output_binding
+            .as_mut()
+            .ok_or_else(|| anyhow!("CPU RVC output IoBinding is not initialized"))?;
         let run_start = Instant::now();
-        let outputs = self.session.run(ort::inputs![
-            "feats" => feats,
-            "p_len" => p_len,
-            "pitch" => pitch,
-            "pitchf" => pitchf,
-            "sid" => sid,
-        ])?;
+        // IoBinding retains bound input OrtValues after the run. These TensorRefs
+        // borrow worker buffers, so clear inputs before returning on both success
+        // and error paths; only the preallocated CPU output stays bound.
+        let run_result: Result<()> = (|| {
+            binding
+                .binding
+                .bind_input("feats", &feats)
+                .context("failed to bind CPU RVC input 'feats'")?;
+            binding
+                .binding
+                .bind_input("p_len", &p_len)
+                .context("failed to bind CPU RVC input 'p_len'")?;
+            binding
+                .binding
+                .bind_input("pitch", &pitch)
+                .context("failed to bind CPU RVC input 'pitch'")?;
+            binding
+                .binding
+                .bind_input("pitchf", &pitchf)
+                .context("failed to bind CPU RVC input 'pitchf'")?;
+            binding
+                .binding
+                .bind_input("sid", &sid)
+                .context("failed to bind CPU RVC input 'sid'")?;
+            let _outputs = self.session.run_binding(&binding.binding)?;
+            binding
+                .binding
+                .synchronize_outputs()
+                .context("failed to synchronize CPU RVC bound output")?;
+            Ok(())
+        })();
+        binding.binding.clear_inputs();
+        run_result?;
         debug!(
-            "rvc session.run backend={} feats_shape={} pitch_shape={} elapsed_us={}",
-            self.provider.label(),
+            "rvc session.run_binding backend={} cpu_output_binding=true feats_shape={} pitch_shape={} output_shape={} elapsed_us={}",
+            provider.label(),
             format_usize_shape(feats_shape_usize),
             format_usize_shape(pitch_shape),
+            format_usize_shape(&binding.output_shape),
             run_start.elapsed().as_micros()
         );
-        let value = outputs
-            .get("audio")
-            .ok_or_else(|| anyhow!("RVC output 'audio' not found"))?;
-        let (_, data) = value.try_extract_tensor::<f32>()?;
+        let (shape, data) = binding.output.try_extract_tensor::<f32>()?;
+        let actual_shape = i64_shape_to_usize(shape, "rvc output")?;
+        if actual_shape != binding.output_shape {
+            bail!(
+                "CPU RVC bound output shape changed from {} to {}",
+                format_usize_shape(&binding.output_shape),
+                format_usize_shape(&actual_shape)
+            );
+        }
         Ok(data.to_vec())
     }
 

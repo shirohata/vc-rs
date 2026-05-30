@@ -275,6 +275,68 @@ pub(super) struct TensorRtWarmupInfo {
     pub(super) contentvec_output_shape: Vec<i64>,
 }
 
+// ContentVec and RMVPE consume the same fixed 16 kHz waveform. Keep this tensor
+// pipeline-owned so both sessions bind one stable CUDA address; per-session
+// waveform tensors would duplicate H2D work and break the point of CUDA Graph
+// input-address capture.
+pub(super) struct TensorRtSharedWaveform {
+    pub(super) host_waveform: Tensor<f32>,
+    pub(super) device_waveform: Tensor<f32>,
+    pub(super) _host_input_allocator: Allocator,
+    pub(super) _device_allocator: Allocator,
+    pub(super) shape: Vec<usize>,
+}
+
+impl TensorRtSharedWaveform {
+    pub(super) fn new(session: &Session, shape: &[usize]) -> Result<Self> {
+        let host_input_allocator = tensor_rt_pinned_allocator(session, MemoryType::CPUInput)?;
+        let device_allocator = tensor_rt_device_allocator(session)?;
+        let mut host_waveform = Tensor::<f32>::new(&host_input_allocator, shape.to_vec())
+            .context("failed to allocate shared CUDA-pinned waveform input")?;
+        zero_f32_tensor(&mut host_waveform, "shared_waveform")?;
+        let mut device_waveform = Tensor::<f32>::new(&device_allocator, shape.to_vec())
+            .context("failed to allocate shared CUDA waveform input")?;
+        copy_f32_tensor_to_device(&host_waveform, &mut device_waveform, "shared_waveform")?;
+        info!(
+            "GPU shared waveform input allocated shape={} consumers=contentvec,rmvpe host_memory=CUDA_PINNED/CPUInput device_memory=CUDA/Default",
+            format_usize_shape(shape)
+        );
+        Ok(Self {
+            host_waveform,
+            device_waveform,
+            _host_input_allocator: host_input_allocator,
+            _device_allocator: device_allocator,
+            shape: shape.to_vec(),
+        })
+    }
+
+    pub(super) fn copy_from_slice(&mut self, waveform: &[f32]) -> Result<u128> {
+        let h2d_start = Instant::now();
+        copy_f32_tensor(&mut self.host_waveform, waveform, "shared_waveform")?;
+        copy_f32_tensor_to_device(
+            &self.host_waveform,
+            &mut self.device_waveform,
+            "shared_waveform",
+        )?;
+        Ok(h2d_start.elapsed().as_micros())
+    }
+}
+
+fn validate_shared_waveform_shape(
+    shared_waveform: &TensorRtSharedWaveform,
+    expected_shape: &[usize],
+    consumer: &str,
+) -> Result<()> {
+    if shared_waveform.shape != expected_shape {
+        bail!(
+            "shared CUDA waveform shape {} cannot be bound to {consumer} input shape {}",
+            format_usize_shape(&shared_waveform.shape),
+            format_usize_shape(expected_shape)
+        );
+    }
+    Ok(())
+}
+
 pub(super) struct HubertTensorRtPinnedBinding {
     pub(super) binding: IoBinding,
     pub(super) audio: Tensor<f32>,
@@ -479,15 +541,16 @@ impl RvcTensorRtPinnedBinding {
 
 pub(super) struct HubertTensorRtGraphBinding {
     pub(super) binding: IoBinding,
-    pub(super) host_audio: Tensor<f32>,
-    pub(super) device_audio: Tensor<f32>,
+    pub(super) host_audio: Option<Tensor<f32>>,
+    pub(super) device_audio: Option<Tensor<f32>>,
     pub(super) device_output: Tensor<f32>,
     pub(super) host_output: Tensor<f32>,
-    pub(super) _host_input_allocator: Allocator,
+    pub(super) _host_input_allocator: Option<Allocator>,
     pub(super) _host_output_allocator: Allocator,
     pub(super) _device_allocator: Allocator,
     pub(super) input_shape: Vec<usize>,
     pub(super) output_shape: Vec<usize>,
+    pub(super) shared_waveform_input: bool,
 }
 
 impl HubertTensorRtGraphBinding {
@@ -497,20 +560,10 @@ impl HubertTensorRtGraphBinding {
         input_shape: &[usize],
         output_name: &str,
         output_shape: &[usize],
+        shared_waveform: Option<&TensorRtSharedWaveform>,
     ) -> Result<Self> {
-        let host_input_allocator = tensor_rt_pinned_allocator(session, MemoryType::CPUInput)?;
         let host_output_allocator = tensor_rt_pinned_allocator(session, MemoryType::CPUOutput)?;
         let device_allocator = tensor_rt_device_allocator(session)?;
-        let mut host_audio = Tensor::<f32>::new(&host_input_allocator, input_shape.to_vec())
-            .with_context(|| {
-                format!("failed to allocate TensorRT ContentVec host input '{input_name}'")
-            })?;
-        zero_f32_tensor(&mut host_audio, input_name)?;
-        let mut device_audio = Tensor::<f32>::new(&device_allocator, input_shape.to_vec())
-            .with_context(|| {
-                format!("failed to allocate TensorRT ContentVec CUDA input '{input_name}'")
-            })?;
-        copy_f32_tensor_to_device(&host_audio, &mut device_audio, input_name)?;
         let mut device_output = Tensor::<f32>::new(&device_allocator, output_shape.to_vec())
             .with_context(|| {
                 format!("failed to allocate TensorRT ContentVec CUDA output '{output_name}'")
@@ -522,11 +575,43 @@ impl HubertTensorRtGraphBinding {
         let mut binding = session
             .create_binding()
             .context("failed to create ContentVec CUDA device IoBinding")?;
-        binding
-            .bind_input(input_name, &device_audio)
-            .with_context(|| {
-                format!("failed to bind TensorRT ContentVec CUDA input '{input_name}'")
-            })?;
+        let (host_input_allocator, host_audio, device_audio, shared_waveform_input) =
+            if let Some(shared_waveform) = shared_waveform {
+                validate_shared_waveform_shape(shared_waveform, input_shape, "ContentVec")?;
+                binding
+                    .bind_input(input_name, &shared_waveform.device_waveform)
+                    .with_context(|| {
+                        format!("failed to bind shared ContentVec CUDA input '{input_name}'")
+                    })?;
+                (None, None, None, true)
+            } else {
+                let host_input_allocator =
+                    tensor_rt_pinned_allocator(session, MemoryType::CPUInput)?;
+                let mut host_audio = Tensor::<f32>::new(
+                    &host_input_allocator,
+                    input_shape.to_vec(),
+                )
+                .with_context(|| {
+                    format!("failed to allocate TensorRT ContentVec host input '{input_name}'")
+                })?;
+                zero_f32_tensor(&mut host_audio, input_name)?;
+                let mut device_audio = Tensor::<f32>::new(&device_allocator, input_shape.to_vec())
+                    .with_context(|| {
+                        format!("failed to allocate TensorRT ContentVec CUDA input '{input_name}'")
+                    })?;
+                copy_f32_tensor_to_device(&host_audio, &mut device_audio, input_name)?;
+                binding
+                    .bind_input(input_name, &device_audio)
+                    .with_context(|| {
+                        format!("failed to bind TensorRT ContentVec CUDA input '{input_name}'")
+                    })?;
+                (
+                    Some(host_input_allocator),
+                    Some(host_audio),
+                    Some(device_audio),
+                    false,
+                )
+            };
         bind_output_tensor(&mut binding, output_name, &mut device_output).with_context(|| {
             format!("failed to bind TensorRT ContentVec CUDA output '{output_name}'")
         })?;
@@ -541,7 +626,30 @@ impl HubertTensorRtGraphBinding {
             _device_allocator: device_allocator,
             input_shape: input_shape.to_vec(),
             output_shape: output_shape.to_vec(),
+            shared_waveform_input,
         })
+    }
+
+    pub(super) fn copy_audio_to_device_if_owned(
+        &mut self,
+        audio: &[f32],
+        input_name: &str,
+    ) -> Result<Option<u128>> {
+        if self.shared_waveform_input {
+            return Ok(None);
+        }
+        let host_audio = self
+            .host_audio
+            .as_mut()
+            .ok_or_else(|| anyhow!("ContentVec owned host input is missing"))?;
+        let device_audio = self
+            .device_audio
+            .as_mut()
+            .ok_or_else(|| anyhow!("ContentVec owned CUDA input is missing"))?;
+        let h2d_start = Instant::now();
+        copy_f32_tensor(host_audio, audio, input_name)?;
+        copy_f32_tensor_to_device(host_audio, device_audio, input_name)?;
+        Ok(Some(h2d_start.elapsed().as_micros()))
     }
 
     pub(super) fn warmup_capture(
@@ -576,8 +684,8 @@ impl HubertTensorRtGraphBinding {
 
 pub(super) struct RmvpeTensorRtGraphBinding {
     pub(super) binding: IoBinding,
-    pub(super) host_waveform: Tensor<f32>,
-    pub(super) device_waveform: Tensor<f32>,
+    pub(super) host_waveform: Option<Tensor<f32>>,
+    pub(super) device_waveform: Option<Tensor<f32>>,
     pub(super) host_threshold: Tensor<f32>,
     pub(super) device_threshold: Tensor<f32>,
     pub(super) device_output: Tensor<f32>,
@@ -588,6 +696,7 @@ pub(super) struct RmvpeTensorRtGraphBinding {
     pub(super) waveform_shape: Vec<usize>,
     pub(super) output_shape: Vec<usize>,
     pub(super) bound_threshold: f32,
+    pub(super) shared_waveform_input: bool,
 }
 
 impl RmvpeTensorRtGraphBinding {
@@ -596,16 +705,11 @@ impl RmvpeTensorRtGraphBinding {
         waveform_shape: &[usize],
         output_shape: &[usize],
         threshold_value: f32,
+        shared_waveform: Option<&TensorRtSharedWaveform>,
     ) -> Result<Self> {
         let host_input_allocator = tensor_rt_pinned_allocator(session, MemoryType::CPUInput)?;
         let host_output_allocator = tensor_rt_pinned_allocator(session, MemoryType::CPUOutput)?;
         let device_allocator = tensor_rt_device_allocator(session)?;
-        let mut host_waveform = Tensor::<f32>::new(&host_input_allocator, waveform_shape.to_vec())
-            .context("failed to allocate TensorRT RMVPE host input 'waveform'")?;
-        zero_f32_tensor(&mut host_waveform, "waveform")?;
-        let mut device_waveform = Tensor::<f32>::new(&device_allocator, waveform_shape.to_vec())
-            .context("failed to allocate TensorRT RMVPE CUDA input 'waveform'")?;
-        copy_f32_tensor_to_device(&host_waveform, &mut device_waveform, "waveform")?;
         let mut host_threshold = Tensor::<f32>::new(&host_input_allocator, vec![1usize])
             .context("failed to allocate TensorRT RMVPE host input 'threshold'")?;
         write_scalar_f32_tensor(&mut host_threshold, threshold_value, "threshold")?;
@@ -619,9 +723,27 @@ impl RmvpeTensorRtGraphBinding {
         let mut binding = session
             .create_binding()
             .context("failed to create RMVPE CUDA device IoBinding")?;
-        binding
-            .bind_input("waveform", &device_waveform)
-            .context("failed to bind TensorRT RMVPE CUDA input 'waveform'")?;
+        let (host_waveform, device_waveform, shared_waveform_input) =
+            if let Some(shared_waveform) = shared_waveform {
+                validate_shared_waveform_shape(shared_waveform, waveform_shape, "RMVPE")?;
+                binding
+                    .bind_input("waveform", &shared_waveform.device_waveform)
+                    .context("failed to bind shared RMVPE CUDA input 'waveform'")?;
+                (None, None, true)
+            } else {
+                let mut host_waveform =
+                    Tensor::<f32>::new(&host_input_allocator, waveform_shape.to_vec())
+                        .context("failed to allocate TensorRT RMVPE host input 'waveform'")?;
+                zero_f32_tensor(&mut host_waveform, "waveform")?;
+                let mut device_waveform =
+                    Tensor::<f32>::new(&device_allocator, waveform_shape.to_vec())
+                        .context("failed to allocate TensorRT RMVPE CUDA input 'waveform'")?;
+                copy_f32_tensor_to_device(&host_waveform, &mut device_waveform, "waveform")?;
+                binding
+                    .bind_input("waveform", &device_waveform)
+                    .context("failed to bind TensorRT RMVPE CUDA input 'waveform'")?;
+                (Some(host_waveform), Some(device_waveform), false)
+            };
         binding
             .bind_input("threshold", &device_threshold)
             .context("failed to bind TensorRT RMVPE CUDA input 'threshold'")?;
@@ -641,7 +763,29 @@ impl RmvpeTensorRtGraphBinding {
             waveform_shape: waveform_shape.to_vec(),
             output_shape: output_shape.to_vec(),
             bound_threshold: threshold_value,
+            shared_waveform_input,
         })
+    }
+
+    pub(super) fn copy_waveform_to_device_if_owned(
+        &mut self,
+        waveform: &[f32],
+    ) -> Result<Option<u128>> {
+        if self.shared_waveform_input {
+            return Ok(None);
+        }
+        let host_waveform = self
+            .host_waveform
+            .as_mut()
+            .ok_or_else(|| anyhow!("RMVPE owned host input is missing"))?;
+        let device_waveform = self
+            .device_waveform
+            .as_mut()
+            .ok_or_else(|| anyhow!("RMVPE owned CUDA input is missing"))?;
+        let h2d_start = Instant::now();
+        copy_f32_tensor(host_waveform, waveform, "waveform")?;
+        copy_f32_tensor_to_device(host_waveform, device_waveform, "waveform")?;
+        Ok(Some(h2d_start.elapsed().as_micros()))
     }
 
     pub(super) fn copy_threshold_if_changed(&mut self, threshold_value: f32) -> Result<()> {
@@ -1109,7 +1253,7 @@ pub(super) fn bind_output_tensor(
     output: &mut Tensor<f32>,
 ) -> Result<()> {
     let output_name = CString::new(output_name)
-        .with_context(|| format!("TensorRT output name contains NUL: {output_name:?}"))?;
+        .with_context(|| format!("ONNX output name contains NUL: {output_name:?}"))?;
     ortsys![unsafe BindOutput(binding.ptr_mut(), output_name.as_ptr(), output.ptr())?];
     Ok(())
 }

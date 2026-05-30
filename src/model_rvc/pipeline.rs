@@ -22,7 +22,8 @@ use super::shape::{
 use super::stream::RvcStreamState;
 use super::tensorrt::{
     tensor_rt_model_cache_key, tensor_rt_warmup_feature_len, ModelRole, TensorRtRunMode,
-    TensorRtSessionProfile, TensorRtSessionPurpose, CUDA_GRAPH_ENV, TENSORRT_CUDA_GRAPH_ENV,
+    TensorRtSessionProfile, TensorRtSessionPurpose, TensorRtSharedWaveform, CUDA_GRAPH_ENV,
+    TENSORRT_CUDA_GRAPH_ENV,
 };
 
 const SKIP_SILENT_CHUNKS: bool = false;
@@ -31,6 +32,7 @@ pub struct RvcPipeline {
     embedder: HubertEmbedderSession,
     pitch: RmvpePitchSession,
     rvc: RvcModelSession,
+    shared_waveform: Option<TensorRtSharedWaveform>,
     speaker_id: i64,
     pitch_shift: f32,
     f0_threshold: f32,
@@ -114,6 +116,7 @@ impl RvcPipeline {
                 TensorRtSessionPurpose::Main,
             )?,
             rvc,
+            shared_waveform: None,
             speaker_id: config.speaker_id,
             pitch_shift: config.pitch_shift,
             f0_threshold: config.f0_threshold,
@@ -193,8 +196,9 @@ impl RvcPipeline {
         let rmvpe_profile =
             TensorRtSessionProfile::single_input(ModelRole::Rmvpe, "waveform", input_samples_16k)
                 .with_optional_model_cache_key(rmvpe_model_cache_key);
+        let shared_waveform_shape = [1usize, input_samples_16k];
 
-        let (embedder, pitch, rvc) = if tensor_rt_run_mode.cuda_graph() {
+        let (embedder, pitch, rvc, shared_waveform) = if tensor_rt_run_mode.cuda_graph() {
             let mut embedder_probe = HubertEmbedderSession::load(
                 config.embedder,
                 config.provider,
@@ -259,7 +263,18 @@ impl RvcPipeline {
                 tensor_rt_run_mode,
                 TensorRtSessionPurpose::Final,
             )?;
-            embedder.enable_tensorrt_binding(&warmup.contentvec_output_shape)?;
+            let shared_waveform = if tensor_rt_run_mode.device_io() {
+                Some(TensorRtSharedWaveform::new(
+                    &embedder.session,
+                    &shared_waveform_shape,
+                )?)
+            } else {
+                None
+            };
+            embedder.enable_tensorrt_binding(
+                &warmup.contentvec_output_shape,
+                shared_waveform.as_ref(),
+            )?;
 
             let mut pitch = RmvpePitchSession::load(
                 config.f0_model,
@@ -268,7 +283,11 @@ impl RvcPipeline {
                 tensor_rt_run_mode,
                 TensorRtSessionPurpose::Final,
             )?;
-            pitch.enable_tensorrt_binding(&rmvpe_output_shape, config.f0_threshold)?;
+            pitch.enable_tensorrt_binding(
+                &rmvpe_output_shape,
+                config.f0_threshold,
+                shared_waveform.as_ref(),
+            )?;
 
             let mut rvc = RvcModelSession::load(
                 config.model,
@@ -279,7 +298,7 @@ impl RvcPipeline {
                 TensorRtSessionPurpose::Final,
             )?;
             rvc.enable_tensorrt_binding(&rvc_output_shape, config.speaker_id)?;
-            (embedder, pitch, rvc)
+            (embedder, pitch, rvc, shared_waveform)
         } else {
             let mut embedder = HubertEmbedderSession::load(
                 config.embedder,
@@ -296,7 +315,18 @@ impl RvcPipeline {
                 extra_convert_samples,
             )?;
             let feature_len = warmup.rvc_feature_len;
-            embedder.enable_tensorrt_binding(&warmup.contentvec_output_shape)?;
+            let shared_waveform = if tensor_rt_run_mode.device_io() {
+                Some(TensorRtSharedWaveform::new(
+                    &embedder.session,
+                    &shared_waveform_shape,
+                )?)
+            } else {
+                None
+            };
+            embedder.enable_tensorrt_binding(
+                &warmup.contentvec_output_shape,
+                shared_waveform.as_ref(),
+            )?;
             let rvc_profile =
                 TensorRtSessionProfile::rvc(feature_len, expected_feat_channels_usize)
                     .with_optional_model_cache_key(rvc_model_cache_key.clone());
@@ -323,7 +353,11 @@ impl RvcPipeline {
             )?;
             let rmvpe_output_shape =
                 pitch.warmup_output_shape(input_samples_16k, config.f0_threshold)?;
-            pitch.enable_tensorrt_binding(&rmvpe_output_shape, config.f0_threshold)?;
+            pitch.enable_tensorrt_binding(
+                &rmvpe_output_shape,
+                config.f0_threshold,
+                shared_waveform.as_ref(),
+            )?;
 
             let mut rvc = RvcModelSession::load(
                 config.model,
@@ -339,13 +373,14 @@ impl RvcPipeline {
                 config.speaker_id,
             )?;
             rvc.enable_tensorrt_binding(&rvc_output_shape, config.speaker_id)?;
-            (embedder, pitch, rvc)
+            (embedder, pitch, rvc, shared_waveform)
         };
 
         Ok(Self {
             embedder,
             pitch,
             rvc,
+            shared_waveform,
             speaker_id: config.speaker_id,
             pitch_shift: config.pitch_shift,
             f0_threshold: config.f0_threshold,
@@ -402,6 +437,19 @@ impl VoiceModel for RvcPipeline {
 
         // Features
         let embedder_start = Instant::now();
+        if let Some(shared_waveform) = self.shared_waveform.as_mut() {
+            // Shared CUDA input is charged to embedder_time because the public
+            // metrics do not have a separate transfer bucket. Keep this copy
+            // before both ContentVec and RMVPE runs; CUDA Graph capture depends
+            // on the bound device address staying stable across chunks.
+            let h2d_us = shared_waveform.copy_from_slice(&self.stream_state.audio_16k_buffer)?;
+            debug!(
+                "shared waveform h2d backend={} samples={} consumers=contentvec,rmvpe h2d_us={}",
+                self.embedder.provider.label(),
+                self.stream_state.audio_16k_buffer.len(),
+                h2d_us
+            );
+        }
         let mut features = self.embedder.extract(&self.stream_state.audio_16k_buffer)?;
         let raw_feature_len = features
             .shape
@@ -611,6 +659,7 @@ impl std::fmt::Debug for RvcPipeline {
             .field("auto_output_gain", &self.auto_output_gain)
             .field("target_output_rms", &self.target_output_rms)
             .field("max_output_gain", &self.max_output_gain)
+            .field("shared_waveform", &self.shared_waveform.is_some())
             .finish_non_exhaustive()
     }
 }
