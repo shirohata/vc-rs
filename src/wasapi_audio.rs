@@ -13,6 +13,7 @@ use wasapi::{
 };
 
 const EVENT_WAIT_TIMEOUT_MS: u32 = 100;
+const AUDIO_CLIENT_INIT_RETRY_DELAYS_MS: [u64; 5] = [25, 50, 100, 200, 400];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WasapiSampleFormat {
@@ -435,6 +436,40 @@ fn init_output_stream(config: &WasapiStreamConfig) -> Result<ActiveOutputStream>
 }
 
 fn initialized_client(config: &WasapiStreamConfig, direction: Direction) -> Result<AudioClient> {
+    // Some USB/Bluetooth endpoints, especially headset "Chat" devices, can
+    // briefly reject IMMDevice activation right after the previous stream was
+    // stopped. Keep this retry bounded and initialization-only; the audio loop
+    // must remain event-driven and must not fall back to sleep polling.
+    for (attempt, retry_delay_ms) in AUDIO_CLIENT_INIT_RETRY_DELAYS_MS
+        .iter()
+        .copied()
+        .map(Some)
+        .chain(std::iter::once(None))
+        .enumerate()
+    {
+        match initialized_client_once(config, direction) {
+            Ok(audio_client) => return Ok(audio_client),
+            Err(err) => {
+                if let Some(retry_delay_ms) = retry_delay_ms {
+                    debug!(
+                        "retrying WASAPI {direction} stream initialization for {} in {retry_delay_ms}ms after attempt {} failed: {err:#}",
+                        config.device_name,
+                        attempt + 1
+                    );
+                    thread::sleep(Duration::from_millis(retry_delay_ms));
+                } else {
+                    return Err(err);
+                }
+            }
+        }
+    }
+    unreachable!("WASAPI initialization retry loop always returns");
+}
+
+fn initialized_client_once(
+    config: &WasapiStreamConfig,
+    direction: Direction,
+) -> Result<AudioClient> {
     let enumerator =
         DeviceEnumerator::new().context("failed to create WASAPI device enumerator")?;
     let device = enumerator
@@ -467,6 +502,13 @@ fn initialized_client(config: &WasapiStreamConfig, direction: Direction) -> Resu
 fn stop_stream(audio_client: &AudioClient, name: &str) {
     if let Err(err) = audio_client.stop_stream() {
         warn!("failed to stop WASAPI {name} stream: {err}");
+        return;
+    }
+    // Reset is shutdown-only. It clears endpoint buffers before COM objects are
+    // dropped, which makes rapid stop/start cycles less dependent on driver
+    // teardown timing without adding work to the real-time event loop.
+    if let Err(err) = audio_client.reset_stream() {
+        warn!("failed to reset WASAPI {name} stream: {err}");
     }
 }
 
