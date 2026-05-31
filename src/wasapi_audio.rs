@@ -36,7 +36,8 @@ pub struct WasapiStreamConfig {
 pub struct WasapiEndpoints {
     pub input: WasapiStreamConfig,
     pub output: WasapiStreamConfig,
-    pub sample_rate: u32,
+    pub input_sample_rate: u32,
+    pub output_sample_rate: u32,
 }
 
 pub struct WasapiStream {
@@ -115,20 +116,24 @@ pub fn open_realtime(
     let output_summary = summarize_device(&output_device)?;
 
     let input_base_format = device_format(&input_device, Direction::Capture)?;
-    let sample_rate = input_base_format.get_samplespersec();
-    if sample_rate == 0 {
+    let input_sample_rate = input_base_format.get_samplespersec();
+    if input_sample_rate == 0 {
         bail!("WASAPI input device reported an invalid sample rate");
     }
 
     let input_channels = input_base_format.get_nchannels().max(1) as usize;
     let output_base_format = device_format(&output_device, Direction::Render)?;
+    let output_sample_rate = output_base_format.get_samplespersec();
+    if output_sample_rate == 0 {
+        bail!("WASAPI output device reported an invalid sample rate");
+    }
     let output_channels = output_base_format.get_nchannels().max(1) as usize;
 
     let input = select_stream_config(
         &input_device,
         input_summary,
         StreamConfigSelection {
-            sample_rate,
+            sample_rate: input_sample_rate,
             channels: input_channels,
             exclusive: input_exclusive,
             wasapi_buffer_ms,
@@ -139,7 +144,7 @@ pub fn open_realtime(
         &output_device,
         output_summary,
         StreamConfigSelection {
-            sample_rate,
+            sample_rate: output_sample_rate,
             channels: output_channels,
             exclusive: output_exclusive,
             wasapi_buffer_ms,
@@ -147,18 +152,13 @@ pub fn open_realtime(
         },
     )?;
 
-    if output.sample_rate != input.sample_rate {
-        bail!(
-            "WASAPI output device selected {} Hz but input uses {} Hz",
-            output.sample_rate,
-            input.sample_rate
-        );
-    }
-
+    let input_sample_rate = input.sample_rate;
+    let output_sample_rate = output.sample_rate;
     Ok(WasapiEndpoints {
         input,
         output,
-        sample_rate,
+        input_sample_rate,
+        output_sample_rate,
     })
 }
 

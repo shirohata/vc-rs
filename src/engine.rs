@@ -75,10 +75,12 @@ pub fn run_realtime(args: RunArgs) -> Result<()> {
         args.output.as_deref(),
         args.wasapi_buffer_ms,
     )?;
-    let sample_rate = realtime_audio.sample_rate();
-    let chunk_samples = ((sample_rate as u64 * args.chunk_ms as u64) / 1000).max(128) as usize;
-    let crossfade_samples = sola::ms_to_samples(sample_rate, args.crossfade_ms);
-    let sola_search_samples = sola::ms_to_samples(sample_rate, args.sola_search_ms);
+    let input_sample_rate = realtime_audio.input_sample_rate();
+    let output_sample_rate = realtime_audio.output_sample_rate();
+    let input_chunk_samples = chunk_samples_for_rate(input_sample_rate, args.chunk_ms);
+    let output_chunk_samples = chunk_samples_for_rate(output_sample_rate, args.chunk_ms);
+    let crossfade_samples = sola::ms_to_samples(output_sample_rate, args.crossfade_ms);
+    let sola_search_samples = sola::ms_to_samples(output_sample_rate, args.sola_search_ms);
     let extra_convert_ms = args.extra_convert_ms;
     let smoother_kind = args.smoother;
     let smoothing_enabled = !args.passthrough;
@@ -102,8 +104,8 @@ pub fn run_realtime(args: RunArgs) -> Result<()> {
     info!("input device: {}", realtime_audio.input_name());
     info!("output device: {}", realtime_audio.output_name());
     info!(
-        "sample_rate={} chunk_ms={} chunk_samples={} wasapi_buffer_ms={} crossfade_samples={} sola_search_samples={} smoother={:?} rvc_output_tail_discard_ms={} extra_convert_ms={}",
-        sample_rate, args.chunk_ms, chunk_samples, args.wasapi_buffer_ms, crossfade_samples, sola_search_samples, smoother_kind, rvc_output_tail_discard_ms, extra_convert_ms
+        "input_sample_rate={} output_sample_rate={} chunk_ms={} input_chunk_samples={} output_chunk_samples={} wasapi_buffer_ms={} crossfade_samples={} sola_search_samples={} smoother={:?} rvc_output_tail_discard_ms={} extra_convert_ms={}",
+        input_sample_rate, output_sample_rate, args.chunk_ms, input_chunk_samples, output_chunk_samples, args.wasapi_buffer_ms, crossfade_samples, sola_search_samples, smoother_kind, rvc_output_tail_discard_ms, extra_convert_ms
     );
     if !args.passthrough {
         info!("silence_threshold={}", args.silence_threshold);
@@ -128,8 +130,8 @@ pub fn run_realtime(args: RunArgs) -> Result<()> {
             embedder_output: args.embedder_output.as_deref(),
             f0_model: f0_model_path,
             provider: args.provider,
-            sample_rate,
-            chunk_samples,
+            sample_rate: input_sample_rate,
+            chunk_samples: input_chunk_samples,
             speaker_id: args.speaker_id,
             pitch_shift: args.pitch_shift,
             f0_threshold: args.f0_threshold,
@@ -147,9 +149,9 @@ pub fn run_realtime(args: RunArgs) -> Result<()> {
         })?)
     };
 
-    let input_buffer_capacity = chunk_samples * INPUT_QUEUE_CHUNKS;
+    let input_buffer_capacity = input_chunk_samples * INPUT_QUEUE_CHUNKS;
     let (mut input_producer, mut input_consumer) = RingBuffer::<f32>::new(input_buffer_capacity);
-    let output_buffer_capacity = chunk_samples * OUTPUT_QUEUE_CHUNKS;
+    let output_buffer_capacity = output_chunk_samples * OUTPUT_QUEUE_CHUNKS;
     let (mut output_producer, mut output_consumer) = RingBuffer::<f32>::new(output_buffer_capacity);
     let metrics = Arc::new(Metrics::default());
     metrics
@@ -170,12 +172,19 @@ pub fn run_realtime(args: RunArgs) -> Result<()> {
     let capture_debug_input = debug_input_wav.is_some();
     let crossfade_ms = args.crossfade_ms;
     let sola_search_ms = args.sola_search_ms;
+    // Output-device resampling must stay in the worker. The audio callbacks
+    // only push/pop ring buffers, which keeps allocation and FFT work off the
+    // real-time path.
+    let output_rate_resampler =
+        dsp::StreamingResampleMono::new(input_sample_rate as usize, output_sample_rate as usize)?;
     let worker = thread::spawn(move || {
         let mut smoother = None::<(u32, sola::ChunkSmoother)>;
-        let mut input_acc = Vec::<f32>::with_capacity(chunk_samples * 2);
+        let mut input_acc = Vec::<f32>::with_capacity(input_chunk_samples * 2);
+        let mut output_rate_resampler = output_rate_resampler;
+        let mut prepared_audio = Vec::<f32>::with_capacity(output_chunk_samples * 2);
         while worker_running.load(Ordering::SeqCst) {
-            while input_acc.len() < chunk_samples {
-                let needed = chunk_samples - input_acc.len();
+            while input_acc.len() < input_chunk_samples {
+                let needed = input_chunk_samples - input_acc.len();
                 let available = input_consumer.slots().min(needed);
                 if available == 0 {
                     break;
@@ -190,12 +199,12 @@ pub fn run_realtime(args: RunArgs) -> Result<()> {
                     break;
                 }
             }
-            if input_acc.len() < chunk_samples {
+            if input_acc.len() < input_chunk_samples {
                 thread::sleep(Duration::from_millis(2));
                 continue;
             }
 
-            let chunk = &input_acc[..chunk_samples];
+            let chunk = &input_acc[..input_chunk_samples];
             if capture_debug_input {
                 if let Ok(mut debug) = worker_debug_input_samples.lock() {
                     debug.extend_from_slice(chunk);
@@ -205,7 +214,7 @@ pub fn run_realtime(args: RunArgs) -> Result<()> {
             // `input_acc` is the worker-owned chunk scratch. Keep the model input
             // borrowed from it so the realtime-adjacent worker does not allocate
             // and copy a fresh Vec for every chunk.
-            let processed = model.process(chunk, sample_rate);
+            let processed = model.process(chunk, input_sample_rate);
             input_acc.clear();
 
             match processed {
@@ -275,17 +284,18 @@ pub fn run_realtime(args: RunArgs) -> Result<()> {
                     if out.silent {
                         worker_metrics.silent_chunks.fetch_add(1, Ordering::Relaxed);
                     }
-                    let output_sample_rate = out.sample_rate;
+                    let model_output_sample_rate = out.sample_rate;
                     let output_silent = out.silent;
-                    let audio = if smoothing_enabled {
+                    prepared_audio.clear();
+                    if smoothing_enabled {
                         if smoother.as_ref().map(|(sample_rate, _)| *sample_rate)
-                            != Some(output_sample_rate)
+                            != Some(model_output_sample_rate)
                         {
                             let joiner = sola::model_domain_chunk_smoother(ChunkSmootherConfig {
                                 kind: smoothing_kind(smoother_kind),
-                                output_chunk_samples: chunk_samples,
-                                output_sample_rate: sample_rate,
-                                model_sample_rate: output_sample_rate,
+                                output_chunk_samples,
+                                output_sample_rate,
+                                model_sample_rate: model_output_sample_rate,
                                 crossfade_ms,
                                 sola_search_ms,
                                 tail_discard_ms: rvc_output_tail_discard_ms,
@@ -296,14 +306,14 @@ pub fn run_realtime(args: RunArgs) -> Result<()> {
                             worker_metrics
                                 .sola_search_samples
                                 .store(joiner.sola_search_samples() as u64, Ordering::Relaxed);
-                            smoother = Some((output_sample_rate, joiner));
+                            smoother = Some((model_output_sample_rate, joiner));
                         }
                         let smoother =
                             &mut smoother.as_mut().expect("smoother initialized above").1;
                         match sola::prepare_model_output(
                             out,
-                            sample_rate,
-                            chunk_samples,
+                            output_sample_rate,
+                            output_chunk_samples,
                             smoother,
                             None,
                         ) {
@@ -311,7 +321,7 @@ pub fn run_realtime(args: RunArgs) -> Result<()> {
                                 worker_metrics
                                     .last_sola_offset
                                     .store(prepared.sola_offset as u64, Ordering::Relaxed);
-                                prepared.audio
+                                prepared_audio = prepared.audio;
                             }
                             Err(err) => {
                                 error!("output smoothing/resampling failed: {err:#}");
@@ -320,38 +330,29 @@ pub fn run_realtime(args: RunArgs) -> Result<()> {
                             }
                         }
                     } else {
-                        if output_sample_rate == sample_rate {
-                            out.audio
-                        } else {
-                            match dsp::resample_mono(
-                                &out.audio,
-                                output_sample_rate as usize,
-                                sample_rate as usize,
-                            ) {
-                                Ok(audio) => audio,
-                                Err(err) => {
-                                    error!("output resampling failed: {err:#}");
-                                    worker_running.store(false, Ordering::SeqCst);
-                                    break;
-                                }
-                            }
+                        if let Err(err) =
+                            output_rate_resampler.process_into(&out.audio, &mut prepared_audio)
+                        {
+                            error!("passthrough output resampling failed: {err:#}");
+                            worker_running.store(false, Ordering::SeqCst);
+                            break;
                         }
-                    };
+                    }
                     worker_metrics
                         .last_output_samples
-                        .store(audio.len() as u64, Ordering::Relaxed);
+                        .store(prepared_audio.len() as u64, Ordering::Relaxed);
                     if capture_debug_output {
                         if let Ok(mut debug) = worker_debug_output_samples.lock() {
-                            debug.extend_from_slice(&audio);
+                            debug.extend_from_slice(&prepared_audio);
                         }
                     }
                     let mut dropped = 0u64;
                     if output_silent
-                        && output_buffer_capacity - output_producer.slots() > chunk_samples
+                        && output_buffer_capacity - output_producer.slots() > output_chunk_samples
                     {
                         debug!("model output is silent, pushing silence to output buffer to reduce latency");
                     } else {
-                        let (_, remainder) = output_producer.push_partial_slice(&audio);
+                        let (_, remainder) = output_producer.push_partial_slice(&prepared_audio);
                         // rtrb is SPSC and only the consumer can pop, so on full buffer
                         // we discard the new sample tail instead of forcibly evicting
                         // older queued audio as the previous VecDeque implementation did.
@@ -476,22 +477,22 @@ pub fn run_realtime(args: RunArgs) -> Result<()> {
         .map_err(|_| anyhow!("worker thread panicked"))?;
     if let Some(path) = debug_output_wav {
         if let Ok(samples) = debug_output_samples.lock() {
-            write_wav_mono(&path, &samples, sample_rate)?;
+            write_wav_mono(&path, &samples, output_sample_rate)?;
             info!(
                 "wrote realtime debug output {} samples at {} Hz to {}",
                 samples.len(),
-                sample_rate,
+                output_sample_rate,
                 path.display()
             );
         }
     }
     if let Some(path) = debug_input_wav {
         if let Ok(samples) = debug_input_samples.lock() {
-            write_wav_mono(&path, &samples, sample_rate)?;
+            write_wav_mono(&path, &samples, input_sample_rate)?;
             info!(
                 "wrote realtime debug input {} samples at {} Hz to {}",
                 samples.len(),
-                sample_rate,
+                input_sample_rate,
                 path.display()
             );
         }
@@ -506,9 +507,13 @@ fn smoothing_kind(smoother: Smoother) -> SmoothingKind {
     }
 }
 
+fn chunk_samples_for_rate(sample_rate: u32, chunk_ms: u32) -> usize {
+    ((sample_rate as u64 * chunk_ms as u64) / 1000).max(128) as usize
+}
+
 pub fn run_wav(args: WavArgs) -> Result<()> {
     let (samples, spec) = read_wav_mono(&args.input)?;
-    let chunk_samples = ((spec.sample_rate as u64 * args.chunk_ms as u64) / 1000).max(128) as usize;
+    let chunk_samples = chunk_samples_for_rate(spec.sample_rate, args.chunk_ms);
     let output_extra_ms = DEFAULT_CROSSFADE_MS
         .saturating_add(DEFAULT_SOLA_SEARCH_MS)
         .saturating_add(args.rvc_output_tail_discard_ms);
@@ -670,7 +675,14 @@ fn write_wav_mono(path: &Path, samples: &[f32], sample_rate: u32) -> Result<()> 
 
 #[cfg(test)]
 mod tests {
-    use super::wav_model_input_chunk;
+    use super::{chunk_samples_for_rate, wav_model_input_chunk};
+
+    #[test]
+    fn computes_chunk_samples_per_sample_rate() {
+        assert_eq!(chunk_samples_for_rate(48_000, 10), 480);
+        assert_eq!(chunk_samples_for_rate(44_100, 10), 441);
+        assert_eq!(chunk_samples_for_rate(48_000, 1), 128);
+    }
 
     #[test]
     fn pads_short_wav_chunk_for_fixed_shape_model_input() {

@@ -56,7 +56,8 @@ pub struct RealtimeAudio {
     wasapi_output_exclusive: bool,
     input: InputEndpoint,
     output: OutputEndpoint,
-    sample_rate: u32,
+    input_sample_rate: u32,
+    output_sample_rate: u32,
     input_name: String,
     output_name: String,
 }
@@ -108,8 +109,9 @@ impl RealtimeAudio {
         let input_device = input_device(input_name)?;
         let input_config = mono_input_config(&input_device)?;
         let output_device = output_device(output_name)?;
-        let output_config = mono_output_config(&output_device, input_config.sample_rate())?;
-        let sample_rate = input_config.sample_rate();
+        let output_config = mono_output_config(&output_device)?;
+        let input_sample_rate = input_config.sample_rate();
+        let output_sample_rate = output_config.sample_rate();
         let input_name = device_name(&input_device);
         let output_name = device_name(&output_device);
 
@@ -125,7 +127,8 @@ impl RealtimeAudio {
                 device: output_device,
                 config: output_config,
             },
-            sample_rate,
+            input_sample_rate,
+            output_sample_rate,
             input_name,
             output_name,
         })
@@ -148,7 +151,8 @@ impl RealtimeAudio {
         )?;
         let input_name = endpoints.input.device_name.clone();
         let output_name = endpoints.output.device_name.clone();
-        let sample_rate = endpoints.sample_rate;
+        let input_sample_rate = endpoints.input_sample_rate;
+        let output_sample_rate = endpoints.output_sample_rate;
 
         Ok(Self {
             backend: AudioBackend::Wasapi,
@@ -156,7 +160,8 @@ impl RealtimeAudio {
             wasapi_output_exclusive,
             input: InputEndpoint::Wasapi(endpoints.input),
             output: OutputEndpoint::Wasapi(endpoints.output),
-            sample_rate,
+            input_sample_rate,
+            output_sample_rate,
             input_name,
             output_name,
         })
@@ -187,8 +192,12 @@ impl RealtimeAudio {
         }
     }
 
-    pub fn sample_rate(&self) -> u32 {
-        self.sample_rate
+    pub fn input_sample_rate(&self) -> u32 {
+        self.input_sample_rate
+    }
+
+    pub fn output_sample_rate(&self) -> u32 {
+        self.output_sample_rate
     }
 
     pub fn input_name(&self) -> &str {
@@ -296,16 +305,13 @@ pub fn mono_input_config(device: &cpal::Device) -> Result<cpal::SupportedStreamC
     Ok(config)
 }
 
-pub fn mono_output_config(
-    device: &cpal::Device,
-    sample_rate: cpal::SampleRate,
-) -> Result<cpal::SupportedStreamConfig> {
+pub fn mono_output_config(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig> {
     let default = device
         .default_output_config()
         .context("failed to get default output config")?;
     Ok(cpal::SupportedStreamConfig::new(
         1,
-        sample_rate,
+        default.sample_rate(),
         *default.buffer_size(),
         default.sample_format(),
     ))

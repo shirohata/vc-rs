@@ -552,6 +552,19 @@ mod tests {
     }
 
     #[test]
+    fn streaming_resampler_handles_output_device_rate() {
+        let input = vec![0.0; 48_000];
+        let mut resampler = StreamingResampleMono::new(48_000, 44_100).unwrap();
+        let mut output = Vec::new();
+
+        for chunk in input.chunks(480) {
+            resampler.process_into(chunk, &mut output).unwrap();
+        }
+
+        assert!((43_000..=44_100).contains(&output.len()));
+    }
+
+    #[test]
     fn finds_sola_offset() {
         let reference = [0.0, 1.0, 0.5, 0.0];
         let candidate = [0.2, 0.1, 0.0, 1.0, 0.5, 0.0, -0.1];
