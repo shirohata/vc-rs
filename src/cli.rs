@@ -14,8 +14,7 @@ pub const DEFAULT_RVC_OUTPUT_TAIL_DISCARD_MS: u32 = 10;
 pub const DEFAULT_SOLA_SEARCH_MS: u32 = 12;
 pub const DEFAULT_TARGET_OUTPUT_RMS: f32 = 0.03;
 pub const DEFAULT_VOLUME_ENVELOPE: bool = false;
-pub const DEFAULT_WASAPI_BUFFER_PERIODS: u32 = 2;
-pub const DEFAULT_WASAPI_PERIOD_MS: u32 = 0;
+pub const DEFAULT_WASAPI_BUFFER_MS: u32 = 0;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -115,16 +114,10 @@ pub struct RunArgs {
     pub wasapi_exclusive_output: bool,
     #[arg(
         long,
-        default_value_t = DEFAULT_WASAPI_PERIOD_MS,
-        help = "WASAPI period in milliseconds; 0 uses the device minimum period"
+        default_value_t = DEFAULT_WASAPI_BUFFER_MS,
+        help = "WASAPI event buffer in milliseconds; 0 uses the device minimum period"
     )]
-    pub wasapi_period_ms: u32,
-    #[arg(
-        long,
-        default_value_t = DEFAULT_WASAPI_BUFFER_PERIODS,
-        help = "WASAPI endpoint buffer length in periods; 1 is the smallest buffer"
-    )]
-    pub wasapi_buffer_periods: u32,
+    pub wasapi_buffer_ms: u32,
     #[arg(long, default_value_t = DEFAULT_RT_CHUNK_MS)]
     pub chunk_ms: u32,
     #[arg(long, default_value_t = DEFAULT_CROSSFADE_MS)]
@@ -255,9 +248,6 @@ impl RunArgs {
         {
             return Err("--wasapi-exclusive* options require --audio-backend wasapi".to_string());
         }
-        if self.wasapi_buffer_periods == 0 {
-            return Err("--wasapi-buffer-periods must be greater than 0".to_string());
-        }
         Ok(())
     }
 
@@ -285,8 +275,7 @@ mod tests {
         assert!(!args.wasapi_exclusive);
         assert!(!args.wasapi_input_exclusive());
         assert!(!args.wasapi_output_exclusive());
-        assert_eq!(args.wasapi_period_ms, DEFAULT_WASAPI_PERIOD_MS);
-        assert_eq!(args.wasapi_buffer_periods, DEFAULT_WASAPI_BUFFER_PERIODS);
+        assert_eq!(args.wasapi_buffer_ms, DEFAULT_WASAPI_BUFFER_MS);
         assert_eq!(args.rms_mix_rate, 0.0);
         assert_eq!(args.smoother, Smoother::Sola);
         assert_eq!(
@@ -667,55 +656,51 @@ mod tests {
     }
 
     #[test]
-    fn parses_wasapi_period_and_buffer_periods() {
+    fn parses_wasapi_buffer_ms() {
         let cli = Cli::try_parse_from([
             "vc-rs",
             "run",
             "--passthrough",
             "--audio-backend",
             "wasapi",
-            "--wasapi-period-ms",
+            "--wasapi-buffer-ms",
             "3",
-            "--wasapi-buffer-periods",
-            "1",
         ])
         .unwrap();
         let Command::Run(args) = cli.command else {
             panic!("expected run command");
         };
 
-        assert_eq!(args.wasapi_period_ms, 3);
-        assert_eq!(args.wasapi_buffer_periods, 1);
+        assert_eq!(args.wasapi_buffer_ms, 3);
         assert!(args.validate_audio_options().is_ok());
     }
 
     #[test]
-    fn allows_zero_wasapi_period_for_minimum_and_rejects_zero_buffer_periods() {
-        let cli = Cli::try_parse_from(["vc-rs", "run", "--passthrough", "--wasapi-period-ms", "0"])
+    fn allows_zero_wasapi_buffer_for_minimum() {
+        let cli = Cli::try_parse_from(["vc-rs", "run", "--passthrough", "--wasapi-buffer-ms", "0"])
             .unwrap();
         let Command::Run(args) = cli.command else {
             panic!("expected run command");
         };
 
-        assert_eq!(args.wasapi_period_ms, 0);
+        assert_eq!(args.wasapi_buffer_ms, 0);
         assert!(args.validate_audio_options().is_ok());
+    }
 
-        let cli = Cli::try_parse_from([
+    #[test]
+    fn rejects_removed_wasapi_timing_options() {
+        assert!(
+            Cli::try_parse_from(["vc-rs", "run", "--passthrough", "--wasapi-period-ms", "0"])
+                .is_err()
+        );
+        assert!(Cli::try_parse_from([
             "vc-rs",
             "run",
             "--passthrough",
             "--wasapi-buffer-periods",
-            "0",
+            "1"
         ])
-        .unwrap();
-        let Command::Run(args) = cli.command else {
-            panic!("expected run command");
-        };
-
-        assert_eq!(
-            args.validate_audio_options().unwrap_err(),
-            "--wasapi-buffer-periods must be greater than 0"
-        );
+        .is_err());
     }
 
     #[test]

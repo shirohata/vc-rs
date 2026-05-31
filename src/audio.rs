@@ -86,8 +86,7 @@ impl RealtimeAudio {
         wasapi_output_exclusive: bool,
         input_name: Option<&str>,
         output_name: Option<&str>,
-        wasapi_period_ms: u32,
-        wasapi_buffer_periods: u32,
+        wasapi_buffer_ms: u32,
     ) -> Result<Self> {
         if (wasapi_input_exclusive || wasapi_output_exclusive) && backend != AudioBackend::Wasapi {
             bail!("--wasapi-exclusive* options require --audio-backend wasapi");
@@ -100,8 +99,7 @@ impl RealtimeAudio {
                 output_name,
                 wasapi_input_exclusive,
                 wasapi_output_exclusive,
-                wasapi_period_ms,
-                wasapi_buffer_periods,
+                wasapi_buffer_ms,
             ),
         }
     }
@@ -139,16 +137,14 @@ impl RealtimeAudio {
         output_name: Option<&str>,
         wasapi_input_exclusive: bool,
         wasapi_output_exclusive: bool,
-        wasapi_period_ms: u32,
-        wasapi_buffer_periods: u32,
+        wasapi_buffer_ms: u32,
     ) -> Result<Self> {
         let endpoints = wasapi_audio::open_realtime(
             input_name,
             output_name,
             wasapi_input_exclusive,
             wasapi_output_exclusive,
-            wasapi_period_ms,
-            wasapi_buffer_periods,
+            wasapi_buffer_ms,
         )?;
         let input_name = endpoints.input.device_name.clone();
         let output_name = endpoints.output.device_name.clone();
@@ -172,8 +168,7 @@ impl RealtimeAudio {
         _output_name: Option<&str>,
         _wasapi_input_exclusive: bool,
         _wasapi_output_exclusive: bool,
-        _wasapi_period_ms: u32,
-        _wasapi_buffer_periods: u32,
+        _wasapi_buffer_ms: u32,
     ) -> Result<Self> {
         bail!("WASAPI audio backend is only available on Windows")
     }

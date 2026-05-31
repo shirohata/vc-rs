@@ -5,14 +5,14 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
+use thread_priority::{set_current_thread_priority, ThreadPriority};
 use tracing::{debug, warn};
 use wasapi::{
     calculate_period_100ns, initialize_mta, initialize_sta, AudioClient, Device, DeviceEnumerator,
     Direction, SampleType, StreamMode, WaveFormat,
 };
 
-const MIN_POLL_SLEEP_US: u64 = 500;
-const MAX_POLL_SLEEP_US: u64 = 5_000;
+const EVENT_WAIT_TIMEOUT_MS: u32 = 100;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WasapiSampleFormat {
@@ -103,8 +103,7 @@ pub fn open_realtime(
     output_name: Option<&str>,
     input_exclusive: bool,
     output_exclusive: bool,
-    wasapi_period_ms: u32,
-    wasapi_buffer_periods: u32,
+    wasapi_buffer_ms: u32,
 ) -> Result<WasapiEndpoints> {
     let _com = ComGuard::initialize()?;
     let enumerator =
@@ -132,8 +131,7 @@ pub fn open_realtime(
             sample_rate,
             channels: input_channels,
             exclusive: input_exclusive,
-            wasapi_period_ms,
-            wasapi_buffer_periods,
+            wasapi_buffer_ms,
             direction: Direction::Capture,
         },
     )?;
@@ -144,8 +142,7 @@ pub fn open_realtime(
             sample_rate,
             channels: output_channels,
             exclusive: output_exclusive,
-            wasapi_period_ms,
-            wasapi_buffer_periods,
+            wasapi_buffer_ms,
             direction: Direction::Render,
         },
     )?;
@@ -250,6 +247,7 @@ fn run_input_stream<F>(
 where
     F: FnMut(&[f32]) + Send + 'static,
 {
+    raise_current_thread_priority("input");
     let initialized = init_input_stream(&config);
     let stream = match initialized {
         Ok(stream) => {
@@ -281,33 +279,30 @@ where
     let result = (|| -> Result<()> {
         let bytes_per_frame = config.wave_format.get_blockalign() as usize;
         let buffer_frames = stream.audio_client.get_buffer_size()? as usize;
-        let mut raw = Vec::<u8>::new();
-        let mut mono = Vec::<f32>::new();
-        let sleep = poll_sleep(&config);
+        let bytes_needed = buffer_frames * bytes_per_frame;
+        let mut raw = Vec::<u8>::with_capacity(bytes_needed);
+        let mut mono = Vec::<f32>::with_capacity(buffer_frames);
 
         while running.load(Ordering::SeqCst) {
-            let frames_available = stream.audio_client.get_current_padding()?;
-            if frames_available == 0 {
-                thread::sleep(sleep);
-                continue;
-            }
+            while running.load(Ordering::SeqCst) && stream.audio_client.get_current_padding()? > 0 {
+                raw.resize(bytes_needed, 0);
+                let (frames_read, buffer_info) =
+                    stream.capture_client.read_from_device(&mut raw)?;
+                if frames_read == 0 {
+                    break;
+                }
 
-            let bytes_needed = buffer_frames * bytes_per_frame;
-            raw.resize(bytes_needed, 0);
-            let (frames_read, buffer_info) = stream.capture_client.read_from_device(&mut raw)?;
-            if frames_read == 0 {
-                continue;
+                decode_interleaved_to_mono(
+                    &raw[..frames_read as usize * bytes_per_frame],
+                    frames_read as usize,
+                    config.channels,
+                    config.sample_format,
+                    buffer_info.flags.silent,
+                    &mut mono,
+                );
+                on_samples(&mono);
             }
-
-            decode_interleaved_to_mono(
-                &raw[..frames_read as usize * bytes_per_frame],
-                frames_read as usize,
-                config.channels,
-                config.sample_format,
-                buffer_info.flags.silent,
-                &mut mono,
-            );
-            on_samples(&mono);
+            wait_for_stream_event(&stream.event_handle, &running);
         }
         Ok(())
     })();
@@ -326,6 +321,7 @@ fn run_output_stream<F>(
 where
     F: FnMut(&mut [f32]) + Send + 'static,
 {
+    raise_current_thread_priority("output");
     let initialized = init_output_stream(&config);
     let stream = match initialized {
         Ok(stream) => {
@@ -355,23 +351,22 @@ where
     }
     let _ = start_tx.send(Ok(()));
     let result = (|| -> Result<()> {
-        let mut mono = Vec::<f32>::new();
-        let mut raw = Vec::<u8>::new();
-        let sleep = poll_sleep(&config);
+        let buffer_frames = stream.audio_client.get_buffer_size()? as usize;
+        let bytes_per_frame = config.wave_format.get_blockalign() as usize;
+        let mut mono = Vec::<f32>::with_capacity(buffer_frames);
+        let mut raw = Vec::<u8>::with_capacity(buffer_frames * bytes_per_frame);
 
         while running.load(Ordering::SeqCst) {
             let frames_available = stream.audio_client.get_available_space_in_frames()?;
-            if frames_available == 0 {
-                thread::sleep(sleep);
-                continue;
+            if frames_available > 0 {
+                mono.resize(frames_available as usize, 0.0);
+                fill(&mut mono);
+                encode_mono_to_interleaved(&mono, config.channels, config.sample_format, &mut raw);
+                stream
+                    .render_client
+                    .write_to_device(frames_available as usize, &raw, None)?;
             }
-
-            mono.resize(frames_available as usize, 0.0);
-            fill(&mut mono);
-            encode_mono_to_interleaved(&mono, config.channels, config.sample_format, &mut raw);
-            stream
-                .render_client
-                .write_to_device(frames_available as usize, &raw, None)?;
+            wait_for_stream_event(&stream.event_handle, &running);
         }
         Ok(())
     })();
@@ -382,18 +377,26 @@ where
 struct ActiveInputStream {
     audio_client: AudioClient,
     capture_client: wasapi::AudioCaptureClient,
+    event_handle: wasapi::Handle,
     _com: ComGuard,
 }
 
 struct ActiveOutputStream {
     audio_client: AudioClient,
     render_client: wasapi::AudioRenderClient,
+    event_handle: wasapi::Handle,
     _com: ComGuard,
 }
 
 fn init_input_stream(config: &WasapiStreamConfig) -> Result<ActiveInputStream> {
     let _com = ComGuard::initialize()?;
     let audio_client = initialized_client(config, Direction::Capture)?;
+    let event_handle = audio_client.set_get_eventhandle().with_context(|| {
+        format!(
+            "failed to create WASAPI event handle for {}",
+            config.device_name
+        )
+    })?;
     let capture_client = audio_client.get_audiocaptureclient().with_context(|| {
         format!(
             "failed to create WASAPI capture client for {}",
@@ -403,6 +406,7 @@ fn init_input_stream(config: &WasapiStreamConfig) -> Result<ActiveInputStream> {
     Ok(ActiveInputStream {
         audio_client,
         capture_client,
+        event_handle,
         _com,
     })
 }
@@ -410,6 +414,12 @@ fn init_input_stream(config: &WasapiStreamConfig) -> Result<ActiveInputStream> {
 fn init_output_stream(config: &WasapiStreamConfig) -> Result<ActiveOutputStream> {
     let _com = ComGuard::initialize()?;
     let audio_client = initialized_client(config, Direction::Render)?;
+    let event_handle = audio_client.set_get_eventhandle().with_context(|| {
+        format!(
+            "failed to create WASAPI event handle for {}",
+            config.device_name
+        )
+    })?;
     let render_client = audio_client.get_audiorenderclient().with_context(|| {
         format!(
             "failed to create WASAPI render client for {}",
@@ -419,6 +429,7 @@ fn init_output_stream(config: &WasapiStreamConfig) -> Result<ActiveOutputStream>
     Ok(ActiveOutputStream {
         audio_client,
         render_client,
+        event_handle,
         _com,
     })
 }
@@ -459,6 +470,21 @@ fn stop_stream(audio_client: &AudioClient, name: &str) {
     }
 }
 
+fn raise_current_thread_priority(name: &str) {
+    if let Err(err) = set_current_thread_priority(ThreadPriority::Max) {
+        warn!("failed to set WASAPI {name} thread priority: {err}");
+    }
+}
+
+fn wait_for_stream_event(event_handle: &wasapi::Handle, running: &AtomicBool) {
+    // Keep the timeout finite so Drop can join promptly without having to signal
+    // the WASAPI event handle. Timeouts are expected during shutdown and should
+    // not be logged from the audio thread.
+    if running.load(Ordering::SeqCst) {
+        let _ = event_handle.wait_for_event(EVENT_WAIT_TIMEOUT_MS);
+    }
+}
+
 fn wait_until_started(running: &AtomicBool, started: &AtomicBool) {
     while running.load(Ordering::SeqCst) && !started.load(Ordering::SeqCst) {
         thread::sleep(Duration::from_millis(1));
@@ -466,13 +492,14 @@ fn wait_until_started(running: &AtomicBool, started: &AtomicBool) {
 }
 
 fn stream_mode(config: &WasapiStreamConfig) -> StreamMode {
+    // This backend is intentionally event-only. Exclusive event mode requires
+    // buffer duration to equal the period, so only the aligned period is passed.
     if config.exclusive {
-        StreamMode::PollingExclusive {
-            buffer_duration_hns: config.buffer_duration_hns,
+        StreamMode::EventsExclusive {
             period_hns: config.period_hns,
         }
     } else {
-        StreamMode::PollingShared {
+        StreamMode::EventsShared {
             autoconvert: true,
             buffer_duration_hns: config.buffer_duration_hns,
         }
@@ -562,8 +589,7 @@ struct StreamConfigSelection {
     sample_rate: u32,
     channels: usize,
     exclusive: bool,
-    wasapi_period_ms: u32,
-    wasapi_buffer_periods: u32,
+    wasapi_buffer_ms: u32,
     direction: Direction,
 }
 
@@ -576,8 +602,7 @@ fn select_stream_config(
         sample_rate,
         channels,
         exclusive,
-        wasapi_period_ms,
-        wasapi_buffer_periods,
+        wasapi_buffer_ms,
         direction,
     } = selection;
     let audio_client = device
@@ -590,8 +615,7 @@ fn select_stream_config(
     let (period_hns, buffer_duration_hns) = stream_periods(
         &audio_client,
         &wave_format,
-        wasapi_period_ms,
-        wasapi_buffer_periods,
+        wasapi_buffer_ms,
         sample_rate,
         exclusive,
     )?;
@@ -652,8 +676,7 @@ fn choose_format(
 fn stream_periods(
     audio_client: &AudioClient,
     wave_format: &WaveFormat,
-    wasapi_period_ms: u32,
-    wasapi_buffer_periods: u32,
+    wasapi_buffer_ms: u32,
     sample_rate: u32,
     exclusive: bool,
 ) -> Result<(i64, i64)> {
@@ -663,11 +686,11 @@ fn stream_periods(
         _default_period / 10000,
         min_period / 10000
     );
-    let desired_period = if wasapi_period_ms == 0 || wasapi_period_ms < (min_period / 10000) as u32
+    let desired_period = if wasapi_buffer_ms == 0 || wasapi_buffer_ms < (min_period / 10000) as u32
     {
         min_period
     } else {
-        let desired_frames = ((sample_rate as u64 * wasapi_period_ms as u64) / 1000).max(1) as i64;
+        let desired_frames = ((sample_rate as u64 * wasapi_buffer_ms as u64) / 1000).max(1) as i64;
         calculate_period_100ns(desired_frames, sample_rate as i64)
     };
     let period = desired_period.max(min_period);
@@ -676,14 +699,10 @@ fn stream_periods(
     } else {
         period
     };
-    debug!("WASAPI stream period: {} ms", period / 10000);
-    Ok((period, period * wasapi_buffer_periods.max(1) as i64))
-}
-
-fn poll_sleep(config: &WasapiStreamConfig) -> Duration {
-    let sleep_us =
-        (config.period_hns.max(10) as u64 / 20).clamp(MIN_POLL_SLEEP_US, MAX_POLL_SLEEP_US);
-    Duration::from_micros(sleep_us)
+    // In event-exclusive mode WASAPI requires hnsBufferDuration == hnsPeriodicity;
+    // keep the config fields equal so future polling-era multipliers do not leak back in.
+    debug!("WASAPI event period/buffer duration: {} ms", period / 10000);
+    Ok((period, period))
 }
 
 struct ComGuard;
@@ -796,6 +815,42 @@ pub(crate) fn encode_mono_to_interleaved(
 mod tests {
     use super::*;
     use approx::assert_abs_diff_eq;
+
+    fn test_config(exclusive: bool) -> WasapiStreamConfig {
+        WasapiStreamConfig {
+            device_id: "test-device".to_string(),
+            device_name: "test device".to_string(),
+            wave_format: WaveFormat::new(32, 32, &SampleType::Float, 48_000, 2, None),
+            sample_rate: 48_000,
+            channels: 2,
+            sample_format: WasapiSampleFormat::F32,
+            exclusive,
+            period_hns: 30_000,
+            buffer_duration_hns: 40_000,
+        }
+    }
+
+    #[test]
+    fn shared_stream_config_uses_event_timing() {
+        match stream_mode(&test_config(false)) {
+            StreamMode::EventsShared {
+                autoconvert,
+                buffer_duration_hns,
+            } => {
+                assert!(autoconvert);
+                assert_eq!(buffer_duration_hns, 40_000);
+            }
+            mode => panic!("expected shared event stream mode, got {mode:?}"),
+        }
+    }
+
+    #[test]
+    fn exclusive_stream_config_uses_event_period() {
+        match stream_mode(&test_config(true)) {
+            StreamMode::EventsExclusive { period_hns } => assert_eq!(period_hns, 30_000),
+            mode => panic!("expected exclusive event stream mode, got {mode:?}"),
+        }
+    }
 
     #[test]
     fn decodes_stereo_f32_to_mono() {

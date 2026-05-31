@@ -73,8 +73,7 @@ pub fn run_realtime(args: RunArgs) -> Result<()> {
         args.wasapi_output_exclusive(),
         args.input.as_deref(),
         args.output.as_deref(),
-        args.wasapi_period_ms,
-        args.wasapi_buffer_periods,
+        args.wasapi_buffer_ms,
     )?;
     let sample_rate = realtime_audio.sample_rate();
     let chunk_samples = ((sample_rate as u64 * args.chunk_ms as u64) / 1000).max(128) as usize;
@@ -103,8 +102,8 @@ pub fn run_realtime(args: RunArgs) -> Result<()> {
     info!("input device: {}", realtime_audio.input_name());
     info!("output device: {}", realtime_audio.output_name());
     info!(
-        "sample_rate={} chunk_ms={} chunk_samples={} wasapi_period_ms={} wasapi_buffer_periods={} crossfade_samples={} sola_search_samples={} smoother={:?} rvc_output_tail_discard_ms={} extra_convert_ms={}",
-        sample_rate, args.chunk_ms, chunk_samples, args.wasapi_period_ms, args.wasapi_buffer_periods, crossfade_samples, sola_search_samples, smoother_kind, rvc_output_tail_discard_ms, extra_convert_ms
+        "sample_rate={} chunk_ms={} chunk_samples={} wasapi_buffer_ms={} crossfade_samples={} sola_search_samples={} smoother={:?} rvc_output_tail_discard_ms={} extra_convert_ms={}",
+        sample_rate, args.chunk_ms, chunk_samples, args.wasapi_buffer_ms, crossfade_samples, sola_search_samples, smoother_kind, rvc_output_tail_discard_ms, extra_convert_ms
     );
     if !args.passthrough {
         info!("silence_threshold={}", args.silence_threshold);
