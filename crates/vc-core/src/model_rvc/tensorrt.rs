@@ -12,7 +12,7 @@ use ort::value::Tensor;
 use ort::{ortsys, AsPointer};
 use tracing::{debug, info, warn};
 
-use crate::cli::Provider;
+use crate::Provider;
 
 use super::sessions::HubertEmbedderSession;
 use super::shape::onnx_silence_front_feature_frames;

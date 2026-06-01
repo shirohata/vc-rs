@@ -11,9 +11,9 @@ use tracing::{debug, error, info};
 
 use crate::audio;
 use crate::cli::{RunArgs, Smoother, WavArgs, DEFAULT_CROSSFADE_MS, DEFAULT_SOLA_SEARCH_MS};
-use crate::dsp;
-use crate::model_rvc::{PassthroughModel, RvcPipeline, RvcPipelineConfig, VoiceModel};
-use crate::sola::{self, ChunkSmootherConfig, SmoothingKind};
+use vc_core::dsp;
+use vc_core::model_rvc::{PassthroughModel, RvcPipeline, RvcPipelineConfig, VoiceModel};
+use vc_core::sola::{self, ChunkSmootherConfig, SmoothingKind};
 
 const INPUT_QUEUE_CHUNKS: usize = 4;
 const OUTPUT_QUEUE_CHUNKS: usize = 4;

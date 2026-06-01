@@ -1,0 +1,28 @@
+[package]
+name = "vc-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CLI-based RVC voice conversion prototype in Rust"
+
+[[bin]]
+name = "vc-rs"
+path = "src/main.rs"
+
+[dependencies]
+vc-core = { path = "../vc-core", features = ["clap"] }
+anyhow.workspace = true
+tracing.workspace = true
+clap = { version = "4.5", features = ["derive"] }
+cpal = "0.17"
+ctrlc = "3.4"
+hound = "3.5"
+rtrb = "0.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+thread-priority = "3.0.0"
+
+[target.'cfg(windows)'.dependencies]
+wasapi = "0.23"
+
+[dev-dependencies]
+approx = "0.5"

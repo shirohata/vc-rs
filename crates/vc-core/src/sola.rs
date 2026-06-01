@@ -4,24 +4,24 @@ use crate::dsp;
 use crate::model_rvc::ModelOutput;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SmoothingKind {
+pub enum SmoothingKind {
     Sola,
     Psola,
 }
 
-pub(crate) struct ChunkSmootherConfig {
-    pub(crate) kind: SmoothingKind,
-    pub(crate) output_chunk_samples: usize,
-    pub(crate) output_sample_rate: u32,
-    pub(crate) model_sample_rate: u32,
-    pub(crate) crossfade_ms: u32,
-    pub(crate) sola_search_ms: u32,
-    pub(crate) tail_discard_ms: u32,
+pub struct ChunkSmootherConfig {
+    pub kind: SmoothingKind,
+    pub output_chunk_samples: usize,
+    pub output_sample_rate: u32,
+    pub model_sample_rate: u32,
+    pub crossfade_ms: u32,
+    pub sola_search_ms: u32,
+    pub tail_discard_ms: u32,
 }
 
-pub(crate) struct PreparedModelAudio {
-    pub(crate) audio: Vec<f32>,
-    pub(crate) sola_offset: usize,
+pub struct PreparedModelAudio {
+    pub audio: Vec<f32>,
+    pub sola_offset: usize,
 }
 
 struct SmoothedAudio {
@@ -35,7 +35,7 @@ const PSOLA_MAX_RELATIVE_F0_STDDEV: f32 = 0.20;
 const PSOLA_MIN_RMS: f32 = 1e-4;
 const PSOLA_MIN_SCORE: f32 = 0.05;
 
-pub(crate) struct SolaChunkJoiner {
+pub struct SolaChunkJoiner {
     chunk_samples: usize,
     crossfade_samples: usize,
     sola_search_samples: usize,
@@ -191,7 +191,7 @@ impl SolaChunkJoiner {
     }
 }
 
-pub(crate) struct PsolaChunkJoiner {
+pub struct PsolaChunkJoiner {
     inner: SolaChunkJoiner,
     sample_rate: u32,
     pitch_mark_weights: Vec<f32>,
@@ -270,7 +270,7 @@ impl PsolaChunkJoiner {
     }
 }
 
-pub(crate) enum ChunkSmoother {
+pub enum ChunkSmoother {
     Sola(SolaChunkJoiner),
     Psola(PsolaChunkJoiner),
 }
@@ -291,7 +291,7 @@ impl ChunkSmoother {
         }
     }
 
-    pub(crate) fn prime_model_output(&mut self, audio: &[f32], pitchf: &[f32]) {
+    pub fn prime_model_output(&mut self, audio: &[f32], pitchf: &[f32]) {
         let _ = self.process(audio, pitchf);
     }
 
@@ -309,14 +309,14 @@ impl ChunkSmoother {
         }
     }
 
-    pub(crate) fn crossfade_samples(&self) -> usize {
+    pub fn crossfade_samples(&self) -> usize {
         match self {
             Self::Sola(joiner) => joiner.crossfade_samples,
             Self::Psola(joiner) => joiner.crossfade_samples(),
         }
     }
 
-    pub(crate) fn sola_search_samples(&self) -> usize {
+    pub fn sola_search_samples(&self) -> usize {
         match self {
             Self::Sola(joiner) => joiner.sola_search_samples,
             Self::Psola(joiner) => joiner.sola_search_samples(),
@@ -516,7 +516,7 @@ fn vcclient_crossfade_gains(index: usize, len: usize) -> (f32, f32) {
     (prev_gain, cur_gain)
 }
 
-pub(crate) fn ms_to_samples(sample_rate: u32, ms: u32) -> usize {
+pub fn ms_to_samples(sample_rate: u32, ms: u32) -> usize {
     ((sample_rate as u64 * ms as u64) / 1000) as usize
 }
 
@@ -546,7 +546,7 @@ fn model_domain_sola_joiner(config: &ChunkSmootherConfig) -> SolaChunkJoiner {
     )
 }
 
-pub(crate) fn model_domain_chunk_smoother(config: ChunkSmootherConfig) -> ChunkSmoother {
+pub fn model_domain_chunk_smoother(config: ChunkSmootherConfig) -> ChunkSmoother {
     match config.kind {
         SmoothingKind::Sola => ChunkSmoother::Sola(model_domain_sola_joiner(&config)),
         SmoothingKind::Psola => ChunkSmoother::Psola(PsolaChunkJoiner::new(
@@ -613,7 +613,7 @@ fn last_or_pad(input: &[f32], len: usize) -> Vec<f32> {
     }
 }
 
-pub(crate) fn prepare_model_output(
+pub fn prepare_model_output(
     out: ModelOutput,
     output_sample_rate: u32,
     output_chunk_samples: usize,

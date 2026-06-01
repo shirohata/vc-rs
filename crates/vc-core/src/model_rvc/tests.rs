@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::cli::Provider;
+use crate::Provider;
 
 use super::pitch::{
     align_pitchf_to_features, center_crop_pitchf_to_features, pitchf_tail_for_output,

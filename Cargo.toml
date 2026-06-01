@@ -1,31 +1,15 @@
-[package]
-name = "vc-rs"
+[workspace]
+resolver = "2"
+members = ["crates/vc-core", "crates/vc-cli", "crates/vc-vst3", "xtask"]
+exclude = ["tools/tensorrt_probe"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "CLI-based RVC voice conversion prototype in Rust"
 
-[dependencies]
+[workspace.dependencies]
 anyhow = "1.0"
-audioadapter-buffers = "3"
-clap = { version = "4.5", features = ["derive"] }
-cpal = "0.17"
-ctrlc = "3.4"
-hound = "3.5"
-ort = { version = "2.0.0-rc.12", features = ["cuda", "tensorrt"] }
-rubato = "2"
-rtrb = "0.3"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-thread-priority = "3.0.0"
-xxhash-rust = { version = "0.8.15", default-features = false, features = ["xxh3"] }
-
-[target.'cfg(windows)'.dependencies]
-wasapi = "0.23"
-
-[build-dependencies]
-cc = "1"
-
-[dev-dependencies]
-approx = "0.5"
-
+rubato = "2"
+ort = { version = "2.0.0-rc.12", features = ["cuda", "tensorrt"] }

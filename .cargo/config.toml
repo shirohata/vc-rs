@@ -1,0 +1,4 @@
+[alias]
+# `cargo xtask bundle vc-vst3 --release` builds the plugin and wraps the cdylib
+# into .vst3 / .clap bundles under target/bundled/.
+xtask = "run --package xtask --release --"

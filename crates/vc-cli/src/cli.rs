@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
+pub use vc_core::Provider;
+
 pub const DEFAULT_CROSSFADE_MS: u32 = 85;
 pub const DEFAULT_EXTRA_CONVERT_MS: u32 = 100;
 pub const DEFAULT_INPUT_GAIN: f32 = 1.0;
@@ -37,32 +39,6 @@ pub enum Command {
     Run(RunArgs),
     /// Run conversion against a wav file for model/DSP verification.
     Wav(WavArgs),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-pub enum Provider {
-    Cpu,
-    Cuda,
-    #[value(name = "tensorrt", alias = "trt", alias = "tensor-rt")]
-    TensorRt,
-}
-
-impl Provider {
-    pub fn label(self) -> &'static str {
-        match self {
-            Provider::Cpu => "cpu",
-            Provider::Cuda => "cuda",
-            Provider::TensorRt => "tensorrt",
-        }
-    }
-
-    pub fn is_tensorrt(self) -> bool {
-        matches!(self, Provider::TensorRt)
-    }
-
-    pub fn is_cuda(self) -> bool {
-        matches!(self, Provider::Cuda)
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]

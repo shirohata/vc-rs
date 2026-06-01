@@ -2,7 +2,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 use crate::cli::{AudioBackend, DeviceAudioBackend};
-use crate::dsp;
+use vc_core::dsp;
 
 const CPAL_SCRATCH_FALLBACK_SAMPLES: usize = 65_536;
 const CPAL_MAX_SCRATCH_SAMPLES: usize = 65_536;

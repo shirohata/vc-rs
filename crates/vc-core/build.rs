@@ -51,10 +51,18 @@ struct NativeTensorRtPaths {
 impl NativeTensorRtPaths {
     fn detect() -> Option<Self> {
         let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR")?);
+        // The bundled TensorRT folder lives at the workspace root. This crate's
+        // manifest is at `crates/vc-core`, so walk two levels up to find it when
+        // `TENSORRT_ROOT` is not set explicitly.
+        let workspace_root = manifest_dir
+            .parent()
+            .and_then(|p| p.parent())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| manifest_dir.clone());
         let tensorrt_root = env::var_os("TENSORRT_ROOT")
             .map(PathBuf::from)
             .unwrap_or_else(|| {
-                manifest_dir
+                workspace_root
                     .join("TensorRT-10.16.1.11.Windows.amd64.cuda-12.9")
                     .join("TensorRT-10.16.1.11")
             });

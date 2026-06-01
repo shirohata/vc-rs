@@ -1,0 +1,50 @@
+# vc-rs VST3/CLAP plugin configuration (headless).
+#
+# Copy this file to one of the locations the plugin searches, in order:
+#   1. the path in the VC_RS_VST3_CONFIG environment variable
+#   2. <os-config-dir>/vc-rs/vst3.toml
+#      (%APPDATA% on Windows, $XDG_CONFIG_HOME or ~/.config elsewhere)
+#   3. vc-rs-vst3.toml in the host's working directory
+#
+# All fields are optional; omitted fields fall back to the defaults shown here
+# (which match the CLI `run` defaults). The three model paths are required for
+# conversion — if any is missing the plugin loads but stays silent.
+# Use absolute paths; forward slashes work on every platform.
+
+# --- Models (required for conversion) ---
+model = "/path/to/models/rvc/your_model.onnx"
+embedder = "/path/to/models/hubert/contentvec.onnx"
+f0_model = "/path/to/models/rmvpe/rmvpe.onnx"
+
+# Optional: explicit embedder output tensor name, and a prebuilt native TensorRT
+# RVC engine file (used with provider = "tensorrt" / "cuda").
+# embedder_output = "output"
+# rvc_engine = "/path/to/models/rvc/your_model.engine"
+
+# --- Backend ---
+# "cpu" | "cuda" | "tensorrt"
+provider = "tensorrt"
+
+# --- Conversion parameters (initial values; pitch/speaker/gains are also
+#     exposed as host-automatable parameters that override these at runtime) ---
+speaker_id = 0
+pitch_shift = 0.0          # semitones
+f0_threshold = 0.3
+silence_threshold = 0.0001
+input_gain = 1.0           # linear
+output_gain = 1.0          # linear
+
+# --- Latency / chunking (milliseconds) ---
+chunk_ms = 500             # larger = more context + more latency
+crossfade_ms = 85
+sola_search_ms = 12
+rvc_output_tail_discard_ms = 10
+extra_convert_ms = 100
+smoother = "sola"          # "sola" | "psola"
+
+# --- Volume handling ---
+volume_envelope = false
+rms_mix_rate = 0.0
+auto_output_gain = false
+target_output_rms = 0.03
+max_output_gain = 512.0

@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 use tracing::{debug, info};
 
-use crate::cli::Provider;
+use crate::Provider;
 use crate::dsp;
 
 use super::api::{ModelOutput, VoiceModel};
@@ -407,6 +407,25 @@ impl RvcPipeline {
             pitchf_scratch: Vec::new(),
             pitch_scratch: Vec::new(),
         })
+    }
+
+    /// Runtime-mutable conversion parameters. These mirror the matching
+    /// `RvcPipelineConfig` fields and let a host (e.g. the VST3 plugin) drive
+    /// them from automation between chunks without reloading the pipeline.
+    pub fn set_pitch_shift(&mut self, pitch_shift: f32) {
+        self.pitch_shift = pitch_shift;
+    }
+
+    pub fn set_speaker_id(&mut self, speaker_id: i64) {
+        self.speaker_id = speaker_id;
+    }
+
+    pub fn set_input_gain(&mut self, input_gain: f32) {
+        self.input_gain = input_gain;
+    }
+
+    pub fn set_output_gain(&mut self, output_gain: f32) {
+        self.output_gain = output_gain;
     }
 }
 

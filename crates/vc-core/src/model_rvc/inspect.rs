@@ -3,7 +3,7 @@ use std::path::Path;
 use anyhow::Result;
 use tracing::info;
 
-use crate::cli::Provider;
+use crate::Provider;
 
 use super::sessions::{
     describe_value_type, expected_feat_channels, load_session, require_inputs, require_output,

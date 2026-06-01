@@ -1,12 +1,10 @@
 mod audio;
 mod cli;
-mod dsp;
 mod engine;
-mod model_rvc;
-mod sola;
 
 use anyhow::Result;
 use cli::{Cli, Command};
+use vc_core::model_rvc;
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::EnvFilter;
 

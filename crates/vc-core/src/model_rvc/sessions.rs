@@ -11,7 +11,7 @@ use ort::session::{IoBinding, Session};
 use ort::value::{Tensor, TensorRef, ValueType};
 use tracing::{debug, info};
 
-use crate::cli::Provider;
+use crate::Provider;
 
 use super::feature::FeatureTensor;
 use super::native_tensorrt::{configured_rvc_engine_path, NativeRvcEngine};
