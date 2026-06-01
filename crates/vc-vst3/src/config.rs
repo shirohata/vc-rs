@@ -144,10 +144,13 @@ impl PluginConfig {
 
 /// The per-user config directory for the current OS:
 /// `%APPDATA%` on Windows, `$XDG_CONFIG_HOME` (or `$HOME/.config`) elsewhere.
+#[cfg(windows)]
 fn os_config_dir() -> Option<PathBuf> {
-    if let Some(appdata) = std::env::var_os("APPDATA") {
-        return Some(PathBuf::from(appdata));
-    }
+    std::env::var_os("APPDATA").map(PathBuf::from)
+}
+
+#[cfg(not(windows))]
+fn os_config_dir() -> Option<PathBuf> {
     if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
         return Some(PathBuf::from(xdg));
     }

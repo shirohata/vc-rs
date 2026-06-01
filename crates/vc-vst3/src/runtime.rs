@@ -9,7 +9,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use nih_plug::prelude::util;
 use rtrb::{Consumer, Producer, RingBuffer};
@@ -26,16 +26,33 @@ fn chunk_samples_for_rate(sample_rate: u32, chunk_ms: u32) -> usize {
     ((sample_rate as u64 * chunk_ms as u64) / 1000).max(128) as usize
 }
 
+/// How long [`PluginRuntime::drop`] waits for the worker to stop before
+/// detaching it. Keeps the host's unload/deactivate call from blocking on a
+/// slow, non-cancelable model load.
+const SHUTDOWN_JOIN_TIMEOUT: Duration = Duration::from_millis(200);
+
 /// Owns the worker thread and the audio-thread ends of the ring buffers.
 pub struct PluginRuntime {
     input_producer: Producer<f32>,
     output_consumer: Consumer<f32>,
     running: Arc<AtomicBool>,
+    /// Set by the worker (via [`FinishGuard`]) when `run` returns, so `drop` can
+    /// tell "stopped quickly" from "still loading" without a blocking join.
+    finished: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
     mono_in: Vec<f32>,
     mono_out: Vec<f32>,
     /// Reported plugin latency in host samples (for the host's PDC).
     pub latency_samples: u32,
+}
+
+/// Marks `finished` on worker exit, even on early return or panic.
+struct FinishGuard(Arc<AtomicBool>);
+
+impl Drop for FinishGuard {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
 }
 
 impl PluginRuntime {
@@ -61,6 +78,7 @@ impl PluginRuntime {
             RingBuffer::<f32>::new(chunk_samples * OUTPUT_QUEUE_CHUNKS);
 
         let running = Arc::new(AtomicBool::new(true));
+        let finished = Arc::new(AtomicBool::new(false));
 
         // Latency estimate: one chunk of input buffering plus the smoothing /
         // tail context, expressed in host samples. RVC has additional inherent
@@ -78,6 +96,7 @@ impl PluginRuntime {
             sola_search_ms,
             tail_discard_ms,
             running: Arc::clone(&running),
+            finished: Arc::clone(&finished),
             input_consumer,
             output_producer,
         }
@@ -87,6 +106,7 @@ impl PluginRuntime {
             input_producer,
             output_consumer,
             running,
+            finished,
             worker: Some(worker),
             mono_in: Vec::with_capacity(max_block),
             mono_out: vec![0.0; max_block],
@@ -147,9 +167,23 @@ impl PluginRuntime {
 impl Drop for PluginRuntime {
     fn drop(&mut self) {
         self.running.store(false, Ordering::SeqCst);
-        if let Some(handle) = self.worker.take() {
+        let Some(handle) = self.worker.take() else {
+            return;
+        };
+        // If the worker is idle or finishing a chunk it exits almost
+        // immediately, so wait briefly and join to reclaim it cleanly. If it is
+        // mid model-load (seconds, and not cancelable) we detach instead of
+        // blocking the host's unload/deactivate thread; the orphaned worker sees
+        // `running == false` and exits on its own once the load completes,
+        // freeing its pipeline and GPU resources.
+        let deadline = Instant::now() + SHUTDOWN_JOIN_TIMEOUT;
+        while !self.finished.load(Ordering::SeqCst) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        if self.finished.load(Ordering::SeqCst) {
             let _ = handle.join();
         }
+        // else: detached — dropping `handle` does not join.
     }
 }
 
@@ -163,6 +197,7 @@ struct WorkerCtx {
     sola_search_ms: u32,
     tail_discard_ms: u32,
     running: Arc<AtomicBool>,
+    finished: Arc<AtomicBool>,
     input_consumer: Consumer<f32>,
     output_producer: Producer<f32>,
 }
@@ -176,6 +211,10 @@ impl WorkerCtx {
     }
 
     fn run(mut self) {
+        // Signal `finished` on exit (normal, error, or panic) so a concurrent
+        // `PluginRuntime::drop` can join or detach without blocking.
+        let _finish_guard = FinishGuard(Arc::clone(&self.finished));
+
         // Load the pipeline up front (seconds for GPU backends). Until it
         // succeeds — or if no models are configured — the output ring stays
         // empty and the plugin emits silence.
@@ -191,6 +230,13 @@ impl WorkerCtx {
             nih_plug::nih_warn!("vc-vst3: no models configured; running silent");
             None
         };
+
+        // Loading can take seconds, during which the audio thread kept queuing
+        // input. Drop that backlog so conversion starts from the current audio
+        // instead of replaying samples from before the model was ready.
+        if pipeline.is_some() {
+            self.drain_input();
+        }
 
         let output_sample_rate = self.sample_rate;
         let output_chunk_samples = self.chunk_samples;
@@ -279,6 +325,16 @@ impl WorkerCtx {
 
             // Push to the output ring; drop the tail if the consumer is behind.
             let _ = self.output_producer.push_partial_slice(&prepared);
+        }
+    }
+
+    /// Discard everything currently queued in the input ring.
+    fn drain_input(&mut self) {
+        let backlog = self.input_consumer.slots();
+        if backlog > 0 {
+            if let Ok(chunk) = self.input_consumer.read_chunk(backlog) {
+                chunk.commit_all();
+            }
         }
     }
 
