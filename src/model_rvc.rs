@@ -1,6 +1,7 @@
 mod api;
 mod feature;
 mod inspect;
+mod native_tensorrt;
 mod pipeline;
 mod pitch;
 mod sessions;

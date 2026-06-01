@@ -23,6 +23,9 @@ xxhash-rust = { version = "0.8.15", default-features = false, features = ["xxh3"
 [target.'cfg(windows)'.dependencies]
 wasapi = "0.23"
 
+[build-dependencies]
+cc = "1"
+
 [dev-dependencies]
 approx = "0.5"
 

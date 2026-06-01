@@ -14,6 +14,7 @@ use tracing::{debug, info};
 use crate::cli::Provider;
 
 use super::feature::FeatureTensor;
+use super::native_tensorrt::{configured_rvc_engine_path, NativeRvcEngine};
 use super::tensorrt::*;
 
 pub(super) struct HubertEmbedderSession {
@@ -581,11 +582,12 @@ impl RvcCpuOutputBinding {
 }
 
 pub(super) struct RvcModelSession {
-    pub(super) session: Session,
+    pub(super) session: Option<Session>,
     pub(super) provider: Provider,
     pub(super) tensor_rt_profile: Option<TensorRtSessionProfile>,
     pub(super) tensor_rt_run_mode: TensorRtRunMode,
     pub(super) tensor_rt_binding: Option<RvcTensorRtBinding>,
+    native_rvc: Option<NativeRvcEngine>,
     cpu_output_binding: Option<RvcCpuOutputBinding>,
     pub(super) expected_feat_channels: i64,
 }
@@ -596,9 +598,54 @@ impl RvcModelSession {
         provider: Provider,
         tensor_rt_profile: Option<TensorRtSessionProfile>,
         expected_feat_channels_override: Option<i64>,
+        native_rvc_engine: Option<&Path>,
         tensor_rt_run_mode: TensorRtRunMode,
         tensor_rt_session_purpose: TensorRtSessionPurpose,
     ) -> Result<Self> {
+        if provider.is_tensorrt() {
+            if let Some(engine_path) = configured_rvc_engine_path(native_rvc_engine) {
+                let profile = tensor_rt_profile.as_ref().ok_or_else(|| {
+                    anyhow!("native TensorRT RVC requires a fixed-shape TensorRT profile")
+                })?;
+                let feats_shape = profile.fixed_input_dims("feats")?;
+                let pitch_shape = profile.fixed_input_dims("pitch")?;
+                let frames = pitch_shape
+                    .get(1)
+                    .copied()
+                    .ok_or_else(|| anyhow!("native TensorRT RVC pitch profile must be rank-2"))?;
+                let channels = feats_shape
+                    .get(2)
+                    .copied()
+                    .ok_or_else(|| anyhow!("native TensorRT RVC feats profile must be rank-3"))?;
+                let expected_feat_channels = expected_feat_channels_override
+                    .unwrap_or_else(|| i64::try_from(channels).unwrap_or(i64::MAX));
+                let native_rvc = NativeRvcEngine::load(&engine_path, frames, channels)
+                    .with_context(|| {
+                        format!(
+                            "failed to load native TensorRT RVC engine {}",
+                            engine_path.display()
+                        )
+                    })?;
+                info!(
+                    "loaded native TensorRT RVC engine model={} engine={} frames={} channels={} session_purpose={}",
+                    path.display(),
+                    native_rvc.path().display(),
+                    native_rvc.frames(),
+                    native_rvc.channels(),
+                    tensor_rt_session_purpose.label()
+                );
+                return Ok(Self {
+                    session: None,
+                    provider,
+                    tensor_rt_profile,
+                    tensor_rt_run_mode,
+                    tensor_rt_binding: None,
+                    native_rvc: Some(native_rvc),
+                    cpu_output_binding: None,
+                    expected_feat_channels,
+                });
+            }
+        }
         let session = load_session(
             path,
             provider,
@@ -616,11 +663,12 @@ impl RvcModelSession {
         validate_rvc_metadata(&session)?;
         info!("loaded RVC model: {}", path.display());
         Ok(Self {
-            session,
+            session: Some(session),
             provider,
             tensor_rt_profile,
             tensor_rt_run_mode,
             tensor_rt_binding: None,
+            native_rvc: None,
             cpu_output_binding: None,
             expected_feat_channels,
         })
@@ -632,6 +680,33 @@ impl RvcModelSession {
         feature_channels: i64,
         speaker_id: i64,
     ) -> Result<Vec<i64>> {
+        if let Some(native) = self.native_rvc.as_mut() {
+            if native.frames() != feature_len {
+                bail!(
+                    "native TensorRT RVC engine frame count {} does not match runtime feature_len {}",
+                    native.frames(),
+                    feature_len
+                );
+            }
+            if native.channels()
+                != usize::try_from(feature_channels).context("invalid RVC channel count")?
+            {
+                bail!(
+                    "native TensorRT RVC engine channel count {} does not match model channel count {}",
+                    native.channels(),
+                    feature_channels
+                );
+            }
+            // Load-time warmup keeps native TensorRT allocations and first enqueue
+            // outside the realtime audio path. Do not move this into per-chunk code.
+            let feats = vec![0.0f32; native.frames() * native.channels()];
+            let pitch = vec![1i64; native.frames()];
+            let pitchf = vec![0.0f32; native.frames()];
+            let output = native.infer(&feats, &pitch, &pitchf, speaker_id)?;
+            return Ok(vec![
+                i64::try_from(output.len()).context("native RVC output length overflow")?
+            ]);
+        }
         let feats_shape = vec![1i64, feature_len as i64, feature_channels];
         let feats_shape_usize = i64_shape_to_usize(&feats_shape, "feats")?;
         validate_tensorrt_input_shape(
@@ -662,7 +737,11 @@ impl RvcModelSession {
         let pitchf = Tensor::from_array((pitch_shape, vec![0.0f32; feature_len]))?;
         let sid = Tensor::from_array(([1usize], vec![speaker_id]))?;
         let run_start = Instant::now();
-        let outputs = self.session.run(ort::inputs![
+        let session = self
+            .session
+            .as_mut()
+            .ok_or_else(|| anyhow!("RVC ORT session is not initialized"))?;
+        let outputs = session.run(ort::inputs![
             "feats" => feats,
             "p_len" => p_len,
             "pitch" => pitch,
@@ -688,6 +767,9 @@ impl RvcModelSession {
         output_shape: &[i64],
         speaker_id: i64,
     ) -> Result<()> {
+        if self.native_rvc.is_some() {
+            return Ok(());
+        }
         if !provider_uses_fixed_shape(self.provider) {
             return Ok(());
         }
@@ -705,7 +787,9 @@ impl RvcModelSession {
         let binding = match self.tensor_rt_run_mode {
             TensorRtRunMode::PinnedCpu => {
                 RvcTensorRtBinding::Pinned(RvcTensorRtPinnedBinding::new(
-                    &self.session,
+                    self.session
+                        .as_ref()
+                        .ok_or_else(|| anyhow!("RVC ORT session is not initialized"))?,
                     feats_shape,
                     pitch_shape,
                     &output_shape,
@@ -714,8 +798,12 @@ impl RvcModelSession {
                 )?)
             }
             TensorRtRunMode::DeviceIo | TensorRtRunMode::CudaGraph => {
+                let session = self
+                    .session
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("RVC ORT session is not initialized"))?;
                 let mut binding = RvcTensorRtGraphBinding::new(
-                    &self.session,
+                    session,
                     feats_shape,
                     pitch_shape,
                     &output_shape,
@@ -723,7 +811,7 @@ impl RvcModelSession {
                     speaker_id,
                 )?;
                 binding.warmup_capture(
-                    &mut self.session,
+                    session,
                     self.provider,
                     self.tensor_rt_run_mode.cuda_graph(),
                 )?;
@@ -757,8 +845,11 @@ impl RvcModelSession {
         if self.provider != Provider::Cpu {
             return Ok(());
         }
-        let binding =
-            RvcCpuOutputBinding::new(&self.session, feats_shape, pitch_shape, output_shape)?;
+        let session = self
+            .session
+            .as_ref()
+            .ok_or_else(|| anyhow!("RVC ORT session is not initialized"))?;
+        let binding = RvcCpuOutputBinding::new(session, feats_shape, pitch_shape, output_shape)?;
         info!(
             "CPU output IoBinding enabled model_role={} inputs=feats:{},pitch:{},pitchf:{} output=audio output_shape={}",
             ModelRole::Rvc.label(),
@@ -800,6 +891,9 @@ impl RvcModelSession {
             "pitchf",
             &pitch_shape,
         )?;
+        if let Some(native) = self.native_rvc.as_mut() {
+            return native.infer(feats, pitch, pitchf, speaker_id);
+        }
         if self.tensor_rt_binding.is_some() {
             return self.infer_with_binding(feats, frame_len, pitch, pitchf, speaker_id);
         }
@@ -853,9 +947,13 @@ impl RvcModelSession {
         let pitch = TensorRef::from_array_view((*pitch_shape, pitch))?;
         let pitchf = TensorRef::from_array_view((*pitch_shape, pitchf))?;
         let sid = TensorRef::from_array_view(([1usize], sid_value.as_slice()))?;
+        let session = self
+            .session
+            .as_mut()
+            .ok_or_else(|| anyhow!("RVC ORT session is not initialized"))?;
         let (output_shape, output_data) = {
             let run_start = Instant::now();
-            let outputs = self.session.run(ort::inputs![
+            let outputs = session.run(ort::inputs![
                 "feats" => feats,
                 "p_len" => p_len,
                 "pitch" => pitch,
@@ -902,6 +1000,10 @@ impl RvcModelSession {
         let pitchf = TensorRef::from_array_view((*pitch_shape, pitchf))?;
         let sid = TensorRef::from_array_view(([1usize], sid_value.as_slice()))?;
         let provider = self.provider;
+        let session = self
+            .session
+            .as_mut()
+            .ok_or_else(|| anyhow!("RVC ORT session is not initialized"))?;
         let binding = self
             .cpu_output_binding
             .as_mut()
@@ -931,7 +1033,7 @@ impl RvcModelSession {
                 .binding
                 .bind_input("sid", &sid)
                 .context("failed to bind CPU RVC input 'sid'")?;
-            let _outputs = self.session.run_binding(&binding.binding)?;
+            let _outputs = session.run_binding(&binding.binding)?;
             binding
                 .binding
                 .synchronize_outputs()
@@ -972,6 +1074,10 @@ impl RvcModelSession {
             .tensor_rt_binding
             .as_mut()
             .ok_or_else(|| anyhow!("TensorRT RVC IoBinding is not initialized"))?;
+        let session = self
+            .session
+            .as_mut()
+            .ok_or_else(|| anyhow!("RVC ORT session is not initialized"))?;
         match binding {
             RvcTensorRtBinding::Pinned(binding) => {
                 copy_f32_tensor(&mut binding.feats, feats, "feats")?;
@@ -991,7 +1097,7 @@ impl RvcModelSession {
                     .bind_input("pitchf", &binding.pitchf)
                     .context("failed to bind TensorRT RVC input 'pitchf'")?;
                 let run_start = Instant::now();
-                let _outputs = self.session.run_binding(&binding.binding)?;
+                let _outputs = session.run_binding(&binding.binding)?;
                 binding
                     .binding
                     .synchronize_outputs()
@@ -1030,7 +1136,7 @@ impl RvcModelSession {
                 binding.copy_fixed_scalars_if_changed(frame_len as i64, speaker_id)?;
                 let h2d_us = h2d_start.elapsed().as_micros();
                 let run_start = Instant::now();
-                let _outputs = self.session.run_binding(&binding.binding)?;
+                let _outputs = session.run_binding(&binding.binding)?;
                 let run_us = run_start.elapsed().as_micros();
                 let d2h_start = Instant::now();
                 copy_f32_tensor_to_host(&binding.device_output, &mut binding.host_output, "audio")?;
@@ -1133,13 +1239,20 @@ pub(super) fn load_session(
             })?;
             let cache_path = cache_dir.display().to_string();
             let timing_cache_path = timing_cache_dir.display().to_string();
+            let engine_cache_enabled = role != ModelRole::Rvc;
+            let timing_cache_enabled = role != ModelRole::Rvc;
+            let dump_subgraphs_enabled = role == ModelRole::Rvc;
+            let cuda_graph_enabled = false;
             info!(
-                "requesting ONNX Runtime TensorRT backend session_purpose={} model_role={} model={} provider_order=[TensorRT,CUDA] device_id={} fp16=true engine_cache=true timing_cache=true cuda_graph={} device_io={} run_mode={} cache_root={} model_cache_key={} cache_path={} timing_cache_path={} profile_shapes={} cache_status={}",
+                "requesting ONNX Runtime TensorRT backend session_purpose={} model_role={} model={} provider_order=[TensorRT,CUDA] device_id={} fp16=true engine_cache={} timing_cache={} dump_subgraphs={} cuda_graph={} device_io={} run_mode={} cache_root={} model_cache_key={} cache_path={} timing_cache_path={} profile_shapes={} cache_status={}",
                 tensor_rt_session_purpose.label(),
                 role.label(),
                 path.display(),
                 TENSORRT_DEVICE_ID,
-                tensor_rt_run_mode.cuda_graph(),
+                engine_cache_enabled,
+                timing_cache_enabled,
+                dump_subgraphs_enabled,
+                cuda_graph_enabled,
                 tensor_rt_run_mode.device_io(),
                 tensor_rt_run_mode.label(),
                 cache_root.display(),
@@ -1163,13 +1276,16 @@ pub(super) fn load_session(
             let tensorrt = ep::TensorRT::default()
                 .with_device_id(TENSORRT_DEVICE_ID)
                 .with_fp16(true)
-                .with_engine_cache(true)
+                .with_engine_cache(engine_cache_enabled)
                 .with_engine_cache_path(cache_path)
-                .with_timing_cache(true)
+                .with_timing_cache(timing_cache_enabled)
                 .with_timing_cache_path(timing_cache_path)
                 .with_force_timing_cache(false)
                 .with_detailed_build_log(true)
-                .with_cuda_graph(tensor_rt_run_mode.cuda_graph())
+                .with_dump_subgraphs(dump_subgraphs_enabled)
+                .with_cuda_graph(cuda_graph_enabled)
+                .with_builder_optimization_level(0)
+                .with_max_workspace_size(4 * 1024 * 1024 * 1024)
                 .with_profile_min_shapes(profile_shapes)
                 .with_profile_opt_shapes(profile_shapes)
                 .with_profile_max_shapes(profile_shapes)

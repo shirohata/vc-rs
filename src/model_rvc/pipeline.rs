@@ -60,6 +60,7 @@ pub struct RvcPipelineConfig<'a> {
     pub embedder: &'a Path,
     pub embedder_output: Option<&'a str>,
     pub f0_model: &'a Path,
+    pub rvc_engine: Option<&'a Path>,
     pub provider: Provider,
     pub sample_rate: u32,
     pub chunk_samples: usize,
@@ -94,6 +95,7 @@ impl RvcPipeline {
             config.provider,
             None,
             None,
+            config.rvc_engine,
             TensorRtRunMode::PinnedCpu,
             TensorRtSessionPurpose::Main,
         )?;
@@ -244,6 +246,7 @@ impl RvcPipeline {
                 config.provider,
                 Some(rvc_profile.clone()),
                 Some(rvc_info.expected_feat_channels),
+                config.rvc_engine,
                 TensorRtRunMode::PinnedCpu,
                 TensorRtSessionPurpose::Probe,
             )?;
@@ -294,6 +297,7 @@ impl RvcPipeline {
                 config.provider,
                 Some(rvc_profile),
                 Some(rvc_info.expected_feat_channels),
+                config.rvc_engine,
                 tensor_rt_run_mode,
                 TensorRtSessionPurpose::Final,
             )?;
@@ -364,6 +368,7 @@ impl RvcPipeline {
                 config.provider,
                 Some(rvc_profile),
                 Some(rvc_info.expected_feat_channels),
+                config.rvc_engine,
                 tensor_rt_run_mode,
                 TensorRtSessionPurpose::Final,
             )?;

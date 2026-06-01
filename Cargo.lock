@@ -1554,6 +1554,7 @@ dependencies = [
  "anyhow",
  "approx",
  "audioadapter-buffers",
+ "cc",
  "clap",
  "cpal",
  "ctrlc",

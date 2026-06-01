@@ -100,6 +100,11 @@ pub struct RunArgs {
     pub embedder_output: Option<String>,
     #[arg(long)]
     pub f0_model: Option<PathBuf>,
+    #[arg(
+        long,
+        help = "Serialized TensorRT engine for the RVC model; with --provider tensorrt this bypasses ONNX Runtime TensorRT EP for RVC"
+    )]
+    pub rvc_engine: Option<PathBuf>,
     #[arg(long)]
     pub input: Option<String>,
     #[arg(long)]
@@ -178,6 +183,11 @@ pub struct WavArgs {
     pub embedder_output: Option<String>,
     #[arg(long)]
     pub f0_model: PathBuf,
+    #[arg(
+        long,
+        help = "Serialized TensorRT engine for the RVC model; with --provider tensorrt this bypasses ONNX Runtime TensorRT EP for RVC"
+    )]
+    pub rvc_engine: Option<PathBuf>,
     #[arg(long)]
     pub input: PathBuf,
     #[arg(long)]
@@ -363,6 +373,44 @@ mod tests {
             panic!("expected wav command");
         };
         assert_eq!(args.provider, Provider::TensorRt);
+    }
+
+    #[test]
+    fn parses_native_rvc_engine_for_rvc_commands() {
+        let cli = Cli::try_parse_from([
+            "vc-rs",
+            "run",
+            "--passthrough",
+            "--rvc-engine",
+            "present.engine",
+        ])
+        .unwrap();
+        let Command::Run(args) = cli.command else {
+            panic!("expected run command");
+        };
+        assert_eq!(args.rvc_engine, Some(PathBuf::from("present.engine")));
+
+        let cli = Cli::try_parse_from([
+            "vc-rs",
+            "wav",
+            "--model",
+            "model.onnx",
+            "--embedder",
+            "embedder.onnx",
+            "--f0-model",
+            "f0.onnx",
+            "--input",
+            "input.wav",
+            "--output",
+            "output.wav",
+            "--rvc-engine",
+            "present.engine",
+        ])
+        .unwrap();
+        let Command::Wav(args) = cli.command else {
+            panic!("expected wav command");
+        };
+        assert_eq!(args.rvc_engine, Some(PathBuf::from("present.engine")));
     }
 
     #[test]
