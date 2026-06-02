@@ -4,9 +4,9 @@ mod engine;
 
 use anyhow::Result;
 use cli::{Cli, Command};
-use vc_core::model_rvc;
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::EnvFilter;
+use vc_core::model_rvc;
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()

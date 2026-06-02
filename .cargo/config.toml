@@ -2,3 +2,9 @@
 # `cargo xtask bundle vc-vst3 --release` builds the plugin and wraps the cdylib
 # into .vst3 / .clap bundles under target/bundled/.
 xtask = "run --package xtask --release --"
+
+[env]
+# Keep the downloaded ONNX Runtime CUDA package aligned with the bundled CUDA
+# runtime. The VST3/CLAP package currently ships CUDA 12.x DLLs, so do not let
+# ort-sys auto-detect a CUDA 13 install from the developer machine.
+ORT_CUDA_VERSION = "12"

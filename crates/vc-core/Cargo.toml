@@ -9,6 +9,11 @@ description = "Reusable RVC voice conversion pipeline (model_rvc, dsp, sola)"
 # Enables `clap::ValueEnum` derivation on shared config enums (e.g. `Provider`)
 # so the CLI can use them directly as `value_enum` args. Plugins leave it off.
 clap = ["dep:clap"]
+# Enables TensorRT support: the ONNX Runtime TensorRT EP and the native
+# TensorRT engine shim (build.rs). Both add a load-time `nvinfer_10.dll`
+# dependency, so consumers that need a TensorRT-free build (the VST3 plugin)
+# leave this off. The CLI enables it.
+tensorrt = ["ort/tensorrt"]
 
 [dependencies]
 anyhow.workspace = true

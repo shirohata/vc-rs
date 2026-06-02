@@ -9,7 +9,10 @@
 pub enum Provider {
     Cpu,
     Cuda,
-    #[cfg_attr(feature = "clap", value(name = "tensorrt", alias = "trt", alias = "tensor-rt"))]
+    #[cfg_attr(
+        feature = "clap",
+        value(name = "tensorrt", alias = "trt", alias = "tensor-rt")
+    )]
     TensorRt,
 }
 

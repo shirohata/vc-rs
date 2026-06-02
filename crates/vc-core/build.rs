@@ -8,6 +8,13 @@ fn main() {
     println!("cargo:rerun-if-changed=src/model_rvc/native_tensorrt_shim.cpp");
     println!("cargo:rustc-check-cfg=cfg(native_tensorrt)");
 
+    // The native TensorRT shim links `nvinfer_10.dll` at load time. Only build
+    // it when the `tensorrt` cargo feature is enabled (the CLI), so a plugin
+    // build without that feature never picks up the dependency.
+    if env::var_os("CARGO_FEATURE_TENSORRT").is_none() {
+        return;
+    }
+
     if env::var("VC_RS_ENABLE_NATIVE_TENSORRT")
         .is_ok_and(|value| matches!(value.as_str(), "0" | "false" | "off" | "no"))
     {

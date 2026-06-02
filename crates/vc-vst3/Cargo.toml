@@ -12,8 +12,14 @@ crate-type = ["cdylib", "lib"]
 # `vst3` is an opt-in feature: nih-plug's VST3 bindings are GPLv3, so building
 # the VST3 target makes the resulting binary GPLv3. CLAP export is always on.
 nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", features = ["vst3"] }
+nih_plug_egui = { git = "https://github.com/robbert-vdh/nih-plug.git" }
 vc-core = { path = "../vc-core" }
 rtrb = "0.3"
+rfd = "0.15"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 anyhow.workspace = true
+ort.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_LibraryLoader"] }

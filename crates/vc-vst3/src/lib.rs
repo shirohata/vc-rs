@@ -6,11 +6,14 @@
 //! realtime bridge.
 
 use std::num::NonZeroU32;
-use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 
 use nih_plug::prelude::*;
 
 mod config;
+mod dll_path;
+mod editor;
 mod params;
 mod runtime;
 
@@ -20,18 +23,23 @@ use runtime::PluginRuntime;
 
 pub struct VcRvcPlugin {
     params: Arc<VcRvcParams>,
-    config: PluginConfig,
     runtime: Option<PluginRuntime>,
+    /// GUI → worker: request a pipeline rebuild from the current settings.
+    reload: Arc<AtomicBool>,
+    /// GUI sets on edit, worker clears on apply: drives the "unapplied" hint.
+    dirty: Arc<AtomicBool>,
+    /// worker → GUI: human-readable status.
+    status: Arc<Mutex<String>>,
 }
 
 impl Default for VcRvcPlugin {
     fn default() -> Self {
-        let config = PluginConfig::discover();
-        let params = Arc::new(VcRvcParams::from_config(&config));
         Self {
-            params,
-            config,
+            params: Arc::new(VcRvcParams::default()),
             runtime: None,
+            reload: Arc::new(AtomicBool::new(false)),
+            dirty: Arc::new(AtomicBool::new(false)),
+            status: Arc::new(Mutex::new("idle".to_string())),
         }
     }
 }
@@ -66,12 +74,35 @@ impl Plugin for VcRvcPlugin {
         self.params.clone()
     }
 
+    fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
+        editor::create(
+            self.params.clone(),
+            self.reload.clone(),
+            self.dirty.clone(),
+            self.status.clone(),
+        )
+    }
+
     fn initialize(
         &mut self,
         _audio_io_layout: &AudioIOLayout,
         buffer_config: &BufferConfig,
         context: &mut impl InitContext<Self>,
     ) -> bool {
+        // Let bundled provider/CUDA/cuDNN DLLs load from beside the plugin
+        // before any ONNX Runtime session is created on the worker thread.
+        dll_path::add_plugin_dir_to_dll_search_path();
+
+        // Bootstrap: if the persisted settings have no models yet (fresh
+        // instance), seed them from the headless TOML config when present. A
+        // restored project already has its own settings and is left untouched.
+        if !self.params.settings.read().unwrap().has_models() {
+            let seed = PluginConfig::discover();
+            if seed.has_models() {
+                *self.params.settings.write().unwrap() = seed;
+            }
+        }
+
         // Tear down any previous worker before starting a new one (sample rate
         // or block size may have changed).
         self.runtime = None;
@@ -79,8 +110,10 @@ impl Plugin for VcRvcPlugin {
         let sample_rate = buffer_config.sample_rate.round() as u32;
         let max_block = buffer_config.max_buffer_size as usize;
         let runtime = PluginRuntime::start(
-            self.config.clone(),
             self.params.clone(),
+            self.reload.clone(),
+            self.dirty.clone(),
+            self.status.clone(),
             sample_rate,
             max_block,
         );
@@ -93,10 +126,17 @@ impl Plugin for VcRvcPlugin {
         &mut self,
         buffer: &mut Buffer,
         _aux: &mut AuxiliaryBuffers,
-        _context: &mut impl ProcessContext<Self>,
+        context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
         match self.runtime.as_mut() {
-            Some(runtime) => runtime.process_block(buffer.as_slice()),
+            Some(runtime) => {
+                runtime.process_block(buffer.as_slice());
+                // The worker updates latency when chunk_ms changes; relay it to
+                // the host (this just sets a pending flag in the wrapper).
+                if let Some(latency) = runtime.poll_latency_update() {
+                    context.set_latency_samples(latency);
+                }
+            }
             None => {
                 for channel in buffer.as_slice() {
                     channel.fill(0.0);

@@ -6,15 +6,15 @@
 //! the result back to the host sample rate. Inference and allocation never run
 //! on the audio thread.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use nih_plug::prelude::util;
 use rtrb::{Consumer, Producer, RingBuffer};
 use vc_core::model_rvc::{RvcPipeline, RvcPipelineConfig, VoiceModel};
-use vc_core::sola::{self, ChunkSmoother, ChunkSmootherConfig};
+use vc_core::sola::{self, ChunkSmoother, ChunkSmootherConfig, SmoothingKind};
 
 use crate::config::PluginConfig;
 use crate::params::VcRvcParams;
@@ -22,81 +22,92 @@ use crate::params::VcRvcParams;
 const INPUT_QUEUE_CHUNKS: usize = 4;
 const OUTPUT_QUEUE_CHUNKS: usize = 4;
 
+/// Allowed range for the user-tunable chunk size (ms). The ring buffers are
+/// sized for `MAX_CHUNK_MS` up front so chunk changes apply live (on reload)
+/// without reallocating them.
+pub const MIN_CHUNK_MS: u32 = 50;
+pub const MAX_CHUNK_MS: u32 = 1000;
+
 fn chunk_samples_for_rate(sample_rate: u32, chunk_ms: u32) -> usize {
     ((sample_rate as u64 * chunk_ms as u64) / 1000).max(128) as usize
 }
 
-/// How long [`PluginRuntime::drop`] waits for the worker to stop before
-/// detaching it. Keeps the host's unload/deactivate call from blocking on a
-/// slow, non-cancelable model load.
-const SHUTDOWN_JOIN_TIMEOUT: Duration = Duration::from_millis(200);
+/// Settle time before acting on a reload request. A burst of changes (e.g.
+/// toggling CPU/CUDA quickly) collapses into a single reload, because rebuilding
+/// the ONNX Runtime CUDA provider in rapid succession is fragile.
+const RELOAD_DEBOUNCE: Duration = Duration::from_millis(300);
 
 /// Owns the worker thread and the audio-thread ends of the ring buffers.
 pub struct PluginRuntime {
     input_producer: Producer<f32>,
     output_consumer: Consumer<f32>,
     running: Arc<AtomicBool>,
-    /// Set by the worker (via [`FinishGuard`]) when `run` returns, so `drop` can
-    /// tell "stopped quickly" from "still loading" without a blocking join.
-    finished: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
     mono_in: Vec<f32>,
     mono_out: Vec<f32>,
-    /// Reported plugin latency in host samples (for the host's PDC).
+    /// Initial plugin latency in host samples, reported at `initialize`.
     pub latency_samples: u32,
-}
-
-/// Marks `finished` on worker exit, even on early return or panic.
-struct FinishGuard(Arc<AtomicBool>);
-
-impl Drop for FinishGuard {
-    fn drop(&mut self) {
-        self.0.store(true, Ordering::SeqCst);
-    }
+    /// Current latency, updated by the worker when `chunk_ms` changes. The audio
+    /// thread re-reports it to the host (see [`PluginRuntime::poll_latency_update`]).
+    latency: Arc<AtomicU32>,
+    last_reported_latency: u32,
 }
 
 impl PluginRuntime {
     /// Start the worker and allocate the ring buffers for the given host rate.
     /// `max_block` is the host's maximum block size used to pre-size scratch.
+    ///
+    /// `crossfade`/`sola`/`tail` (and the ring capacity) are fixed here from the
+    /// settings present at init. `chunk_ms` can change live: the rings are sized
+    /// for `MAX_CHUNK_MS` so the worker can adopt a new chunk size on reload, and
+    /// the reported latency is updated from the audio thread afterwards.
     pub fn start(
-        config: PluginConfig,
         params: Arc<VcRvcParams>,
+        reload: Arc<AtomicBool>,
+        dirty: Arc<AtomicBool>,
+        status: Arc<Mutex<String>>,
         sample_rate: u32,
         max_block: usize,
     ) -> Self {
-        let chunk_samples = chunk_samples_for_rate(sample_rate, config.chunk_ms);
-        let crossfade_ms = config.crossfade_ms;
-        let sola_search_ms = config.sola_search_ms;
-        let tail_discard_ms = config.rvc_output_tail_discard_ms;
+        let settings0 = params.settings.read().unwrap().clone();
+        let crossfade_ms = settings0.crossfade_ms;
+        let sola_search_ms = settings0.sola_search_ms;
+        let tail_discard_ms = settings0.rvc_output_tail_discard_ms;
         let output_extra_ms = crossfade_ms
             .saturating_add(sola_search_ms)
             .saturating_add(tail_discard_ms);
 
+        // Size the rings for the largest allowed chunk so `chunk_ms` can change
+        // without reallocating. Extra capacity does not add latency (the worker
+        // pops as soon as a chunk is available).
+        let max_chunk_samples = chunk_samples_for_rate(sample_rate, MAX_CHUNK_MS);
         let (input_producer, input_consumer) =
-            RingBuffer::<f32>::new(chunk_samples * INPUT_QUEUE_CHUNKS);
+            RingBuffer::<f32>::new(max_chunk_samples * INPUT_QUEUE_CHUNKS);
         let (output_producer, output_consumer) =
-            RingBuffer::<f32>::new(chunk_samples * OUTPUT_QUEUE_CHUNKS);
+            RingBuffer::<f32>::new(max_chunk_samples * OUTPUT_QUEUE_CHUNKS);
 
         let running = Arc::new(AtomicBool::new(true));
-        let finished = Arc::new(AtomicBool::new(false));
 
-        // Latency estimate: one chunk of input buffering plus the smoothing /
-        // tail context, expressed in host samples. RVC has additional inherent
-        // algorithmic latency; this is a starting estimate the host can use for
-        // delay compensation and may be refined empirically.
+        // Initial latency: one (clamped) chunk of input buffering plus the
+        // smoothing/tail context, in host samples. Updated live when chunk_ms
+        // changes; RVC has additional inherent latency this estimate omits.
+        let chunk_ms = settings0.chunk_ms.clamp(MIN_CHUNK_MS, MAX_CHUNK_MS);
+        let chunk_samples = chunk_samples_for_rate(sample_rate, chunk_ms);
         let extra_samples = chunk_samples_for_rate(sample_rate, output_extra_ms);
         let latency_samples = (chunk_samples + extra_samples) as u32;
+        let latency = Arc::new(AtomicU32::new(latency_samples));
 
         let worker = WorkerCtx {
-            config,
             params,
+            reload,
+            dirty,
+            status,
             sample_rate,
-            chunk_samples,
             crossfade_ms,
             sola_search_ms,
             tail_discard_ms,
+            latency: Arc::clone(&latency),
             running: Arc::clone(&running),
-            finished: Arc::clone(&finished),
             input_consumer,
             output_producer,
         }
@@ -106,11 +117,24 @@ impl PluginRuntime {
             input_producer,
             output_consumer,
             running,
-            finished,
             worker: Some(worker),
             mono_in: Vec::with_capacity(max_block),
             mono_out: vec![0.0; max_block],
             latency_samples,
+            latency,
+            last_reported_latency: latency_samples,
+        }
+    }
+
+    /// Returns a new latency value if the worker changed it (chunk_ms edit) since
+    /// the last call, so the audio thread can re-report it to the host.
+    pub fn poll_latency_update(&mut self) -> Option<u32> {
+        let current = self.latency.load(Ordering::Relaxed);
+        if current != self.last_reported_latency {
+            self.last_reported_latency = current;
+            Some(current)
+        } else {
+            None
         }
     }
 
@@ -170,34 +194,26 @@ impl Drop for PluginRuntime {
         let Some(handle) = self.worker.take() else {
             return;
         };
-        // If the worker is idle or finishing a chunk it exits almost
-        // immediately, so wait briefly and join to reclaim it cleanly. If it is
-        // mid model-load (seconds, and not cancelable) we detach instead of
-        // blocking the host's unload/deactivate thread; the orphaned worker sees
-        // `running == false` and exits on its own once the load completes,
-        // freeing its pipeline and GPU resources.
-        let deadline = Instant::now() + SHUTDOWN_JOIN_TIMEOUT;
-        while !self.finished.load(Ordering::SeqCst) && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(5));
-        }
-        if self.finished.load(Ordering::SeqCst) {
-            let _ = handle.join();
-        }
-        // else: detached — dropping `handle` does not join.
+        // The host may call deactivate/drop from a thread that blocks while a
+        // slow model load finishes. We still join here: detaching would allow a
+        // worker to continue executing plugin code after the DAW unloads this
+        // DLL, which is a harder crash mode than a bounded unload wait.
+        let _ = handle.join();
     }
 }
 
 /// Everything the worker thread needs, moved into it on spawn.
 struct WorkerCtx {
-    config: PluginConfig,
     params: Arc<VcRvcParams>,
+    reload: Arc<AtomicBool>,
+    dirty: Arc<AtomicBool>,
+    status: Arc<Mutex<String>>,
     sample_rate: u32,
-    chunk_samples: usize,
     crossfade_ms: u32,
     sola_search_ms: u32,
     tail_discard_ms: u32,
+    latency: Arc<AtomicU32>,
     running: Arc<AtomicBool>,
-    finished: Arc<AtomicBool>,
     input_consumer: Consumer<f32>,
     output_producer: Producer<f32>,
 }
@@ -211,43 +227,54 @@ impl WorkerCtx {
     }
 
     fn run(mut self) {
-        // Signal `finished` on exit (normal, error, or panic) so a concurrent
-        // `PluginRuntime::drop` can join or detach without blocking.
-        let _finish_guard = FinishGuard(Arc::clone(&self.finished));
-
-        // Load the pipeline up front (seconds for GPU backends). Until it
-        // succeeds — or if no models are configured — the output ring stays
-        // empty and the plugin emits silence.
-        let mut pipeline = if self.config.has_models() {
-            match self.load_pipeline() {
-                Ok(pipeline) => Some(pipeline),
-                Err(err) => {
-                    nih_plug::nih_error!("vc-vst3: failed to load RVC pipeline: {err:#}");
-                    None
-                }
-            }
-        } else {
-            nih_plug::nih_warn!("vc-vst3: no models configured; running silent");
-            None
-        };
-
-        // Loading can take seconds, during which the audio thread kept queuing
-        // input. Drop that backlog so conversion starts from the current audio
-        // instead of replaying samples from before the model was ready.
-        if pipeline.is_some() {
-            self.drain_input();
-        }
-
         let output_sample_rate = self.sample_rate;
-        let output_chunk_samples = self.chunk_samples;
+        let mut chunk_samples = self.current_chunk_samples();
+        let mut output_chunk_samples = chunk_samples;
         let mut smoother: Option<(u32, ChunkSmoother)> = None;
-        let mut input_acc = Vec::<f32>::with_capacity(self.chunk_samples * 2);
+        let mut input_acc = Vec::<f32>::with_capacity(chunk_samples * 2);
         let mut prepared = Vec::<f32>::with_capacity(output_chunk_samples * 2);
 
+        // Do not load models during host startup, plugin scan, or project
+        // restore. Some DAWs instantiate and tear down plugins on UI/control
+        // threads, and CUDA/ORT loading can crash or stall the entire host if it
+        // happens implicitly. The editor's Load / Reload button is the explicit
+        // boundary for model (re)initialization.
+        let mut pipeline = None;
+        let mut smoothing_kind = self.current_smoothing_kind();
+        self.set_idle_status();
+        let mut reload_at: Option<Instant> = None;
+
         while self.running.load(Ordering::SeqCst) {
+            // Coalesce reload requests (model/provider/chunk changes) and only act
+            // once they settle, then rebuild — dropping the old pipeline first so
+            // we never hold two CUDA contexts at once.
+            if self.reload.swap(false, Ordering::SeqCst) {
+                reload_at = Some(Instant::now());
+            }
+            if reload_at.is_some_and(|t| t.elapsed() >= RELOAD_DEBOUNCE) {
+                reload_at = None;
+                // We're applying the current settings now; clear the
+                // "unapplied" indicator (a later edit re-sets it).
+                self.dirty.store(false, Ordering::SeqCst);
+                // chunk_ms may have changed; recompute and re-report latency.
+                chunk_samples = self.current_chunk_samples();
+                output_chunk_samples = chunk_samples;
+                self.latency
+                    .store(self.latency_samples(chunk_samples), Ordering::Relaxed);
+                // Drop the old pipeline (releasing its CUDA context) before
+                // building the new one, so the two never coexist.
+                drop(pipeline.take());
+                smoother = None;
+                let (new_pipeline, new_kind) = self.load_current(chunk_samples);
+                pipeline = new_pipeline;
+                smoothing_kind = new_kind;
+                input_acc.clear();
+                self.drain_input();
+            }
+
             // Accumulate one input chunk.
-            while input_acc.len() < self.chunk_samples {
-                let needed = self.chunk_samples - input_acc.len();
+            while input_acc.len() < chunk_samples {
+                let needed = chunk_samples - input_acc.len();
                 let available = self.input_consumer.slots().min(needed);
                 if available == 0 {
                     break;
@@ -263,12 +290,12 @@ impl WorkerCtx {
                     break;
                 }
             }
-            if input_acc.len() < self.chunk_samples {
+            if input_acc.len() < chunk_samples {
                 thread::sleep(Duration::from_millis(2));
                 continue;
             }
 
-            let chunk = &input_acc[..self.chunk_samples];
+            let chunk = &input_acc[..chunk_samples];
             let Some(pipeline) = pipeline.as_mut() else {
                 // No pipeline: discard input and stay silent.
                 input_acc.clear();
@@ -295,7 +322,7 @@ impl WorkerCtx {
             let model_sample_rate = out.sample_rate;
             if smoother.as_ref().map(|(rate, _)| *rate) != Some(model_sample_rate) {
                 let joiner = sola::model_domain_chunk_smoother(ChunkSmootherConfig {
-                    kind: self.config.smoothing_kind(),
+                    kind: smoothing_kind,
                     output_chunk_samples,
                     output_sample_rate,
                     model_sample_rate,
@@ -338,33 +365,125 @@ impl WorkerCtx {
         }
     }
 
-    fn load_pipeline(&self) -> anyhow::Result<RvcPipeline> {
+    fn set_status(&self, text: impl Into<String>) {
+        if let Ok(mut status) = self.status.lock() {
+            *status = text.into();
+        }
+    }
+
+    fn set_idle_status(&self) {
+        let settings = self.params.settings.read().unwrap();
+        if settings.has_models() {
+            self.set_status("models configured; click Load / Reload");
+        } else {
+            self.set_status("no models configured");
+        }
+    }
+
+    fn current_smoothing_kind(&self) -> SmoothingKind {
+        self.params.settings.read().unwrap().smoothing_kind()
+    }
+
+    /// Current chunk size in samples, from the persisted (clamped) `chunk_ms`.
+    fn current_chunk_samples(&self) -> usize {
+        let chunk_ms = self
+            .params
+            .settings
+            .read()
+            .unwrap()
+            .chunk_ms
+            .clamp(MIN_CHUNK_MS, MAX_CHUNK_MS);
+        chunk_samples_for_rate(self.sample_rate, chunk_ms)
+    }
+
+    fn output_extra_ms(&self) -> u32 {
+        self.crossfade_ms
+            .saturating_add(self.sola_search_ms)
+            .saturating_add(self.tail_discard_ms)
+    }
+
+    fn latency_samples(&self, chunk_samples: usize) -> u32 {
+        let extra = chunk_samples_for_rate(self.sample_rate, self.output_extra_ms());
+        (chunk_samples + extra) as u32
+    }
+
+    /// Build a pipeline from the current persisted settings, reporting status.
+    /// Returns the pipeline (None if no models / load failed) and the smoothing
+    /// kind to use until the next reload.
+    fn load_current(&self, chunk_samples: usize) -> (Option<RvcPipeline>, SmoothingKind) {
+        let settings = self.params.settings.read().unwrap().clone();
+        let kind = settings.smoothing_kind();
+        if !settings.has_models() {
+            nih_plug::nih_warn!("vc-vst3: no models configured; running silent");
+            self.set_status("no models configured");
+            return (None, kind);
+        }
+        self.set_status("loading…");
+        let provider = settings.provider();
+        match self.load_pipeline(&settings, provider, chunk_samples) {
+            Ok(pipeline) => {
+                self.set_status(format!("running ({})", provider.label()));
+                (Some(pipeline), kind)
+            }
+            Err(err) => {
+                nih_plug::nih_error!("vc-vst3: failed to load RVC pipeline: {err:#}");
+                self.set_status(format!("load failed: {err}"));
+                (None, kind)
+            }
+        }
+    }
+
+    fn load_pipeline(
+        &self,
+        settings: &PluginConfig,
+        provider: vc_core::Provider,
+        chunk_samples: usize,
+    ) -> anyhow::Result<RvcPipeline> {
+        if provider.is_cuda() {
+            // This is deliberately on the worker's explicit Load / Reload path,
+            // not plugin initialization or the realtime callback. It prevents a
+            // DAW's PATH or already-installed CUDA stack from silently winning
+            // DLL resolution before ONNX Runtime creates the CUDA EP session.
+            crate::dll_path::preload_bundled_cuda_dlls()?;
+            return crate::dll_path::with_bundled_dll_directory(|| {
+                self.load_pipeline_inner(settings, provider, chunk_samples)
+            });
+        }
+        self.load_pipeline_inner(settings, provider, chunk_samples)
+    }
+
+    fn load_pipeline_inner(
+        &self,
+        settings: &PluginConfig,
+        provider: vc_core::Provider,
+        chunk_samples: usize,
+    ) -> anyhow::Result<RvcPipeline> {
         RvcPipeline::load(RvcPipelineConfig {
-            model: &self.config.model,
-            embedder: &self.config.embedder,
-            embedder_output: self.config.embedder_output.as_deref(),
-            f0_model: &self.config.f0_model,
-            rvc_engine: self.config.rvc_engine.as_deref(),
-            provider: self.config.provider(),
+            model: &settings.model,
+            embedder: &settings.embedder,
+            embedder_output: settings.embedder_output.as_deref(),
+            f0_model: &settings.f0_model,
+            rvc_engine: settings.rvc_engine.as_deref(),
+            provider,
             sample_rate: self.sample_rate,
-            chunk_samples: self.chunk_samples,
-            speaker_id: self.config.speaker_id,
-            pitch_shift: self.config.pitch_shift,
-            f0_threshold: self.config.f0_threshold,
-            silence_threshold: self.config.silence_threshold,
-            input_gain: self.config.input_gain,
-            output_extra_ms: self
-                .crossfade_ms
-                .saturating_add(self.sola_search_ms)
-                .saturating_add(self.tail_discard_ms),
+            chunk_samples,
+            // pitch / speaker / gains are DAW parameters; the worker applies the
+            // current parameter values before every chunk, so these load-time
+            // values are placeholders that get overwritten on the first chunk.
+            speaker_id: 0,
+            pitch_shift: 0.0,
+            f0_threshold: settings.f0_threshold,
+            silence_threshold: settings.silence_threshold,
+            input_gain: 1.0,
+            output_extra_ms: self.output_extra_ms(),
             volume_excluded_ms: self.crossfade_ms,
-            extra_convert_ms: self.config.extra_convert_ms,
-            output_gain: self.config.output_gain,
-            volume_envelope: self.config.volume_envelope,
-            rms_mix_rate: self.config.rms_mix_rate,
-            auto_output_gain: self.config.auto_output_gain,
-            target_output_rms: self.config.target_output_rms,
-            max_output_gain: self.config.max_output_gain,
+            extra_convert_ms: settings.extra_convert_ms,
+            output_gain: 1.0,
+            volume_envelope: settings.volume_envelope,
+            rms_mix_rate: settings.rms_mix_rate,
+            auto_output_gain: settings.auto_output_gain,
+            target_output_rms: settings.target_output_rms,
+            max_output_gain: settings.max_output_gain,
         })
     }
 }

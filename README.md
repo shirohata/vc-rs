@@ -129,16 +129,17 @@ GPU 実行では、CPU より小さい `--chunk-ms` や大きい `--extra-conver
 
 | ランタイム | バージョン | ダウンロードページ |
 | --- | --- | --- |
-| CUDA Toolkit | 13.2.1 | [CUDA Toolkit 13.2 Update 1 Downloads](https://developer.nvidia.com/cuda-13-2-1-download-archive) |
-| cuDNN | 9.22.0.52 for CUDA 13 | [cuDNN Downloads](https://developer.nvidia.com/cudnn) / [Windows x86_64 zip 一覧](https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64/) |
-| TensorRT | 10.16.1.11 for CUDA 13.2 | [TensorRT SDK](https://developer.nvidia.com/tensorrt) / [Windows x86_64 zip](https://developer.nvidia.com/downloads/compute/machine-learning/tensorrt/10.16.1/zip/TensorRT-10.16.1.11.Windows.amd64.cuda-13.2.zip) |
+| CUDA Toolkit | 12.x（開発環境では 12.9） | [CUDA Toolkit Downloads](https://developer.nvidia.com/cuda-downloads) |
+| cuDNN | 9.x for CUDA 12 | [cuDNN Downloads](https://developer.nvidia.com/cudnn) / [Windows x86_64 zip 一覧](https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64/) |
+| TensorRT | CUDA 12.x 対応版（開発環境では 10.16.1.11 for CUDA 12.9） | [TensorRT SDK](https://developer.nvidia.com/tensorrt) |
 
 Windows で zip 版 cuDNN を使う場合は
-`cudnn-windows-x86_64-9.22.0.52_cuda13-archive.zip` を取得し、展開後の `bin` を
-`PATH` に追加してください。CUDA Provider は `ORT_CUDA_VERSION=13` を前提にします。
+CUDA 12 対応の `cudnn-windows-x86_64-9.x_cuda12-archive.zip` を取得し、展開後の
+`bin` を `PATH` に追加してください。CUDA Provider は `ORT_CUDA_VERSION=12` を
+前提にします（repo の Cargo config でも固定しています）。
 
 `--provider tensorrt` を使う場合は、CUDA / cuDNN に加えて
-`TensorRT-10.16.1.11.Windows.amd64.cuda-13.2.zip` を展開し、
+CUDA 12.x 対応の TensorRT zip を展開し、
 `TensorRT-10.16.1.11\bin` と `TensorRT-10.16.1.11\lib` を `PATH` に追加してください。
 TensorRT は初回実行時やモデル・入力形状が変わったタイミングでエンジンを生成する
 ため、コンパイルに非常に長い時間がかかることがあります。2 回目以降はエンジン

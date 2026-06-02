@@ -12,4 +12,7 @@ license = "MIT"
 anyhow = "1.0"
 tracing = "0.1"
 rubato = "2"
-ort = { version = "2.0.0-rc.12", features = ["cuda", "tensorrt"] }
+# Base ONNX Runtime: CUDA EP only. The TensorRT EP (which statically pulls a
+# load-time `nvinfer_10.dll` dependency) is opt-in via the `vc-core/tensorrt`
+# feature so the plugin can ship a CUDA-only build that loads without TensorRT.
+ort = { version = "2.0.0-rc.12", features = ["cuda", "preload-dylibs"] }

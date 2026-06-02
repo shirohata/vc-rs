@@ -1,8 +1,15 @@
-//! Host-automatable parameters. These override the config-file values at
-//! runtime; the worker thread reads them once per chunk and pushes them into
-//! the `RvcPipeline` via its setters.
+//! Plugin parameters and persisted state.
+//!
+//! - The live, automatable knobs (`pitch`/`speaker`/gains) are `#[id]` params
+//!   owned by the DAW (the host persists/automates them per project).
+//! - `settings` (model paths, provider, chunking, thresholds) and the editor
+//!   window size are non-parameter state persisted via `#[persist]`, so they
+//!   are saved/restored with the project too.
+
+use std::sync::{Arc, RwLock};
 
 use nih_plug::prelude::*;
+use nih_plug_egui::EguiState;
 
 use crate::config::PluginConfig;
 
@@ -16,16 +23,23 @@ pub struct VcRvcParams {
     pub input_gain_db: FloatParam,
     #[id = "outgain"]
     pub output_gain_db: FloatParam,
+
+    /// Model paths and conversion settings. Set via the GUI / config seed and
+    /// persisted with the project.
+    #[persist = "settings"]
+    pub settings: RwLock<PluginConfig>,
+
+    /// Editor window size, persisted so the host remembers it.
+    #[persist = "editor-state"]
+    pub editor_state: Arc<EguiState>,
 }
 
-impl VcRvcParams {
-    /// Build parameters with initial values taken from the config file so the
-    /// host's "default" matches the headless configuration.
-    pub fn from_config(config: &PluginConfig) -> Self {
+impl Default for VcRvcParams {
+    fn default() -> Self {
         Self {
             pitch_shift: FloatParam::new(
                 "Pitch",
-                config.pitch_shift,
+                0.0,
                 FloatRange::Linear {
                     min: -24.0,
                     max: 24.0,
@@ -33,14 +47,10 @@ impl VcRvcParams {
             )
             .with_unit(" st")
             .with_step_size(0.5),
-            speaker_id: IntParam::new(
-                "Speaker",
-                config.speaker_id as i32,
-                IntRange::Linear { min: 0, max: 255 },
-            ),
+            speaker_id: IntParam::new("Speaker", 0, IntRange::Linear { min: 0, max: 255 }),
             input_gain_db: FloatParam::new(
                 "Input Gain",
-                util::gain_to_db(config.input_gain.max(f32::EPSILON)),
+                0.0,
                 FloatRange::Linear {
                     min: -36.0,
                     max: 36.0,
@@ -49,13 +59,15 @@ impl VcRvcParams {
             .with_unit(" dB"),
             output_gain_db: FloatParam::new(
                 "Output Gain",
-                util::gain_to_db(config.output_gain.max(f32::EPSILON)),
+                0.0,
                 FloatRange::Linear {
                     min: -36.0,
                     max: 36.0,
                 },
             )
             .with_unit(" dB"),
+            settings: RwLock::new(PluginConfig::default()),
+            editor_state: EguiState::from_size(440, 380),
         }
     }
 }

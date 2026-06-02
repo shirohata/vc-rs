@@ -1,12 +1,14 @@
-//! Headless plugin configuration loaded from a TOML file.
+//! Plugin settings: model paths and conversion defaults.
 //!
-//! The plugin has no GUI yet, so model paths and conversion defaults come from
-//! a config file discovered at load time. Field names and defaults mirror the
-//! CLI `Run` arguments so a working CLI setup transfers directly.
+//! These persist in the plugin state (via `#[persist]` on the params), so the
+//! host saves/restores them per project/preset. A TOML config file is still
+//! supported as a headless seed for fresh instances (see [`PluginConfig::discover`]).
+//! Field names and defaults mirror the CLI `Run` arguments so a working CLI
+//! setup transfers directly.
 
 use std::path::PathBuf;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use vc_core::Provider;
 
 /// Search order for the config file:
@@ -15,22 +17,21 @@ use vc_core::Provider;
 /// 3. `vc-rs-vst3.toml` in the host's current working directory
 pub const CONFIG_ENV: &str = "VC_RS_VST3_CONFIG";
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+// Lenient: unknown/legacy keys (e.g. `pitch_shift`, now a DAW parameter) are
+// ignored rather than rejected, so older config files keep parsing.
+#[serde(default)]
 pub struct PluginConfig {
     pub model: PathBuf,
     pub embedder: PathBuf,
     pub f0_model: PathBuf,
     pub embedder_output: Option<String>,
     pub rvc_engine: Option<PathBuf>,
-    /// "cpu" | "cuda" | "tensorrt" (aliases "trt", "tensor-rt").
+    /// "cpu" | "cuda". Legacy TensorRT spellings are accepted as CUDA for this
+    /// plugin package because VST3/CLAP builds leave `vc-core/tensorrt` off.
     pub provider: String,
-    pub speaker_id: i64,
-    pub pitch_shift: f32,
     pub f0_threshold: f32,
     pub silence_threshold: f32,
-    pub input_gain: f32,
-    pub output_gain: f32,
     pub chunk_ms: u32,
     pub crossfade_ms: u32,
     pub sola_search_ms: u32,
@@ -55,12 +56,8 @@ impl Default for PluginConfig {
             embedder_output: None,
             rvc_engine: None,
             provider: "cpu".to_string(),
-            speaker_id: 0,
-            pitch_shift: 0.0,
             f0_threshold: 0.3,
             silence_threshold: 0.0001,
-            input_gain: 1.0,
-            output_gain: 1.0,
             chunk_ms: 500,
             crossfade_ms: 85,
             sola_search_ms: 12,
@@ -88,7 +85,12 @@ impl PluginConfig {
     pub fn provider(&self) -> Provider {
         match self.provider.trim().to_ascii_lowercase().as_str() {
             "cuda" => Provider::Cuda,
-            "tensorrt" | "trt" | "tensor-rt" => Provider::TensorRt,
+            "tensorrt" | "trt" | "tensor-rt" => {
+                nih_plug::nih_warn!(
+                    "vc-vst3: TensorRT provider is not enabled in this package; using CUDA"
+                );
+                Provider::Cuda
+            }
             _ => Provider::Cpu,
         }
     }

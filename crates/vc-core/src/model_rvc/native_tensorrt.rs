@@ -1,10 +1,15 @@
 use std::env;
+#[cfg(native_tensorrt)]
 use std::ffi::CString;
 use std::num::NonZeroUsize;
+#[cfg(native_tensorrt)]
 use std::os::raw::{c_char, c_int, c_void};
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, bail, Context, Result};
+#[cfg(native_tensorrt)]
+use anyhow::Context;
+use anyhow::{anyhow, bail, Result};
+#[cfg(native_tensorrt)]
 use tracing::info;
 
 pub(super) const NATIVE_TENSORRT_RVC_ENGINE_ENV: &str = "VC_RS_TENSORRT_RVC_ENGINE";
@@ -53,6 +58,7 @@ pub(super) struct NativeRvcEngine {
     handle: std::ptr::NonNull<c_void>,
     frames: NonZeroUsize,
     channels: NonZeroUsize,
+    #[cfg(native_tensorrt)]
     output_len: NonZeroUsize,
     path: PathBuf,
 }
