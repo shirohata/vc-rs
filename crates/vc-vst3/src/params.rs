@@ -67,7 +67,7 @@ impl Default for VcRvcParams {
             )
             .with_unit(" dB"),
             settings: RwLock::new(PluginConfig::default()),
-            editor_state: EguiState::from_size(440, 380),
+            editor_state: EguiState::from_size(480, 520),
         }
     }
 }

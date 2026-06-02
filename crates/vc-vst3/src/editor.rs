@@ -12,7 +12,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use nih_plug::prelude::{Editor, ParamSetter};
-use nih_plug_egui::{create_egui_editor, egui, widgets};
+use nih_plug_egui::{
+    create_egui_editor,
+    egui::{self, Vec2},
+    resizable_window::ResizableWindow,
+    widgets,
+};
 
 use crate::params::VcRvcParams;
 use crate::runtime::{MAX_CHUNK_MS, MIN_CHUNK_MS};
@@ -20,7 +25,7 @@ use crate::runtime::{MAX_CHUNK_MS, MIN_CHUNK_MS};
 /// Granularity for the millisecond sliders.
 const MS_STEP: u32 = 10;
 const MIN_EXTRA_CONVERT_MS: u32 = 0;
-const MAX_EXTRA_CONVERT_MS: u32 = 500;
+const MAX_EXTRA_CONVERT_MS: u32 = 3000;
 
 /// Shared state handed to the egui update closure.
 pub struct EditorState {
@@ -55,121 +60,129 @@ pub fn create(
 }
 
 fn draw(ctx: &egui::Context, setter: &ParamSetter, state: &mut EditorState) {
-    egui::CentralPanel::default().show(ctx, |ui| {
-        ui.heading("VC-RS RVC");
+    let egui_state = state.params.editor_state.clone();
+    ResizableWindow::new("vc-rs-rvc-editor")
+        .min_size(Vec2::new(440.0, 380.0))
+        .show(ctx, egui_state.as_ref(), |ui| {
+            // Hosts restore persisted editor sizes, and some DPI/host combinations
+            // leave less usable space than requested. Keep the content reachable
+            // even when the host cannot or will not grow the outer plugin view.
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| draw_contents(ui, setter, state));
+        });
+}
 
-        // Status line (updated by the worker thread).
-        let status = state
-            .status
-            .lock()
-            .map(|s| s.clone())
-            .unwrap_or_default();
-        ui.label(format!("Status: {status}"));
-        ui.separator();
+fn draw_contents(ui: &mut egui::Ui, setter: &ParamSetter, state: &mut EditorState) {
+    ui.heading("VC-RS RVC");
 
-        // Snapshot current settings for display, releasing the lock immediately.
-        let (model, embedder, f0_model, provider) = {
-            let s = state.params.settings.read().unwrap();
-            (
-                s.model.clone(),
-                s.embedder.clone(),
-                s.f0_model.clone(),
-                s.provider.clone(),
-            )
-        };
+    // Status line (updated by the worker thread).
+    let status = state.status.lock().map(|s| s.clone()).unwrap_or_default();
+    ui.label(format!("Status: {status}"));
+    ui.separator();
 
-        ui.label("Models (.onnx)");
-        if file_row(ui, "RVC model", &model) {
-            spawn_picker(state, ModelKind::Rvc);
-        }
-        if file_row(ui, "Embedder", &embedder) {
-            spawn_picker(state, ModelKind::Embedder);
-        }
-        if file_row(ui, "F0 (RMVPE)", &f0_model) {
-            spawn_picker(state, ModelKind::F0);
-        }
+    // Snapshot current settings for display, releasing the lock immediately.
+    let (model, embedder, f0_model, provider) = {
+        let s = state.params.settings.read().unwrap();
+        (
+            s.model.clone(),
+            s.embedder.clone(),
+            s.f0_model.clone(),
+            s.provider.clone(),
+        )
+    };
 
-        ui.separator();
-        ui.horizontal(|ui| {
-            ui.label("Backend");
-            egui::ComboBox::from_id_salt("provider")
-                .selected_text(provider.to_uppercase())
-                .show_ui(ui, |ui| {
-                    for option in ["cpu", "cuda"] {
-                        if ui
-                            .selectable_label(provider == option, option.to_uppercase())
-                            .clicked()
-                            && provider != option
-                        {
-                            state.params.settings.write().unwrap().provider = option.to_string();
-                            mark_dirty(state);
-                        }
+    ui.label("Models (.onnx)");
+    if file_row(ui, "RVC model", &model) {
+        spawn_picker(state, ModelKind::Rvc);
+    }
+    if file_row(ui, "Embedder", &embedder) {
+        spawn_picker(state, ModelKind::Embedder);
+    }
+    if file_row(ui, "F0 (RMVPE)", &f0_model) {
+        spawn_picker(state, ModelKind::F0);
+    }
+
+    ui.separator();
+    ui.horizontal(|ui| {
+        ui.label("Backend");
+        egui::ComboBox::from_id_salt("provider")
+            .selected_text(provider.to_uppercase())
+            .show_ui(ui, |ui| {
+                for option in ["cpu", "cuda"] {
+                    if ui
+                        .selectable_label(provider == option, option.to_uppercase())
+                        .clicked()
+                        && provider != option
+                    {
+                        state.params.settings.write().unwrap().provider = option.to_string();
+                        mark_dirty(state);
                     }
-                });
-            if ui.button("Load / Reload").clicked() {
-                state.reload.store(true, Ordering::SeqCst);
-            }
-            if state.dirty.load(Ordering::Relaxed) {
-                ui.colored_label(
-                    egui::Color32::from_rgb(220, 180, 60),
-                    "● unapplied — click Load / Reload",
-                );
-            }
-        });
-
-        // Latency / context sliders (10 ms steps). Applied on Load / Reload.
-        let (chunk_ms, extra_convert_ms) = {
-            let s = state.params.settings.read().unwrap();
-            (s.chunk_ms, s.extra_convert_ms)
-        };
-        if let Some(v) = ms_slider(ui, "Chunk", chunk_ms, MIN_CHUNK_MS, MAX_CHUNK_MS) {
-            state.params.settings.write().unwrap().chunk_ms = v;
-            mark_dirty(state);
+                }
+            });
+        if ui.button("Load / Reload").clicked() {
+            state.reload.store(true, Ordering::SeqCst);
         }
-        if let Some(v) = ms_slider(
-            ui,
-            "Extra convert",
-            extra_convert_ms,
-            MIN_EXTRA_CONVERT_MS,
-            MAX_EXTRA_CONVERT_MS,
-        ) {
-            state.params.settings.write().unwrap().extra_convert_ms = v;
-            mark_dirty(state);
+        if state.dirty.load(Ordering::Relaxed) {
+            ui.colored_label(
+                egui::Color32::from_rgb(220, 180, 60),
+                "● unapplied — click Load / Reload",
+            );
         }
-        ui.small("Chunk = latency vs. context. Extra convert = extra model context.");
-
-        ui.separator();
-        ui.label("Live parameters");
-        egui::Grid::new("params").num_columns(2).show(ui, |ui| {
-            ui.label("Pitch");
-            ui.add(widgets::ParamSlider::for_param(
-                &state.params.pitch_shift,
-                setter,
-            ));
-            ui.end_row();
-            ui.label("Speaker");
-            ui.add(widgets::ParamSlider::for_param(
-                &state.params.speaker_id,
-                setter,
-            ));
-            ui.end_row();
-            ui.label("Input gain");
-            ui.add(widgets::ParamSlider::for_param(
-                &state.params.input_gain_db,
-                setter,
-            ));
-            ui.end_row();
-            ui.label("Output gain");
-            ui.add(widgets::ParamSlider::for_param(
-                &state.params.output_gain_db,
-                setter,
-            ));
-            ui.end_row();
-        });
-
-        ui.separator();
-        ui.small("Model / backend / chunk edits apply when you click Load / Reload. Other latency settings (crossfade, SOLA, extra-convert) come from the config file and apply on reinstantiation.");
     });
+
+    // Latency / context sliders (10 ms steps). Applied on Load / Reload.
+    let (chunk_ms, extra_convert_ms) = {
+        let s = state.params.settings.read().unwrap();
+        (s.chunk_ms, s.extra_convert_ms)
+    };
+    if let Some(v) = ms_slider(ui, "Chunk", chunk_ms, MIN_CHUNK_MS, MAX_CHUNK_MS) {
+        state.params.settings.write().unwrap().chunk_ms = v;
+        mark_dirty(state);
+    }
+    if let Some(v) = ms_slider(
+        ui,
+        "Extra convert",
+        extra_convert_ms,
+        MIN_EXTRA_CONVERT_MS,
+        MAX_EXTRA_CONVERT_MS,
+    ) {
+        state.params.settings.write().unwrap().extra_convert_ms = v;
+        mark_dirty(state);
+    }
+    ui.small("Chunk = latency vs. context. Extra convert = extra model context.");
+
+    ui.separator();
+    ui.label("Live parameters");
+    egui::Grid::new("params").num_columns(2).show(ui, |ui| {
+        ui.label("Pitch");
+        ui.add(widgets::ParamSlider::for_param(
+            &state.params.pitch_shift,
+            setter,
+        ));
+        ui.end_row();
+        ui.label("Speaker");
+        ui.add(widgets::ParamSlider::for_param(
+            &state.params.speaker_id,
+            setter,
+        ));
+        ui.end_row();
+        ui.label("Input gain");
+        ui.add(widgets::ParamSlider::for_param(
+            &state.params.input_gain_db,
+            setter,
+        ));
+        ui.end_row();
+        ui.label("Output gain");
+        ui.add(widgets::ParamSlider::for_param(
+            &state.params.output_gain_db,
+            setter,
+        ));
+        ui.end_row();
+    });
+
+    ui.separator();
+    ui.small("Model / backend / chunk edits apply when you click Load / Reload. Other latency settings (crossfade, SOLA, extra-convert) come from the config file and apply on reinstantiation.");
 }
 
 /// A labelled control: the name + Browse button on one line, and the current
