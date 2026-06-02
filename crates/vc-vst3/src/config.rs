@@ -26,6 +26,9 @@ pub struct PluginConfig {
     pub embedder: PathBuf,
     pub f0_model: PathBuf,
     pub embedder_output: Option<String>,
+    /// Legacy config key kept for lenient parsing only. TensorRT engine paths
+    /// are no longer user-provided; native TensorRT builds cache entries from
+    /// the ONNX model and fixed profile.
     pub rvc_engine: Option<PathBuf>,
     /// "cpu" | "cuda". Legacy TensorRT spellings are accepted as CUDA for this
     /// plugin package because VST3/CLAP builds leave `vc-core/tensorrt` off.

@@ -463,7 +463,6 @@ impl WorkerCtx {
             embedder: &settings.embedder,
             embedder_output: settings.embedder_output.as_deref(),
             f0_model: &settings.f0_model,
-            rvc_engine: settings.rvc_engine.as_deref(),
             provider,
             sample_rate: self.sample_rate,
             chunk_samples,

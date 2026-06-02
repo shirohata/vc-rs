@@ -52,5 +52,6 @@ fn main() {
     println!("cargo:rustc-link-search=native={}", cuda_lib.display());
     println!("cargo:rustc-link-lib=dylib=nvinfer_10");
     println!("cargo:rustc-link-lib=dylib=nvinfer_plugin_10");
+    println!("cargo:rustc-link-lib=dylib=nvonnxparser_10");
     println!("cargo:rustc-link-lib=dylib=cudart");
 }

@@ -1,5 +1,5 @@
 [package]
-name = "tensorrt-probe"
+name = "vc-tensorrt-builder"
 version = "0.1.0"
 edition = "2021"
 publish = false

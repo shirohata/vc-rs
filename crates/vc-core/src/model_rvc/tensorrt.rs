@@ -1,7 +1,7 @@
 use std::env;
 use std::ffi::CString;
 use std::fs;
-use std::io::{ErrorKind, Read};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -10,7 +10,7 @@ use ort::memory::{AllocationDevice, Allocator, AllocatorType, MemoryInfo, Memory
 use ort::session::{IoBinding, Session};
 use ort::value::Tensor;
 use ort::{ortsys, AsPointer};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use crate::Provider;
 
@@ -23,7 +23,6 @@ use super::shape::onnx_silence_front_feature_frames;
 pub(super) const TENSORRT_DEVICE_ID: i32 = 0;
 pub(super) const TENSORRT_CACHE_DIR_ENV: &str = "VC_RS_TENSORRT_CACHE_DIR";
 pub(super) const TENSORRT_MODEL_HASH_BUFFER_BYTES: usize = 1024 * 1024;
-pub(super) const TENSORRT_CUDA_GRAPH_ENV: &str = "VC_RS_TENSORRT_CUDA_GRAPH";
 pub(super) const CUDA_GRAPH_ENV: &str = "VC_RS_CUDA_GRAPH";
 pub(super) const CPU_ONNX_INTRA_THREADS: usize = 4;
 pub(super) const CPU_ONNX_INTER_THREADS: usize = 4;
@@ -170,32 +169,6 @@ pub(super) enum TensorRtRunMode {
 }
 
 impl TensorRtRunMode {
-    pub(super) fn from_env() -> Self {
-        let value = env::var(TENSORRT_CUDA_GRAPH_ENV).ok();
-        let mode = Self::parse_env(value.as_deref());
-        if let Some(value) = value.as_deref() {
-            if !matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "" | "0" | "false" | "off" | "no" | "1" | "true" | "on" | "yes"
-            ) {
-                warn!(
-                    "{}={value:?} is not recognized; defaulting TensorRT CUDA Graph to enabled",
-                    TENSORRT_CUDA_GRAPH_ENV
-                );
-            }
-        }
-        mode
-    }
-
-    pub(super) fn parse_env(value: Option<&str>) -> Self {
-        match value.map(|value| value.trim().to_ascii_lowercase()) {
-            Some(value) if matches!(value.as_str(), "0" | "false" | "off" | "no") => {
-                Self::PinnedCpu
-            }
-            _ => Self::CudaGraph,
-        }
-    }
-
     pub(super) fn cuda_from_env() -> Self {
         let value = env::var(CUDA_GRAPH_ENV).ok();
         let mode = Self::parse_cuda_env(value.as_deref());
@@ -1108,13 +1081,6 @@ pub(super) fn tensor_rt_cache_root_from_override(
     tensor_rt_default_cache_root()
 }
 
-// TensorRT timing cache stores tactic timings, not serialized model engines.
-// Keep it shared under the TensorRT cache root so builds for different models
-// can reuse compatible layer timings while model engines remain isolated below.
-pub(super) fn tensor_rt_timing_cache_dir_from_root(cache_root: &Path) -> PathBuf {
-    cache_root.join("timing")
-}
-
 #[cfg(windows)]
 pub(super) fn tensor_rt_default_cache_root() -> Result<PathBuf> {
     let local_app_data = env::var_os("LOCALAPPDATA").ok_or_else(|| {
@@ -1200,20 +1166,6 @@ pub(super) fn tensor_rt_cache_key(profile_shapes: &str) -> String {
         .chars()
         .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
         .collect()
-}
-
-pub(super) fn tensor_rt_cache_has_entries(path: &Path) -> bool {
-    match fs::read_dir(path) {
-        Ok(mut entries) => entries.next().is_some(),
-        Err(err) if err.kind() == ErrorKind::NotFound => false,
-        Err(err) => {
-            debug!(
-                "failed to inspect TensorRT cache directory {} before session creation: {err}",
-                path.display()
-            );
-            false
-        }
-    }
 }
 
 pub(super) fn provider_uses_fixed_shape(provider: Provider) -> bool {

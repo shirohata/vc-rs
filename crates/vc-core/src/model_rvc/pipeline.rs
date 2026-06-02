@@ -23,7 +23,6 @@ use super::stream::RvcStreamState;
 use super::tensorrt::{
     tensor_rt_model_cache_key, tensor_rt_warmup_feature_len, ModelRole, TensorRtRunMode,
     TensorRtSessionProfile, TensorRtSessionPurpose, TensorRtSharedWaveform, CUDA_GRAPH_ENV,
-    TENSORRT_CUDA_GRAPH_ENV,
 };
 
 const SKIP_SILENT_CHUNKS: bool = false;
@@ -60,7 +59,6 @@ pub struct RvcPipelineConfig<'a> {
     pub embedder: &'a Path,
     pub embedder_output: Option<&'a str>,
     pub f0_model: &'a Path,
-    pub rvc_engine: Option<&'a Path>,
     pub provider: Provider,
     pub sample_rate: u32,
     pub chunk_samples: usize,
@@ -95,7 +93,6 @@ impl RvcPipeline {
             config.provider,
             None,
             None,
-            config.rvc_engine,
             TensorRtRunMode::PinnedCpu,
             TensorRtSessionPurpose::Main,
         )?;
@@ -144,7 +141,7 @@ impl RvcPipeline {
 
     fn load_fixed_shape(config: RvcPipelineConfig<'_>) -> Result<Self> {
         let tensor_rt_run_mode = if config.provider.is_tensorrt() {
-            TensorRtRunMode::from_env()
+            TensorRtRunMode::PinnedCpu
         } else {
             TensorRtRunMode::cuda_from_env()
         };
@@ -155,7 +152,7 @@ impl RvcPipeline {
             tensor_rt_run_mode.cuda_graph(),
             tensor_rt_run_mode.device_io(),
             if config.provider.is_tensorrt() {
-                TENSORRT_CUDA_GRAPH_ENV
+                "native-tensorrt"
             } else {
                 CUDA_GRAPH_ENV
             }
@@ -246,7 +243,6 @@ impl RvcPipeline {
                 config.provider,
                 Some(rvc_profile.clone()),
                 Some(rvc_info.expected_feat_channels),
-                config.rvc_engine,
                 TensorRtRunMode::PinnedCpu,
                 TensorRtSessionPurpose::Probe,
             )?;
@@ -297,12 +293,88 @@ impl RvcPipeline {
                 config.provider,
                 Some(rvc_profile),
                 Some(rvc_info.expected_feat_channels),
-                config.rvc_engine,
                 tensor_rt_run_mode,
                 TensorRtSessionPurpose::Final,
             )?;
             rvc.enable_tensorrt_binding(&rvc_output_shape, config.speaker_id)?;
             (embedder, pitch, rvc, shared_waveform)
+        } else if config.provider.is_tensorrt() {
+            // Use CPU ORT for the shape probe so the first native TensorRT build
+            // in this process is the RVC graph. Building RVC after a prior
+            // native TensorRT ContentVec build/run can trigger Myelin/NVRTC
+            // tactic failures even though the same RVC profile succeeds in
+            // trtexec and in an isolated Builder API probe.
+            let mut embedder_probe = HubertEmbedderSession::load(
+                config.embedder,
+                Provider::Cpu,
+                expected_feat_channels,
+                config.embedder_output,
+                None,
+                TensorRtRunMode::PinnedCpu,
+                TensorRtSessionPurpose::Probe,
+            )?;
+            let warmup = tensor_rt_warmup_feature_len(
+                &mut embedder_probe,
+                input_samples_16k,
+                extra_convert_samples,
+            )?;
+            drop(embedder_probe);
+            let feature_len = warmup.rvc_feature_len;
+            let rvc_profile =
+                TensorRtSessionProfile::rvc(feature_len, expected_feat_channels_usize)
+                    .with_optional_model_cache_key(rvc_model_cache_key.clone());
+            info!(
+                "fixed runtime profiles backend={} sample_rate={} chunk_samples={} contentvec={} rmvpe={} rvc={}",
+                config.provider.label(),
+                config.sample_rate,
+                config.chunk_samples,
+                contentvec_profile.profile_shapes,
+                rmvpe_profile.profile_shapes,
+                rvc_profile.profile_shapes
+            );
+
+            // Build/load the RVC engine before keeping the other native TensorRT
+            // engines alive. The RVC graph exercises Myelin/NVRTC heavily, and
+            // building it after other TensorRT runtimes in the same process has
+            // reproduced tactic-selection failures even when trtexec succeeds.
+            let mut rvc = RvcModelSession::load(
+                config.model,
+                config.provider,
+                Some(rvc_profile),
+                Some(rvc_info.expected_feat_channels),
+                tensor_rt_run_mode,
+                TensorRtSessionPurpose::Final,
+            )?;
+            let rvc_output_shape = rvc.warmup_output_shape(
+                feature_len,
+                rvc_info.expected_feat_channels,
+                config.speaker_id,
+            )?;
+            rvc.enable_tensorrt_binding(&rvc_output_shape, config.speaker_id)?;
+
+            let mut embedder = HubertEmbedderSession::load(
+                config.embedder,
+                config.provider,
+                expected_feat_channels,
+                config.embedder_output,
+                Some(contentvec_profile),
+                tensor_rt_run_mode,
+                TensorRtSessionPurpose::Final,
+            )?;
+            embedder.enable_tensorrt_binding(&warmup.contentvec_output_shape, None)?;
+
+            let mut pitch = RmvpePitchSession::load(
+                config.f0_model,
+                config.provider,
+                Some(rmvpe_profile),
+                tensor_rt_run_mode,
+                TensorRtSessionPurpose::Final,
+            )?;
+            let rmvpe_output_shape =
+                pitch.warmup_output_shape(input_samples_16k, config.f0_threshold)?;
+            pitch.enable_tensorrt_binding(&rmvpe_output_shape, config.f0_threshold, None)?;
+
+            (embedder, pitch, rvc, None)
         } else {
             let mut embedder = HubertEmbedderSession::load(
                 config.embedder,
@@ -368,7 +440,6 @@ impl RvcPipeline {
                 config.provider,
                 Some(rvc_profile),
                 Some(rvc_info.expected_feat_channels),
-                config.rvc_engine,
                 tensor_rt_run_mode,
                 TensorRtSessionPurpose::Final,
             )?;

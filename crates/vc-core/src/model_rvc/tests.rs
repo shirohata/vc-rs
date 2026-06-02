@@ -16,8 +16,8 @@ use super::stream::{RvcStreamState, VOLUME_DECAY};
 use super::tensorrt::{
     format_usize_shape, i64_shape_to_usize, tensor_rt_benchmark_profile, tensor_rt_cache_key,
     tensor_rt_cache_root_from_override, tensor_rt_model_cache_key, tensor_rt_model_file_hash,
-    tensor_rt_sanitize_cache_component, tensor_rt_timing_cache_dir_from_root,
-    validate_tensorrt_input_shape, ModelRole, TensorRtRunMode, TensorRtSessionProfile,
+    tensor_rt_sanitize_cache_component, validate_tensorrt_input_shape, ModelRole, TensorRtRunMode,
+    TensorRtSessionProfile,
 };
 
 fn tensor_rt_temp_dir(name: &str) -> PathBuf {
@@ -26,39 +26,6 @@ fn tensor_rt_temp_dir(name: &str) -> PathBuf {
         .unwrap()
         .as_nanos();
     std::env::temp_dir().join(format!("vc-rs-{name}-{}-{nanos}", std::process::id()))
-}
-
-#[test]
-fn parses_tensorrt_cuda_graph_env() {
-    assert_eq!(TensorRtRunMode::parse_env(None), TensorRtRunMode::CudaGraph);
-    assert_eq!(
-        TensorRtRunMode::parse_env(Some("")),
-        TensorRtRunMode::CudaGraph
-    );
-    assert_eq!(
-        TensorRtRunMode::parse_env(Some("1")),
-        TensorRtRunMode::CudaGraph
-    );
-    assert_eq!(
-        TensorRtRunMode::parse_env(Some("true")),
-        TensorRtRunMode::CudaGraph
-    );
-    assert_eq!(
-        TensorRtRunMode::parse_env(Some("on")),
-        TensorRtRunMode::CudaGraph
-    );
-    assert_eq!(
-        TensorRtRunMode::parse_env(Some("0")),
-        TensorRtRunMode::PinnedCpu
-    );
-    assert_eq!(
-        TensorRtRunMode::parse_env(Some("false")),
-        TensorRtRunMode::PinnedCpu
-    );
-    assert_eq!(
-        TensorRtRunMode::parse_env(Some("off")),
-        TensorRtRunMode::PinnedCpu
-    );
 }
 
 #[test]
@@ -178,14 +145,6 @@ fn tensor_rt_cache_root_override_wins() {
     assert_eq!(
         tensor_rt_cache_root_from_override(Some(OsStr::new("override-cache"))).unwrap(),
         PathBuf::from("override-cache")
-    );
-}
-
-#[test]
-fn tensor_rt_timing_cache_is_shared_under_cache_root() {
-    assert_eq!(
-        tensor_rt_timing_cache_dir_from_root(Path::new("cache-root")),
-        Path::new("cache-root").join("timing")
     );
 }
 

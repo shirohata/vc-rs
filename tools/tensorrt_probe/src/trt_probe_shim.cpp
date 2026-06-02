@@ -1,13 +1,16 @@
 #include <NvInfer.h>
 #include <NvInferPlugin.h>
+#include <NvOnnxParser.h>
 #include <cuda_runtime_api.h>
 
 #include <algorithm>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cmath>
 #include <fstream>
+#include <map>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -160,6 +163,69 @@ bool has_dynamic_dim(nvinfer1::Dims const& dims) {
     return false;
 }
 
+bool same_dims(nvinfer1::Dims const& a, nvinfer1::Dims const& b) {
+    if (a.nbDims != b.nbDims) {
+        return false;
+    }
+    for (int32_t i = 0; i < a.nbDims; ++i) {
+        if (a.d[i] != b.d[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::vector<std::string> split(std::string const& value, char delimiter) {
+    std::vector<std::string> parts;
+    std::stringstream stream(value);
+    std::string item;
+    while (std::getline(stream, item, delimiter)) {
+        if (!item.empty()) {
+            parts.push_back(item);
+        }
+    }
+    return parts;
+}
+
+bool parse_dims(std::string const& text, nvinfer1::Dims& dims, Message& msg) {
+    auto parts = split(text, 'x');
+    if (parts.empty() || parts.size() > static_cast<std::size_t>(nvinfer1::Dims::MAX_DIMS)) {
+        msg.append("invalid TensorRT profile dims: %s\n", text.c_str());
+        return false;
+    }
+    dims.nbDims = static_cast<int32_t>(parts.size());
+    for (int32_t i = 0; i < dims.nbDims; ++i) {
+        char* end = nullptr;
+        long value = std::strtol(parts[static_cast<std::size_t>(i)].c_str(), &end, 10);
+        if (end == nullptr || *end != '\0' || value <= 0) {
+            msg.append("invalid TensorRT profile dim: %s\n", parts[static_cast<std::size_t>(i)].c_str());
+            return false;
+        }
+        dims.d[i] = static_cast<int64_t>(value);
+    }
+    return true;
+}
+
+bool parse_profile_shapes(char const* profile_shapes, std::map<std::string, nvinfer1::Dims>& shapes, Message& msg) {
+    if (profile_shapes == nullptr || profile_shapes[0] == '\0') {
+        msg.append("TensorRT profile shape string is empty\n");
+        return false;
+    }
+    for (auto const& item : split(profile_shapes, ',')) {
+        auto separator = item.find(':');
+        if (separator == std::string::npos || separator == 0 || separator + 1 >= item.size()) {
+            msg.append("invalid TensorRT profile entry: %s\n", item.c_str());
+            return false;
+        }
+        nvinfer1::Dims dims{};
+        if (!parse_dims(item.substr(separator + 1), dims, msg)) {
+            return false;
+        }
+        shapes[item.substr(0, separator)] = dims;
+    }
+    return true;
+}
+
 bool cuda_ok(cudaError_t status, Message& msg, char const* what) {
     if (status == cudaSuccess) {
         return true;
@@ -203,6 +269,125 @@ bool upload_dummy_input(
 }
 
 } // namespace
+
+extern "C" int trt_probe_build(
+    char const* onnx_path,
+    char const* engine_path,
+    char const* profile_shapes,
+    char* message,
+    std::size_t message_len
+) {
+    Message msg{message, message_len};
+    if (message_len > 0) {
+        message[0] = '\0';
+    }
+    if (onnx_path == nullptr || engine_path == nullptr || profile_shapes == nullptr) {
+        msg.append("invalid TensorRT build arguments\n");
+        return 2;
+    }
+
+    std::map<std::string, nvinfer1::Dims> profile;
+    if (!parse_profile_shapes(profile_shapes, profile, msg)) {
+        return 1;
+    }
+
+    static ProbeLogger logger;
+    initLibNvInferPlugins(&logger, "");
+    std::unique_ptr<nvinfer1::IBuilder, TrtDeleter<nvinfer1::IBuilder>> builder(nvinfer1::createInferBuilder(logger));
+    if (!builder) {
+        msg.append("createInferBuilder failed\n");
+        return 1;
+    }
+    auto const network_flags =
+        1U << static_cast<uint32_t>(nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH);
+    std::unique_ptr<nvinfer1::INetworkDefinition, TrtDeleter<nvinfer1::INetworkDefinition>> network(builder->createNetworkV2(network_flags));
+    if (!network) {
+        msg.append("createNetworkV2 failed\n");
+        return 1;
+    }
+    std::unique_ptr<nvonnxparser::IParser, TrtDeleter<nvonnxparser::IParser>> parser(nvonnxparser::createParser(*network, logger));
+    if (!parser) {
+        msg.append("createParser failed\n");
+        return 1;
+    }
+    if (!parser->parseFromFile(onnx_path, static_cast<int32_t>(nvinfer1::ILogger::Severity::kWARNING))) {
+        msg.append("ONNX parser failed for %s\n", onnx_path);
+        for (int32_t i = 0; i < parser->getNbErrors(); ++i) {
+            auto const* err = parser->getError(i);
+            if (err != nullptr) {
+                msg.append("  parser[%d]: %s\n", i, err->desc());
+            }
+        }
+        return 1;
+    }
+
+    std::unique_ptr<nvinfer1::IBuilderConfig, TrtDeleter<nvinfer1::IBuilderConfig>> config(builder->createBuilderConfig());
+    nvinfer1::IOptimizationProfile* opt = builder->createOptimizationProfile();
+    if (!config || opt == nullptr) {
+        msg.append("failed to create TensorRT builder config/profile\n");
+        return 1;
+    }
+    config->setFlag(nvinfer1::BuilderFlag::kFP16);
+    config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 4ULL * 1024ULL * 1024ULL * 1024ULL);
+    config->setBuilderOptimizationLevel(0);
+
+    bool has_dynamic_input = false;
+    for (auto const& item : profile) {
+        nvinfer1::ITensor* tensor = nullptr;
+        for (int32_t i = 0; i < network->getNbInputs(); ++i) {
+            auto* candidate = network->getInput(i);
+            if (candidate != nullptr && item.first == candidate->getName()) {
+                tensor = candidate;
+                break;
+            }
+        }
+        if (tensor == nullptr) {
+            msg.append("profile input %s is not present in ONNX model\n", item.first.c_str());
+            return 1;
+        }
+        auto model_dims = tensor->getDimensions();
+        if (has_dynamic_dim(model_dims)) {
+            has_dynamic_input = true;
+            if (!opt->setDimensions(item.first.c_str(), nvinfer1::OptProfileSelector::kMIN, item.second)
+                || !opt->setDimensions(item.first.c_str(), nvinfer1::OptProfileSelector::kOPT, item.second)
+                || !opt->setDimensions(item.first.c_str(), nvinfer1::OptProfileSelector::kMAX, item.second)) {
+                msg.append("setDimensions failed for %s shape=%s\n", item.first.c_str(), dims_to_string(item.second).c_str());
+                return 1;
+            }
+        } else if (!same_dims(model_dims, item.second)) {
+            msg.append("static ONNX input %s shape %s does not match requested %s\n", item.first.c_str(), dims_to_string(model_dims).c_str(), dims_to_string(item.second).c_str());
+            return 1;
+        }
+    }
+    if (has_dynamic_input) {
+        if (!opt->isValid()) {
+            msg.append("TensorRT optimization profile is invalid: %s\n", profile_shapes);
+            return 1;
+        }
+        if (config->addOptimizationProfile(opt) < 0) {
+            msg.append("addOptimizationProfile failed\n");
+            return 1;
+        }
+    }
+
+    std::unique_ptr<nvinfer1::IHostMemory, TrtDeleter<nvinfer1::IHostMemory>> plan(builder->buildSerializedNetwork(*network, *config));
+    if (!plan) {
+        msg.append("buildSerializedNetwork failed for %s\n", onnx_path);
+        return 1;
+    }
+    std::ofstream file(engine_path, std::ios::binary);
+    if (!file) {
+        msg.append("failed to create TensorRT engine: %s\n", engine_path);
+        return 1;
+    }
+    file.write(static_cast<char const*>(plan->data()), static_cast<std::streamsize>(plan->size()));
+    if (!file) {
+        msg.append("failed to write TensorRT engine: %s\n", engine_path);
+        return 1;
+    }
+    msg.append("built probe TensorRT engine model=%s engine=%s profile=%s bytes=%zu\n", onnx_path, engine_path, profile_shapes, plan->size());
+    return 0;
+}
 
 extern "C" int trt_probe_engine(
     char const* engine_path,

@@ -24,11 +24,8 @@ model = "/path/to/models/rvc/your_model.onnx"
 embedder = "/path/to/models/hubert/contentvec.onnx"
 f0_model = "/path/to/models/rmvpe/rmvpe.onnx"
 
-# Optional: explicit embedder output tensor name. `rvc_engine` is only meaningful
-# for CLI / custom builds with the vc-core/tensorrt feature enabled; the standard
-# VST3/CLAP package is CUDA-only and ignores it.
+# Optional: explicit embedder output tensor name.
 # embedder_output = "output"
-# rvc_engine = "/path/to/models/rvc/your_model.engine"
 
 # --- Backend ---
 # "cpu" | "cuda"

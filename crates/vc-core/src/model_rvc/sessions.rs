@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-use std::fs;
 use std::path::Path;
 use std::time::Instant;
 
@@ -14,7 +13,7 @@ use tracing::{debug, info};
 use crate::Provider;
 
 use super::feature::FeatureTensor;
-use super::native_tensorrt::{configured_rvc_engine_path, NativeRvcEngine};
+use super::native_tensorrt::{NativeContentVecEngine, NativeRmvpeEngine, NativeRvcEngine};
 use super::tensorrt::*;
 
 pub(super) struct HubertEmbedderSession {
@@ -23,6 +22,7 @@ pub(super) struct HubertEmbedderSession {
     pub(super) tensor_rt_profile: Option<TensorRtSessionProfile>,
     pub(super) tensor_rt_run_mode: TensorRtRunMode,
     pub(super) tensor_rt_binding: Option<HubertTensorRtBinding>,
+    native: Option<NativeContentVecEngine>,
     pub(super) input_name: String,
     pub(super) output_name: String,
 }
@@ -37,9 +37,14 @@ impl HubertEmbedderSession {
         tensor_rt_run_mode: TensorRtRunMode,
         tensor_rt_session_purpose: TensorRtSessionPurpose,
     ) -> Result<Self> {
+        let session_provider = if provider.is_tensorrt() {
+            Provider::Cpu
+        } else {
+            provider
+        };
         let session = load_session(
             path,
-            provider,
+            session_provider,
             ModelRole::ContentVec,
             tensor_rt_profile.as_ref(),
             tensor_rt_run_mode,
@@ -47,6 +52,20 @@ impl HubertEmbedderSession {
         )?;
         let input_name = single_input_name(&session)?;
         let output_name = select_embedder_output(&session, expected_channels, requested_output)?;
+        let native = if provider.is_tensorrt() {
+            let profile = tensor_rt_profile.as_ref().ok_or_else(|| {
+                anyhow!("native TensorRT ContentVec requires a fixed-shape profile")
+            })?;
+            Some(NativeContentVecEngine::load(
+                path,
+                profile,
+                input_name.as_str(),
+                output_name.as_str(),
+                expected_channels,
+            )?)
+        } else {
+            None
+        };
         info!(
             "loaded embedder: {} input={} output={}",
             path.display(),
@@ -59,6 +78,7 @@ impl HubertEmbedderSession {
             tensor_rt_profile,
             tensor_rt_run_mode,
             tensor_rt_binding: None,
+            native,
             input_name,
             output_name,
         })
@@ -70,6 +90,9 @@ impl HubertEmbedderSession {
         shared_waveform: Option<&TensorRtSharedWaveform>,
     ) -> Result<()> {
         if !provider_uses_fixed_shape(self.provider) {
+            return Ok(());
+        }
+        if self.native.is_some() {
             return Ok(());
         }
         let profile = self
@@ -140,6 +163,9 @@ impl HubertEmbedderSession {
         )?;
         if self.tensor_rt_binding.is_some() {
             return self.extract_with_binding(audio_16k);
+        }
+        if let Some(native) = self.native.as_mut() {
+            return native.extract(audio_16k);
         }
         self.extract_with_session_run(audio_16k, &input_shape)
     }
@@ -281,6 +307,7 @@ pub(super) struct RmvpePitchSession {
     pub(super) tensor_rt_profile: Option<TensorRtSessionProfile>,
     pub(super) tensor_rt_run_mode: TensorRtRunMode,
     pub(super) tensor_rt_binding: Option<RmvpeTensorRtBinding>,
+    native: Option<NativeRmvpeEngine>,
 }
 
 impl RmvpePitchSession {
@@ -291,9 +318,14 @@ impl RmvpePitchSession {
         tensor_rt_run_mode: TensorRtRunMode,
         tensor_rt_session_purpose: TensorRtSessionPurpose,
     ) -> Result<Self> {
+        let session_provider = if provider.is_tensorrt() {
+            Provider::Cpu
+        } else {
+            provider
+        };
         let session = load_session(
             path,
-            provider,
+            session_provider,
             ModelRole::Rmvpe,
             tensor_rt_profile.as_ref(),
             tensor_rt_run_mode,
@@ -301,6 +333,14 @@ impl RmvpePitchSession {
         )?;
         require_inputs(&session, &["waveform", "threshold"])?;
         require_output(&session, "pitchf")?;
+        let native = if provider.is_tensorrt() {
+            let profile = tensor_rt_profile
+                .as_ref()
+                .ok_or_else(|| anyhow!("native TensorRT RMVPE requires a fixed-shape profile"))?;
+            Some(NativeRmvpeEngine::load(path, profile)?)
+        } else {
+            None
+        };
         info!("loaded RMVPE f0 model: {}", path.display());
         Ok(Self {
             session,
@@ -308,6 +348,7 @@ impl RmvpePitchSession {
             tensor_rt_profile,
             tensor_rt_run_mode,
             tensor_rt_binding: None,
+            native,
         })
     }
 
@@ -323,6 +364,9 @@ impl RmvpePitchSession {
             "waveform",
             &waveform_shape,
         )?;
+        if let Some(native) = self.native.as_ref() {
+            return Ok(native.warmup_output_shape());
+        }
         let waveform = Tensor::from_array((waveform_shape, vec![0.0f32; audio_16k_samples]))?;
         let threshold = Tensor::from_array(([1usize], vec![threshold]))?;
         let run_start = Instant::now();
@@ -350,6 +394,9 @@ impl RmvpePitchSession {
         shared_waveform: Option<&TensorRtSharedWaveform>,
     ) -> Result<()> {
         if !provider_uses_fixed_shape(self.provider) {
+            return Ok(());
+        }
+        if self.native.is_some() {
             return Ok(());
         }
         let profile = self
@@ -419,6 +466,9 @@ impl RmvpePitchSession {
         )?;
         if self.tensor_rt_binding.is_some() {
             return self.extract_with_binding(audio_16k, pitch_shift, threshold);
+        }
+        if let Some(native) = self.native.as_mut() {
+            return native.extract(audio_16k, pitch_shift, threshold);
         }
         self.extract_with_session_run(audio_16k, pitch_shift, threshold, &waveform_shape)
     }
@@ -598,53 +648,38 @@ impl RvcModelSession {
         provider: Provider,
         tensor_rt_profile: Option<TensorRtSessionProfile>,
         expected_feat_channels_override: Option<i64>,
-        native_rvc_engine: Option<&Path>,
         tensor_rt_run_mode: TensorRtRunMode,
         tensor_rt_session_purpose: TensorRtSessionPurpose,
     ) -> Result<Self> {
         if provider.is_tensorrt() {
-            if let Some(engine_path) = configured_rvc_engine_path(native_rvc_engine) {
-                let profile = tensor_rt_profile.as_ref().ok_or_else(|| {
-                    anyhow!("native TensorRT RVC requires a fixed-shape TensorRT profile")
-                })?;
-                let feats_shape = profile.fixed_input_dims("feats")?;
-                let pitch_shape = profile.fixed_input_dims("pitch")?;
-                let frames = pitch_shape
-                    .get(1)
-                    .copied()
-                    .ok_or_else(|| anyhow!("native TensorRT RVC pitch profile must be rank-2"))?;
-                let channels = feats_shape
-                    .get(2)
-                    .copied()
-                    .ok_or_else(|| anyhow!("native TensorRT RVC feats profile must be rank-3"))?;
-                let expected_feat_channels = expected_feat_channels_override
-                    .unwrap_or_else(|| i64::try_from(channels).unwrap_or(i64::MAX));
-                let native_rvc = NativeRvcEngine::load(&engine_path, frames, channels)
-                    .with_context(|| {
-                        format!(
-                            "failed to load native TensorRT RVC engine {}",
-                            engine_path.display()
-                        )
-                    })?;
-                info!(
-                    "loaded native TensorRT RVC engine model={} engine={} frames={} channels={} session_purpose={}",
-                    path.display(),
-                    native_rvc.path().display(),
-                    native_rvc.frames(),
-                    native_rvc.channels(),
-                    tensor_rt_session_purpose.label()
-                );
-                return Ok(Self {
-                    session: None,
-                    provider,
-                    tensor_rt_profile,
-                    tensor_rt_run_mode,
-                    tensor_rt_binding: None,
-                    native_rvc: Some(native_rvc),
-                    cpu_output_binding: None,
-                    expected_feat_channels,
-                });
-            }
+            let profile = tensor_rt_profile.as_ref().ok_or_else(|| {
+                anyhow!("native TensorRT RVC requires a fixed-shape TensorRT profile")
+            })?;
+            let feats_shape = profile.fixed_input_dims("feats")?;
+            let channels = feats_shape
+                .get(2)
+                .copied()
+                .ok_or_else(|| anyhow!("native TensorRT RVC feats profile must be rank-3"))?;
+            let expected_feat_channels = expected_feat_channels_override
+                .unwrap_or_else(|| i64::try_from(channels).unwrap_or(i64::MAX));
+            let native_rvc = NativeRvcEngine::load(path, profile, channels)?;
+            info!(
+                "loaded native TensorRT RVC model={} frames={} channels={} session_purpose={}",
+                path.display(),
+                native_rvc.frames(),
+                native_rvc.channels(),
+                tensor_rt_session_purpose.label()
+            );
+            return Ok(Self {
+                session: None,
+                provider,
+                tensor_rt_profile,
+                tensor_rt_run_mode,
+                tensor_rt_binding: None,
+                native_rvc: Some(native_rvc),
+                cpu_output_binding: None,
+                expected_feat_channels,
+            });
         }
         let session = load_session(
             path,
@@ -1172,7 +1207,7 @@ pub(super) fn load_session(
     path: &Path,
     provider: Provider,
     role: ModelRole,
-    tensor_rt_profile: Option<&TensorRtSessionProfile>,
+    _tensor_rt_profile: Option<&TensorRtSessionProfile>,
     tensor_rt_run_mode: TensorRtRunMode,
     tensor_rt_session_purpose: TensorRtSessionPurpose,
 ) -> Result<Session> {
@@ -1205,104 +1240,10 @@ pub(super) fn load_session(
                 .map_err(|err| anyhow!("failed to register CUDA execution provider: {err}"))?;
         }
         Provider::TensorRt => {
-            let tensor_rt_profile = tensor_rt_profile.ok_or_else(|| {
-                anyhow!(
-                    "TensorRT provider requires a profile for {}; use cpu/cuda for generic inspection",
-                    path.display()
-                )
-            })?;
-            if tensor_rt_profile.role != role {
-                bail!(
-                    "TensorRT profile role {} does not match requested model role {} for {}",
-                    tensor_rt_profile.role.label(),
-                    role.label(),
-                    path.display()
-                );
-            }
-            let profile_shapes = tensor_rt_profile.profile_shapes.as_str();
-            let cache_root = tensor_rt_cache_root()?;
-            let cache_dir = tensor_rt_profile.cache_dir_from_root(&cache_root)?;
-            let timing_cache_dir = tensor_rt_timing_cache_dir_from_root(&cache_root);
-            let model_cache_key = tensor_rt_profile.model_cache_key()?;
-            let cache_has_entries = tensor_rt_cache_has_entries(&cache_dir);
-            fs::create_dir_all(&cache_dir).with_context(|| {
-                format!(
-                    "failed to create TensorRT engine cache directory {}",
-                    cache_dir.display()
-                )
-            })?;
-            fs::create_dir_all(&timing_cache_dir).with_context(|| {
-                format!(
-                    "failed to create TensorRT timing cache directory {}",
-                    timing_cache_dir.display()
-                )
-            })?;
-            let cache_path = cache_dir.display().to_string();
-            let timing_cache_path = timing_cache_dir.display().to_string();
-            let engine_cache_enabled = role != ModelRole::Rvc;
-            let timing_cache_enabled = role != ModelRole::Rvc;
-            let dump_subgraphs_enabled = role == ModelRole::Rvc;
-            let cuda_graph_enabled = false;
-            info!(
-                "requesting ONNX Runtime TensorRT backend session_purpose={} model_role={} model={} provider_order=[TensorRT,CUDA] device_id={} fp16=true engine_cache={} timing_cache={} dump_subgraphs={} cuda_graph={} device_io={} run_mode={} cache_root={} model_cache_key={} cache_path={} timing_cache_path={} profile_shapes={} cache_status={}",
-                tensor_rt_session_purpose.label(),
-                role.label(),
-                path.display(),
-                TENSORRT_DEVICE_ID,
-                engine_cache_enabled,
-                timing_cache_enabled,
-                dump_subgraphs_enabled,
-                cuda_graph_enabled,
-                tensor_rt_run_mode.device_io(),
-                tensor_rt_run_mode.label(),
-                cache_root.display(),
-                model_cache_key,
-                cache_path,
-                timing_cache_path,
-                profile_shapes,
-                if cache_has_entries { "existing-files" } else { "empty-or-missing" }
+            bail!(
+                "Provider::TensorRt is native-only; load a CPU inspection session or a native TensorRT engine for {}",
+                path.display()
             );
-            if cache_has_entries {
-                info!(
-                    "TensorRT engine cache has existing files for {}; session commit may reuse cached engines",
-                    role.label()
-                );
-            } else {
-                info!(
-                    "TensorRT engine cache is empty for {}; first session commit may build engines now",
-                    role.label()
-                );
-            }
-            let tensorrt = ep::TensorRT::default()
-                .with_device_id(TENSORRT_DEVICE_ID)
-                .with_fp16(true)
-                .with_engine_cache(engine_cache_enabled)
-                .with_engine_cache_path(cache_path)
-                .with_timing_cache(timing_cache_enabled)
-                .with_timing_cache_path(timing_cache_path)
-                .with_force_timing_cache(false)
-                .with_detailed_build_log(true)
-                .with_dump_subgraphs(dump_subgraphs_enabled)
-                .with_cuda_graph(cuda_graph_enabled)
-                .with_builder_optimization_level(0)
-                .with_max_workspace_size(4 * 1024 * 1024 * 1024)
-                .with_profile_min_shapes(profile_shapes)
-                .with_profile_opt_shapes(profile_shapes)
-                .with_profile_max_shapes(profile_shapes)
-                .build()
-                .error_on_failure();
-            let cuda = ep::CUDA::default()
-                .with_device_id(TENSORRT_DEVICE_ID)
-                .build()
-                .error_on_failure();
-            builder = builder.with_disable_cpu_fallback().map_err(|err| {
-                anyhow!("failed to disable CPU fallback for TensorRT backend: {err}")
-            })?;
-            builder = builder
-                .with_execution_providers([tensorrt, cuda])
-                .map_err(|err| {
-                    anyhow!("failed to register TensorRT/CUDA execution providers: {err}")
-                })?;
         }
         Provider::Cpu => {
             info!(
