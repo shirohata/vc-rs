@@ -1219,25 +1219,39 @@ pub(super) fn load_session(
         .map_err(|err| anyhow!(err.to_string()))?;
     match provider {
         Provider::Cuda => {
-            info!(
-                "requesting ONNX Runtime CUDA execution provider device_id={} cuda_graph={} device_io={} run_mode={}",
-                TENSORRT_DEVICE_ID,
-                tensor_rt_run_mode.cuda_graph(),
-                tensor_rt_run_mode.device_io(),
-                tensor_rt_run_mode.label()
-            );
-            if tensor_rt_run_mode.cuda_graph() {
-                builder = builder.with_disable_cpu_fallback().map_err(|err| {
-                    anyhow!("failed to disable CPU fallback for CUDA backend: {err}")
-                })?;
+            #[cfg(not(feature = "cuda"))]
+            {
+                // The ONNX Runtime CUDA EP is compiled out of this build. Keep
+                // `tensor_rt_run_mode` referenced so the no-cuda build matches
+                // the cuda build's signature without an unused-variable warning.
+                let _ = tensor_rt_run_mode;
+                bail!(
+                    "Provider::Cuda is unavailable in this build (compiled without the `cuda` feature); rebuild with `--features cuda` or select a CPU/TensorRT provider for {}",
+                    path.display()
+                );
             }
-            builder = builder
-                .with_execution_providers([ep::CUDA::default()
-                    .with_device_id(TENSORRT_DEVICE_ID)
-                    .with_cuda_graph(tensor_rt_run_mode.cuda_graph())
-                    .build()
-                    .error_on_failure()])
-                .map_err(|err| anyhow!("failed to register CUDA execution provider: {err}"))?;
+            #[cfg(feature = "cuda")]
+            {
+                info!(
+                    "requesting ONNX Runtime CUDA execution provider device_id={} cuda_graph={} device_io={} run_mode={}",
+                    TENSORRT_DEVICE_ID,
+                    tensor_rt_run_mode.cuda_graph(),
+                    tensor_rt_run_mode.device_io(),
+                    tensor_rt_run_mode.label()
+                );
+                if tensor_rt_run_mode.cuda_graph() {
+                    builder = builder.with_disable_cpu_fallback().map_err(|err| {
+                        anyhow!("failed to disable CPU fallback for CUDA backend: {err}")
+                    })?;
+                }
+                builder = builder
+                    .with_execution_providers([ep::CUDA::default()
+                        .with_device_id(TENSORRT_DEVICE_ID)
+                        .with_cuda_graph(tensor_rt_run_mode.cuda_graph())
+                        .build()
+                        .error_on_failure()])
+                    .map_err(|err| anyhow!("failed to register CUDA execution provider: {err}"))?;
+            }
         }
         Provider::TensorRt => {
             bail!(

@@ -78,7 +78,7 @@ pub fn add_plugin_dir_to_dll_search_path() {
 #[cfg(not(windows))]
 pub fn add_plugin_dir_to_dll_search_path() {}
 
-#[cfg(windows)]
+#[cfg(all(windows, feature = "cuda"))]
 pub fn preload_bundled_cuda_dlls() -> anyhow::Result<()> {
     use anyhow::Context;
 
@@ -96,7 +96,10 @@ pub fn preload_bundled_cuda_dlls() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(not(windows))]
+// No-op when the CUDA EP is compiled out (TensorRT-only build) or off-Windows:
+// there are no provider DLLs to preload, and the GPU path runs through native
+// TensorRT instead. The caller only invokes this on the `Provider::Cuda` branch.
+#[cfg(not(all(windows, feature = "cuda")))]
 pub fn preload_bundled_cuda_dlls() -> anyhow::Result<()> {
     Ok(())
 }

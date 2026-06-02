@@ -66,25 +66,51 @@ from the config and apply on (re)instantiation.
 
 ## Build
 
+The plugin ships in two mutually exclusive GPU packages, selected by cargo
+feature. Both statically link the ONNX Runtime **CPU core** into the plugin
+binary (~25 MB `.vst3`); they differ only in the GPU backend and therefore in
+the heavy runtime DLLs you ship beside the plugin.
+
+### CUDA package (default)
+
 ```sh
 ORT_CUDA_VERSION=12
 cargo xtask bundle vc-vst3 --release
 ```
 
-The plugin is built **CUDA-only**: unlike the CLI it does *not* enable the ONNX
-Runtime TensorRT EP or the native TensorRT shim (the `vc-core/tensorrt`
-feature), because those add a load-time `nvinfer_10.dll` dependency that stops
-the plugin from loading in a DAW unless TensorRT is on `PATH`. With it off, the
-plugin has no load-time NVIDIA runtime dependency (the CUDA EP and its DLLs load
-at runtime), so it loads even without any NVIDIA libraries installed; GPU
-execution then needs the CUDA runtime DLLs (see below).
+Enables the ONNX Runtime **CUDA execution provider** (`vc-core/cuda`, on by
+default). The plugin has *no* load-time NVIDIA dependency — the CUDA EP and its
+DLLs load at runtime — so it loads in a DAW even without NVIDIA libraries
+installed; GPU execution then needs the CUDA runtime DLLs (see below). The
+repo's Cargo config pins `ORT_CUDA_VERSION=12` so the downloaded ONNX Runtime
+CUDA provider matches the CUDA 12.x DLLs copied by `package-cuda.ps1`.
 
-The repo's Cargo config pins `ORT_CUDA_VERSION=12` so the downloaded ONNX
-Runtime CUDA provider matches the CUDA 12.x DLLs copied by `package-cuda.ps1`.
+### TensorRT package
+
+```sh
+cargo xtask bundle vc-vst3 --release --no-default-features --features tensorrt
+```
+
+Drops the ONNX Runtime CUDA EP entirely and runs the GPU path through the
+**native TensorRT** shim (`vc-core/tensorrt`). This avoids shipping the ~2 GB
+CUDA EP + cuDNN/cuBLAS/cuFFT set; instead it needs the TensorRT runtime beside
+the plugin (`nvinfer_10.dll`, `nvinfer_plugin_10.dll`, the matching
+`nvinfer_builder_resource_sm*_10.dll` for your GPU, and `cudart64_12.dll`).
+
+> ⚠️ The native shim links `nvinfer_10.dll` at **load time**, so this package
+> fails to load in a DAW unless those TensorRT DLLs resolve on the OS DLL search
+> path. Windows searches the loaded module's own directory first, so placing the
+> DLLs next to the plugin binary (in `Contents/<arch>/`) satisfies the implicit
+> import. Selecting the `cuda` provider in this package falls back to TensorRT.
 
 > Build the plugin package-scoped via `cargo xtask bundle vc-vst3` (not
 > `cargo build --workspace`). A whole-workspace build unifies features with the
-> CLI and would re-introduce the TensorRT/`nvinfer` dependency.
+> CLI and would pull both the CUDA EP **and** the TensorRT/`nvinfer` dependency
+> into the plugin.
+
+After bundling, populate the TensorRT runtime with
+[`package-tensorrt.ps1`](package-tensorrt.ps1) (see *Bundling the TensorRT
+runtime* below).
 
 Output bundles land in `target/bundled/`:
 
@@ -116,6 +142,35 @@ files in [`dist/licenses/`](dist/licenses) into the bundle. End users then only
 need an up-to-date NVIDIA GPU **driver** — no CUDA/cuDNN install. See
 [`dist/licenses/THIRD-PARTY-NOTICES.md`](dist/licenses/THIRD-PARTY-NOTICES.md)
 for redistribution terms.
+
+### Bundling the TensorRT runtime (self-contained GPU build, Windows)
+
+For the **TensorRT package**, [`package-tensorrt.ps1`](package-tensorrt.ps1)
+copies the TensorRT DLLs into the bundle. There are two dependency layers:
+
+- **Runtime** (plugin load + engine execution): `nvinfer_10.dll`,
+  `nvinfer_plugin_10.dll`, `cudart64_12.dll`. Always copied.
+- **Engine build** (first run, on a cache miss): the ORT-free helper
+  `vc-tensorrt-builder.exe` builds engines from the ONNX models, which needs
+  `nvonnxparser_10.dll` and the `nvinfer_builder_resource_sm*_10.dll` matching
+  the user's GPU. Copied unless `-RuntimeOnly`.
+
+```powershell
+# Self-contained for the target GPU's SM (e.g. sm86 = RTX 30xx, sm89 = RTX 40xx;
+# `nvidia-smi --query-gpu=compute_cap --format=csv` reports it):
+pwsh crates\vc-vst3\package-tensorrt.ps1 -BuilderSm sm86
+
+# Or runtime DLLs only (smallest; engines built/cached elsewhere):
+pwsh crates\vc-vst3\package-tensorrt.ps1 -RuntimeOnly
+```
+
+The builder resource DLLs are GPU-architecture specific and large (~160–640 MB
+each); with no `-BuilderSm` the script bundles them all (~2.5 GB) and warns.
+Because a VST3/CLAP host's process is the DAW (not the plugin), the plugin finds
+the bundled helper via the `VC_RS_TENSORRT_BUILDER_HELPER` env var — set it to
+the helper's path in the installed plugin folder (the script prints the exact
+command). With engines prebuilt and cached, only the runtime layer is needed at
+play time. End users otherwise need just an up-to-date NVIDIA GPU **driver**.
 
 ## Install
 

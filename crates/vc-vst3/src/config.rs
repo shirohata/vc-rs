@@ -30,8 +30,11 @@ pub struct PluginConfig {
     /// are no longer user-provided; native TensorRT builds cache entries from
     /// the ONNX model and fixed profile.
     pub rvc_engine: Option<PathBuf>,
-    /// "cpu" | "cuda". Legacy TensorRT spellings are accepted as CUDA for this
-    /// plugin package because VST3/CLAP builds leave `vc-core/tensorrt` off.
+    /// "cpu" | "cuda" | "tensorrt". The GPU spellings resolve to whichever GPU
+    /// backend this package was built with (see [`PluginConfig::provider`]):
+    /// the default package ships the ONNX Runtime CUDA EP, the TensorRT package
+    /// ships native TensorRT. A GPU value that doesn't match the compiled
+    /// backend falls back to the one that is available.
     pub provider: String,
     pub f0_threshold: f32,
     pub silence_threshold: f32,
@@ -87,13 +90,8 @@ impl PluginConfig {
 
     pub fn provider(&self) -> Provider {
         match self.provider.trim().to_ascii_lowercase().as_str() {
-            "cuda" => Provider::Cuda,
-            "tensorrt" | "trt" | "tensor-rt" => {
-                nih_plug::nih_warn!(
-                    "vc-vst3: TensorRT provider is not enabled in this package; using CUDA"
-                );
-                Provider::Cuda
-            }
+            "cuda" => gpu_provider("cuda"),
+            "tensorrt" | "trt" | "tensor-rt" => gpu_provider("tensorrt"),
             _ => Provider::Cpu,
         }
     }
@@ -145,6 +143,37 @@ impl PluginConfig {
         let cwd = std::env::current_dir().ok()?.join("vc-rs-vst3.toml");
         cwd.is_file().then_some(cwd)
     }
+}
+
+/// Resolve a requested GPU provider ("cuda" or "tensorrt") to the GPU backend
+/// this package was compiled with. The variants are mutually exclusive by cargo
+/// feature, so each build sees exactly one of these.
+#[cfg(feature = "tensorrt")]
+fn gpu_provider(requested: &str) -> Provider {
+    if requested != "tensorrt" {
+        nih_plug::nih_warn!(
+            "vc-vst3: '{requested}' provider is not enabled in this package; using TensorRT"
+        );
+    }
+    Provider::TensorRt
+}
+
+#[cfg(all(feature = "cuda", not(feature = "tensorrt")))]
+fn gpu_provider(requested: &str) -> Provider {
+    if requested != "cuda" {
+        nih_plug::nih_warn!(
+            "vc-vst3: '{requested}' provider is not enabled in this package; using CUDA"
+        );
+    }
+    Provider::Cuda
+}
+
+#[cfg(not(any(feature = "cuda", feature = "tensorrt")))]
+fn gpu_provider(requested: &str) -> Provider {
+    nih_plug::nih_warn!(
+        "vc-vst3: '{requested}' provider is not enabled in this CPU-only package; using CPU"
+    );
+    Provider::Cpu
 }
 
 /// The per-user config directory for the current OS:

@@ -12,7 +12,9 @@ license = "MIT"
 anyhow = "1.0"
 tracing = "0.1"
 rubato = "2"
-# Base ONNX Runtime: CUDA EP only. The TensorRT EP (which statically pulls a
-# load-time `nvinfer_10.dll` dependency) is opt-in via the `vc-core/tensorrt`
-# feature so the plugin can ship a CUDA-only build that loads without TensorRT.
-ort = { version = "2.0.0-rc.12", features = ["cuda", "preload-dylibs"] }
+# Base ONNX Runtime: CPU core only. The CUDA execution provider (which pulls the
+# large `onnxruntime_providers_cuda.dll` and its cuDNN dependencies) is opt-in
+# via the `vc-core/cuda` feature, and native TensorRT (a load-time `nvinfer_10.dll`
+# dependency) via `vc-core/tensorrt`. This lets us ship a TensorRT-only plugin
+# build that drops the CUDA EP entirely, and a CUDA build that drops TensorRT.
+ort = { version = "2.0.0-rc.12", features = ["preload-dylibs"] }

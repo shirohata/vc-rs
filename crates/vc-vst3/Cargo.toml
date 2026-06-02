@@ -8,6 +8,15 @@ description = "VST3/CLAP RVC voice conversion plugin"
 [lib]
 crate-type = ["cdylib", "lib"]
 
+[features]
+# Default package: CPU + ONNX Runtime CUDA EP (bundles the large CUDA provider
+# DLLs). Build the leaner TensorRT package with
+# `--no-default-features --features tensorrt`, which drops the CUDA EP and runs
+# the GPU path through native TensorRT instead.
+default = ["cuda"]
+cuda = ["vc-core/cuda"]
+tensorrt = ["vc-core/tensorrt"]
+
 [dependencies]
 # `vst3` is an opt-in feature: nih-plug's VST3 bindings are GPLv3, so building
 # the VST3 target makes the resulting binary GPLv3. CLAP export is always on.

@@ -13,6 +13,10 @@ clap = ["dep:clap"]
 # Runtime's TensorRT EP; `Provider::TensorRt` builds serialized engines through
 # TensorRT's builder API and runs them through the native shim.
 tensorrt = []
+# Enables ONNX Runtime's CUDA execution provider (`Provider::Cuda`). Off by
+# default so a TensorRT-only build can drop the large CUDA EP binaries. When
+# disabled, selecting `Provider::Cuda` fails at session load with a clear error.
+cuda = ["ort/cuda"]
 
 [dependencies]
 anyhow.workspace = true
