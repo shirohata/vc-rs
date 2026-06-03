@@ -31,7 +31,9 @@ $ErrorActionPreference = 'Stop'
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot '..\..')
 if (-not $BundleDir) { $BundleDir = Join-Path $repoRoot 'target\bundled' }
-$BundleDir = Resolve-Path $BundleDir
+# Don't hard-fail here if the bundle dir is missing; let the bundle check below
+# report the actionable "run cargo xtask bundle first" message instead.
+if (Test-Path $BundleDir) { $BundleDir = (Resolve-Path $BundleDir).Path }
 
 if (-not $BootstrapDll) {
     $cache = Join-Path ([System.IO.Path]::GetTempPath()) "vc-rs-windowsappsdk-foundation-$FoundationVersion"

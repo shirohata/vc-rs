@@ -51,18 +51,18 @@ impl Plugin for VcRvcPlugin {
     const EMAIL: &'static str = "noreply@vc-rs.invalid";
     const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 
-    // Prefer stereo; mono is offered as a fallback. The pipeline is mono
-    // internally, so stereo input is downmixed and the converted mono is fanned
-    // out to all output channels.
+    // Prefer mono; stereo is offered as a fallback. The host uses the first
+    // layout as the default. The pipeline is mono internally, so stereo input is
+    // downmixed and the converted mono is fanned out to all output channels.
     const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[
-        AudioIOLayout {
-            main_input_channels: NonZeroU32::new(2),
-            main_output_channels: NonZeroU32::new(2),
-            ..AudioIOLayout::const_default()
-        },
         AudioIOLayout {
             main_input_channels: NonZeroU32::new(1),
             main_output_channels: NonZeroU32::new(1),
+            ..AudioIOLayout::const_default()
+        },
+        AudioIOLayout {
+            main_input_channels: NonZeroU32::new(2),
+            main_output_channels: NonZeroU32::new(2),
             ..AudioIOLayout::const_default()
         },
     ];
