@@ -7,6 +7,10 @@ RVC モデルで音声変換を実行します。
 詳細な内部設計は [`docs/architecture_ja.md`](docs/architecture_ja.md) と
 [`docs/architecture.md`](docs/architecture.md) を参照してください。
 
+ソースからビルドする場合は、開発者向けの
+[`docs/development_ja.md`](docs/development_ja.md)（必要環境・ビルド・GPU 実行用
+ランタイム・環境構築スクリプト）を参照してください。
+
 ## 対応機能
 
 - CLI での実行（GUI なし）
@@ -16,15 +20,6 @@ RVC モデルで音声変換を実行します。
 - リアルタイム変換またはパススルー（`run`）
 - ONNX Runtime の CPU / CUDA / TensorRT Provider 利用
 - CPAL / WASAPI による音声入出力
-
-## 必要環境
-
-- Rust stable と `cargo`
-- Windows でビルドする場合: `x86_64-pc-windows-msvc` ツールチェーン
-- Windows でビルドする場合: Visual Studio Build Tools（C++ workload）
-
-CPU 実行だけで試す場合、CUDA / cuDNN / TensorRT は不要です。GPU 実行に必要な
-ランタイムは「GPU / TensorRT 実行」を参照してください。
 
 ## 外部モデルについて
 
@@ -39,11 +34,8 @@ RVC 音声変換モデルは **ONNX 形式（`.onnx`）のみ対応**です。`.
 直接読み込めません。`.pth` を使う場合は、RVC 系ツールや VCClient などを使って
 事前に ONNX へ変換してください。
 
-## ビルド
-
-```powershell
-cargo build --release
-```
+> 以下の使用例はソースから実行する形（`cargo run -- ...`）で記載しています。
+> ビルド方法は [`docs/development_ja.md`](docs/development_ja.md) を参照してください。
 
 ## 基本的な使い方
 
@@ -123,29 +115,9 @@ GPU 実行では、CPU より小さい `--chunk-ms` や大きい `--extra-conver
 あります。設定を詰めるときは、先に音切れしない値を見つけ、その後に遅延を下げる
 方向で `--chunk-ms` を小さくしていくのが安全です。
 
-### GPU 実行用ランタイム
-
-`--provider cuda` を使う場合は、次の組み合わせを前提にしています。
-
-| ランタイム | バージョン | ダウンロードページ |
-| --- | --- | --- |
-| CUDA Toolkit | 12.x（開発環境では 12.9） | [CUDA Toolkit Downloads](https://developer.nvidia.com/cuda-downloads) |
-| cuDNN | 9.x for CUDA 12 | [cuDNN Downloads](https://developer.nvidia.com/cudnn) / [Windows x86_64 zip 一覧](https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64/) |
-| TensorRT | 10.x（CUDA 12.x 対応）または 11.x（CUDA 13.x 対応）。開発環境では 10.16.1.11 for CUDA 12.9 と 11.0.0.114 for CUDA 13.2 | [TensorRT SDK](https://developer.nvidia.com/tensorrt) |
-
-Windows で zip 版 cuDNN を使う場合は
-CUDA 12 対応の `cudnn-windows-x86_64-9.x_cuda12-archive.zip` を取得し、展開後の
-`bin` を `PATH` に追加してください。CUDA Provider は `ORT_CUDA_VERSION=12` を
-前提にします（repo の Cargo config でも固定しています）。
-
-`--provider tensorrt` を使う場合は、CUDA / cuDNN に加えて TensorRT zip を展開し、
-その `bin` と `lib`（例: `TensorRT-10.16.1.11\bin` / `TensorRT-11.0.0.114\bin`）を
-`PATH` に追加してください。TensorRT 10 系は CUDA 12.x、TensorRT 11 系は CUDA 13.x
-が必要です。ビルドはワークスペース直下にある最も新しいバージョンを自動検出し、
-対応する CUDA Toolkit を選択します（`TENSORRT_ROOT` / `CUDA_PATH` で上書き可能）。
-TensorRT は初回実行時やモデル・入力形状が変わったタイミングでエンジンを生成する
-ため、コンパイルに非常に長い時間がかかることがあります。2 回目以降はエンジン
-キャッシュが再利用できれば起動が短くなります。
+GPU 実行に必要なランタイム（CUDA / cuDNN / TensorRT）の準備と `PATH` 設定は、
+開発者向けの [`docs/development_ja.md`](docs/development_ja.md#gpu-実行用ランタイム)
+を参照してください。
 
 ## 補助スクリプト
 

@@ -1,3 +1,12 @@
+## Build environment
+
+First-time setup (winget + NVIDIA SDKs): see `scripts/README.md`. The line is
+Windows, CUDA 13 / TensorRT 11. Day-to-day:
+- Per shell session, dot-source `. scripts/activate.ps1` before building/testing
+  (puts CUDA/cuDNN/TensorRT on PATH; without it test exes fail to launch with
+  `STATUS_DLL_NOT_FOUND`). To run tests without the GPU stack, set
+  `VC_RS_ENABLE_NATIVE_TENSORRT=0`.
+
 ## Real-time audio constraints
 - Avoid heap allocation, blocking I/O, and locks on the real-time audio callback path.
 - Do not perform logging directly inside the audio callback unless already proven safe.
