@@ -117,16 +117,16 @@ impl PluginConfig {
         match std::fs::read_to_string(&path) {
             Ok(text) => match toml::from_str::<PluginConfig>(&text) {
                 Ok(config) => {
-                    nih_plug::nih_log!("vc-vst3: loaded config from {}", path.display());
+                    nice_plug::nice_log!("vc-vst3: loaded config from {}", path.display());
                     config
                 }
                 Err(err) => {
-                    nih_plug::nih_error!("vc-vst3: failed to parse {}: {err}", path.display());
+                    nice_plug::nice_error!("vc-vst3: failed to parse {}: {err}", path.display());
                     Self::default()
                 }
             },
             Err(err) => {
-                nih_plug::nih_error!("vc-vst3: failed to read {}: {err}", path.display());
+                nice_plug::nice_error!("vc-vst3: failed to read {}: {err}", path.display());
                 Self::default()
             }
         }
@@ -166,7 +166,7 @@ fn default_provider() -> &'static str {
 #[cfg(feature = "tensorrt")]
 fn gpu_provider(requested: &str) -> Provider {
     if requested != "tensorrt" {
-        nih_plug::nih_warn!(
+        nice_plug::nice_warn!(
             "vc-vst3: '{requested}' provider is not enabled in this package; using TensorRT"
         );
     }
@@ -176,7 +176,7 @@ fn gpu_provider(requested: &str) -> Provider {
 #[cfg(all(feature = "cuda", not(feature = "tensorrt")))]
 fn gpu_provider(requested: &str) -> Provider {
     if requested != "cuda" {
-        nih_plug::nih_warn!(
+        nice_plug::nice_warn!(
             "vc-vst3: '{requested}' provider is not enabled in this package; using CUDA"
         );
     }
@@ -188,7 +188,7 @@ fn gpu_provider(requested: &str) -> Provider {
     not(any(feature = "cuda", feature = "tensorrt"))
 ))]
 fn gpu_provider(requested: &str) -> Provider {
-    nih_plug::nih_warn!(
+    nice_plug::nice_warn!(
         "vc-vst3: '{requested}' provider is not enabled in this package; using Windows ML"
     );
     Provider::WindowsMl
@@ -196,7 +196,7 @@ fn gpu_provider(requested: &str) -> Provider {
 
 #[cfg(not(any(feature = "cuda", feature = "tensorrt", feature = "windowsml")))]
 fn gpu_provider(requested: &str) -> Provider {
-    nih_plug::nih_warn!(
+    nice_plug::nice_warn!(
         "vc-vst3: '{requested}' provider is not enabled in this CPU-only package; using CPU"
     );
     Provider::Cpu

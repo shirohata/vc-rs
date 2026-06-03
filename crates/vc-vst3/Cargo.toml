@@ -20,10 +20,11 @@ windowsml = ["vc-core/windowsml", "dep:ort"]
 tensorrt = ["vc-core/tensorrt"]
 
 [dependencies]
-# `vst3` is an opt-in feature: nih-plug's VST3 bindings are GPLv3, so building
-# the VST3 target makes the resulting binary GPLv3. CLAP export is always on.
-nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", features = ["vst3"] }
-nih_plug_egui = { git = "https://github.com/robbert-vdh/nih-plug.git" }
+# Building the VST3 target links the Steinberg VST3 SDK bindings (GPLv3), so the
+# resulting binary is GPLv3. CLAP export is always on.
+nice-plug = { git = "https://codeberg.org/RustAudio/nice-plug.git", rev = "1a6858543dd655f77eda56ce9b633bf2af743881", features = ["vst3"] }
+nice-plug-egui = { git = "https://codeberg.org/RustAudio/nice-plug.git", rev = "1a6858543dd655f77eda56ce9b633bf2af743881" }
+egui = "0.34.1"
 vc-core = { path = "../vc-core" }
 rtrb = "0.3"
 rfd = "0.15"

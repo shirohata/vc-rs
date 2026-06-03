@@ -22,6 +22,6 @@ Notes:
   terms of those agreements. Review them before redistributing this build.
 - An up-to-date NVIDIA GPU **driver** is still required on the end-user machine
   (it provides the CUDA driver, which is not redistributable and not bundled).
-- Building the VST3 target links nih-plug's GPLv3 VST3 bindings, making the
-  plugin binary GPLv3; the bundled NVIDIA/ONNX DLLs are separate aggregated
-  works under their own licenses (mere aggregation).
+- Building the VST3 target links the Steinberg VST3 SDK bindings (GPLv3) via
+  nice-plug, making the plugin binary GPLv3; the bundled NVIDIA/ONNX DLLs are
+  separate aggregated works under their own licenses (mere aggregation).

@@ -5,4 +5,4 @@ edition = "2021"
 publish = false
 
 [dependencies]
-nih_plug_xtask = { git = "https://github.com/robbert-vdh/nih-plug.git" }
+nice-plug-xtask = { git = "https://codeberg.org/RustAudio/nice-plug.git", rev = "1a6858543dd655f77eda56ce9b633bf2af743881" }

@@ -9,7 +9,7 @@ use std::num::NonZeroU32;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
-use nih_plug::prelude::*;
+use nice_plug::prelude::*;
 
 mod config;
 mod dll_path;
@@ -169,5 +169,5 @@ impl Vst3Plugin for VcRvcPlugin {
     const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] = &[Vst3SubCategory::Fx];
 }
 
-nih_export_clap!(VcRvcPlugin);
-nih_export_vst3!(VcRvcPlugin);
+nice_export_clap!(VcRvcPlugin);
+nice_export_vst3!(VcRvcPlugin);

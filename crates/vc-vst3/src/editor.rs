@@ -11,13 +11,9 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use nih_plug::prelude::{Editor, ParamSetter};
-use nih_plug_egui::{
-    create_egui_editor,
-    egui::{self, Vec2},
-    resizable_window::ResizableWindow,
-    widgets,
-};
+use egui::{self, Vec2};
+use nice_plug::prelude::{Editor, ParamSetter};
+use nice_plug_egui::{create_egui_editor, resizable_window::ResizableWindow, widgets};
 
 use crate::params::VcRvcParams;
 use crate::runtime::{MAX_CHUNK_MS, MIN_CHUNK_MS};
@@ -54,16 +50,17 @@ pub fn create(
             dirty,
             status,
         },
-        |_, _| {},
-        |ctx, setter, state| draw(ctx, setter, state),
+        Default::default(),
+        |_, _, _| {},
+        |ui, setter, _queue, state| draw(ui, setter, state),
     )
 }
 
-fn draw(ctx: &egui::Context, setter: &ParamSetter, state: &mut EditorState) {
+fn draw(ui: &mut egui::Ui, setter: &ParamSetter, state: &mut EditorState) {
     let egui_state = state.params.editor_state.clone();
     ResizableWindow::new("vc-rs-rvc-editor")
         .min_size(Vec2::new(440.0, 380.0))
-        .show(ctx, egui_state.as_ref(), |ui| {
+        .show(ui, egui_state.as_ref(), |ui| {
             // Hosts restore persisted editor sizes, and some DPI/host combinations
             // leave less usable space than requested. Keep the content reachable
             // even when the host cannot or will not grow the outer plugin view.

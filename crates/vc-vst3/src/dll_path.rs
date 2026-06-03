@@ -67,7 +67,7 @@ pub fn add_plugin_dir_to_dll_search_path() {
             .chain(std::iter::once(0))
             .collect();
         if AddDllDirectory(wide.as_ptr()).is_null() {
-            nih_plug::nih_warn!(
+            nice_plug::nice_warn!(
                 "vc-vst3: failed to add plugin directory to DLL search path: {}",
                 dir.display()
             );
@@ -84,7 +84,7 @@ pub fn preload_bundled_cuda_dlls() -> anyhow::Result<()> {
 
     let dir = plugin_dir().context("failed to locate plugin DLL directory")?;
     if !dir.join("onnxruntime_providers_cuda.dll").exists() {
-        nih_plug::nih_warn!(
+        nice_plug::nice_warn!(
             "vc-vst3: no bundled ONNX Runtime CUDA provider DLLs found in {}; falling back to the host/system DLL search path",
             dir.display()
         );
@@ -147,7 +147,7 @@ pub fn with_bundled_dll_directory<T>(f: impl FnOnce() -> anyhow::Result<T>) -> a
         None => unsafe { SetDllDirectoryW(std::ptr::null()) != 0 },
     };
     if !restore_ok {
-        nih_plug::nih_warn!(
+        nice_plug::nice_warn!(
             "vc-vst3: failed to restore previous DLL directory: {}",
             std::io::Error::last_os_error()
         );

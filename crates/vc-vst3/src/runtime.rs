@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use nih_plug::prelude::util;
+use nice_plug::prelude::util;
 use rtrb::{Consumer, Producer, RingBuffer};
 use vc_core::model_rvc::{RvcPipeline, RvcPipelineConfig, VoiceModel};
 use vc_core::sola::{self, ChunkSmoother, ChunkSmootherConfig, SmoothingKind};
@@ -311,7 +311,7 @@ impl WorkerCtx {
             let out = match pipeline.process(chunk, self.sample_rate) {
                 Ok(out) => out,
                 Err(err) => {
-                    nih_plug::nih_error!("vc-vst3: model processing failed: {err:#}");
+                    nice_plug::nice_error!("vc-vst3: model processing failed: {err:#}");
                     self.running.store(false, Ordering::SeqCst);
                     break;
                 }
@@ -344,7 +344,7 @@ impl WorkerCtx {
             ) {
                 Ok(result) => prepared = result.audio,
                 Err(err) => {
-                    nih_plug::nih_error!("vc-vst3: output smoothing failed: {err:#}");
+                    nice_plug::nice_error!("vc-vst3: output smoothing failed: {err:#}");
                     self.running.store(false, Ordering::SeqCst);
                     break;
                 }
@@ -414,7 +414,7 @@ impl WorkerCtx {
         let settings = self.params.settings.read().unwrap().clone();
         let kind = settings.smoothing_kind();
         if !settings.has_models() {
-            nih_plug::nih_warn!("vc-vst3: no models configured; running silent");
+            nice_plug::nice_warn!("vc-vst3: no models configured; running silent");
             self.set_status("no models configured");
             return (None, kind);
         }
@@ -426,7 +426,7 @@ impl WorkerCtx {
                 (Some(pipeline), kind)
             }
             Err(err) => {
-                nih_plug::nih_error!("vc-vst3: failed to load RVC pipeline: {err:#}");
+                nice_plug::nice_error!("vc-vst3: failed to load RVC pipeline: {err:#}");
                 self.set_status(format!("load failed: {err}"));
                 (None, kind)
             }
