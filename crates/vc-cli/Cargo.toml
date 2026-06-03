@@ -9,8 +9,21 @@ description = "CLI-based RVC voice conversion prototype in Rust"
 name = "vc-rs"
 path = "src/main.rs"
 
+[features]
+# The default `vc-rs.exe` supports both Windows ML (CPU/DirectML via the Windows
+# App SDK Runtime) and native TensorRT, so one binary covers both providers and
+# `cargo build`/`cargo test` keep their current backend set. The distribution
+# packages (package.ps1) build single-provider variants explicitly with
+# `--no-default-features --features windowsml|tensorrt|cuda`, mirroring vc-vst3.
+default = ["windowsml", "tensorrt"]
+windowsml = ["vc-core/windowsml"]
+tensorrt = ["vc-core/tensorrt"]
+cuda = ["vc-core/cuda"]
+
 [dependencies]
-vc-core = { path = "../vc-core", features = ["clap", "tensorrt", "windowsml"] }
+# `clap` is always on (the CLI derives `value_enum` from vc-core's `Provider`);
+# the inference backends are selected through this crate's features above.
+vc-core = { path = "../vc-core", features = ["clap"] }
 anyhow.workspace = true
 tracing.workspace = true
 clap = { version = "4.5", features = ["derive"] }

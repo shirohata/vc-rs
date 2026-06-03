@@ -13,8 +13,9 @@ use super::tensorrt::{ModelRole, TensorRtRunMode, TensorRtSessionPurpose};
 use crate::Provider;
 
 /// CLI `inspect` command: prints a model's full I/O and metadata via ONNX
-/// Runtime. Only built with the `ort` feature (the CLI always enables it); the
-/// pipeline's own structural checks use the provider-neutral `onnx_meta` reader.
+/// Runtime. The TensorRT-only build (no `ort`) falls back to the provider-neutral
+/// `onnx_meta` reader below, which reports the same I/O and metadata without a
+/// session.
 #[cfg(feature = "ort")]
 pub fn inspect_model(path: &Path) -> Result<()> {
     // Inspect is a structural ONNX query, so keep it CPU-only and provider-neutral.
@@ -69,6 +70,58 @@ pub fn inspect_model(path: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// `ort`-free fallback for the TensorRT-only build: read the structural I/O and
+/// `metadata_props` directly from the ONNX protobuf (`onnx_meta`) instead of
+/// opening an ORT session. Shapes and metadata are reported; ORT-only extras
+/// (opset version, the producer/domain header fields) are not available here.
+#[cfg(not(feature = "ort"))]
+pub fn inspect_model(path: &Path) -> Result<()> {
+    let io = read_model_io(path)?;
+    println!("Model: {}", path.display());
+    println!("Inputs:");
+    for input in &io.inputs {
+        println!("  {}: {}", input.name, describe_tensor(input));
+    }
+    println!("Outputs:");
+    for output in &io.outputs {
+        println!("  {}: {}", output.name, describe_tensor(output));
+    }
+    if !io.metadata.is_empty() {
+        println!("Metadata:");
+        for (key, value) in &io.metadata {
+            println!("  {key}: {value}");
+        }
+    }
+    Ok(())
+}
+
+/// Human-readable element type + shape for the `ort`-free inspect fallback.
+/// `dim_value` 0 marks a symbolic axis (`onnx_meta` collapses `dim_param` to 0).
+#[cfg(not(feature = "ort"))]
+fn describe_tensor(tensor: &super::onnx_meta::TensorInfo) -> String {
+    // ONNX TensorProto.DataType: only the types RVC models use are named.
+    let elem = match tensor.elem_type {
+        1 => "float32".to_string(),
+        7 => "int64".to_string(),
+        9 => "bool".to_string(),
+        10 => "float16".to_string(),
+        11 => "float64".to_string(),
+        other => format!("elem_type={other}"),
+    };
+    let dims: Vec<String> = tensor
+        .dims
+        .iter()
+        .map(|dim| {
+            if *dim > 0 {
+                dim.to_string()
+            } else {
+                "?".to_string()
+            }
+        })
+        .collect();
+    format!("{elem}[{}]", dims.join(", "))
 }
 
 pub(super) struct RvcModelInfo {

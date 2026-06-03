@@ -11,7 +11,6 @@ mod stream;
 mod tensorrt;
 
 pub use api::{ModelOutput, PassthroughModel, VoiceModel};
-#[cfg(feature = "ort")]
 pub use inspect::inspect_model;
 pub use pipeline::{RvcPipeline, RvcPipelineConfig};
 
