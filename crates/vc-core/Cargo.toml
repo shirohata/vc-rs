@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Reusable RVC voice conversion pipeline (model_rvc, dsp, sola)"
+# Declares the native TensorRT shim as a linked native lib so the detected
+# nvinfer/CUDA major versions propagate to dependent build scripts as
+# DEP_VC_RS_NATIVE_TENSORRT_* env vars (used to emit /DELAYLOAD link args).
+links = "vc_rs_native_tensorrt"
 
 [features]
 # Enables `clap::ValueEnum` derivation on shared config enums (e.g. `Provider`)

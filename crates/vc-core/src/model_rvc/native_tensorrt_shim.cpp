@@ -618,3 +618,55 @@ extern "C" int vc_rs_trt_rvc_infer(
     }
     return enqueue_and_copy(*native, output, output_len, msg) ? 0 : 1;
 }
+
+// --- Delay-load resolution from this module's own directory (Windows/MSVC) ----
+// nvinfer_<N>.dll / nvinfer_plugin_<N>.dll / cudart64_<M>.dll are delay-loaded
+// (vc-cli / vc-vst3 build.rs emit the matching `/DELAYLOAD`). The MSVC delay
+// loader calls this notify hook before loading each such DLL; we resolve it from
+// the directory of the module that contains this code (the plugin DLL or the
+// host exe), so a self-contained bundle loads without the DAW's PATH, and the
+// DLL's co-located transitive deps (cuDNN/cuBLAS) resolve from the same folder.
+// Returning NULL falls back to the default search order (e.g. PATH for the CLI).
+#if defined(_WIN32)
+#include <windows.h>
+#include <delayimp.h>
+
+namespace {
+
+FARPROC WINAPI vc_rs_trt_delay_hook(unsigned dli_notify, PDelayLoadInfo pdli) {
+    if (dli_notify != dliNotePreLoadLibrary || pdli == nullptr || pdli->szDll == nullptr) {
+        return nullptr;
+    }
+    char const* dll = pdli->szDll;
+    // Only intervene for the native TensorRT / CUDA runtime DLLs we delay-load.
+    if (std::strncmp(dll, "nvinfer", 7) != 0 && std::strncmp(dll, "cudart", 6) != 0) {
+        return nullptr;
+    }
+    HMODULE self = nullptr;
+    if (!GetModuleHandleExA(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCSTR>(&vc_rs_trt_delay_hook), &self)) {
+        return nullptr;
+    }
+    char path[MAX_PATH];
+    DWORD len = GetModuleFileNameA(self, path, MAX_PATH);
+    if (len == 0 || len >= MAX_PATH) {
+        return nullptr;
+    }
+    std::string dir(path, len);
+    std::size_t slash = dir.find_last_of("\\/");
+    if (slash == std::string::npos) {
+        return nullptr;
+    }
+    std::string full = dir.substr(0, slash + 1) + dll;
+    // LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR also resolves the loaded DLL's own
+    // dependencies from `full`'s directory (the bundle).
+    HMODULE mod = LoadLibraryExA(full.c_str(), nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR);
+    return reinterpret_cast<FARPROC>(mod);
+}
+
+}  // namespace
+
+extern "C" const PfnDliHook __pfnDliNotifyHook2 = vc_rs_trt_delay_hook;
+
+#endif  // _WIN32
