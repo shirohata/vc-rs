@@ -51,18 +51,23 @@ impl Plugin for VcRvcPlugin {
     const EMAIL: &'static str = "noreply@vc-rs.invalid";
     const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 
-    // Prefer mono; stereo is offered as a fallback. The host uses the first
-    // layout as the default. The pipeline is mono internally, so stereo input is
-    // downmixed and the converted mono is fanned out to all output channels.
+    // Stereo is the default layout; mono is offered as a fallback. The host uses
+    // the first layout as the default. The pipeline is mono internally, so stereo
+    // input is downmixed and the converted mono is fanned out to all channels.
+    //
+    // NOTE: a mono-first default makes Element terminate when the plugin is added
+    // to a (stereo) track — the Rust code loads and processes fine (verified by
+    // trace: default -> editor -> initialize -> process all succeed, no panic),
+    // but Element bails after the first process block. Keep stereo first.
     const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[
-        AudioIOLayout {
-            main_input_channels: NonZeroU32::new(1),
-            main_output_channels: NonZeroU32::new(1),
-            ..AudioIOLayout::const_default()
-        },
         AudioIOLayout {
             main_input_channels: NonZeroU32::new(2),
             main_output_channels: NonZeroU32::new(2),
+            ..AudioIOLayout::const_default()
+        },
+        AudioIOLayout {
+            main_input_channels: NonZeroU32::new(1),
+            main_output_channels: NonZeroU32::new(1),
             ..AudioIOLayout::const_default()
         },
     ];
