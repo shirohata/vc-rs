@@ -117,6 +117,16 @@ Windows ML build では `--provider windowsml` が catalog EP を優先し、使
 `windowsml-migraphx` / `windowsml-vitisai` を指定します。これらの明示指定は
 fallback せず、EP が未導入または未準備ならエラーになります。
 
+Windows ML catalog EP の状態確認とインストールは CLI から明示的に実行できます。
+`install` で provider を省略すると、vc-rs の優先順位でそのマシンに compatible
+な最上位 EP を選択します。
+
+```powershell
+cargo run -- windowsml-eps list
+cargo run -- windowsml-eps install
+cargo run -- windowsml-eps install --provider nvtrtx --yes
+```
+
 GPU 実行では、CPU より小さい `--chunk-ms` や大きい `--extra-convert-ms` を使えることが
 あります。設定を詰めるときは、先に音切れしない値を見つけ、その後に遅延を下げる
 方向で `--chunk-ms` を小さくしていくのが安全です。

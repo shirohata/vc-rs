@@ -21,8 +21,8 @@ use super::shape::{
 };
 use super::stream::RvcStreamState;
 use super::tensorrt::{
-    derive_rvc_feature_len, tensor_rt_model_cache_key, ModelRole, TensorRtRunMode,
-    TensorRtSessionProfile, TensorRtSessionPurpose, CUDA_GRAPH_ENV,
+    derive_rvc_feature_len, provider_uses_fixed_shape, tensor_rt_model_cache_key, ModelRole,
+    TensorRtRunMode, TensorRtSessionProfile, TensorRtSessionPurpose, CUDA_GRAPH_ENV,
 };
 #[cfg(feature = "ort")]
 use super::tensorrt::{tensor_rt_warmup_feature_len, TensorRtSharedWaveform};
@@ -83,7 +83,7 @@ pub struct RvcPipelineConfig<'a> {
 
 impl RvcPipeline {
     pub fn load(config: RvcPipelineConfig<'_>) -> Result<Self> {
-        if config.provider.is_tensorrt() || config.provider.is_cuda() {
+        if provider_needs_fixed_shape_profile(config.provider) {
             return Self::load_fixed_shape(config);
         }
 
@@ -144,7 +144,9 @@ impl RvcPipeline {
     }
 
     fn load_fixed_shape(config: RvcPipelineConfig<'_>) -> Result<Self> {
-        let tensor_rt_run_mode = if config.provider.is_tensorrt() {
+        let tensor_rt_run_mode = if config.provider.is_tensorrt()
+            || config.provider == Provider::WindowsMlNvTensorRtRtx
+        {
             TensorRtRunMode::PinnedCpu
         } else {
             TensorRtRunMode::cuda_from_env()
@@ -173,7 +175,7 @@ impl RvcPipeline {
             extra_convert_samples,
         );
         let (contentvec_model_cache_key, rmvpe_model_cache_key, rvc_model_cache_key) =
-            if config.provider.is_tensorrt() {
+            if provider_needs_fixed_shape_profile(config.provider) {
                 (
                     Some(tensor_rt_model_cache_key(config.embedder)?),
                     Some(tensor_rt_model_cache_key(config.f0_model)?),
@@ -737,6 +739,10 @@ impl VoiceModel for RvcPipeline {
             volume: stream_input.volume,
         })
     }
+}
+
+fn provider_needs_fixed_shape_profile(provider: Provider) -> bool {
+    provider_uses_fixed_shape(provider) || provider == Provider::WindowsMlNvTensorRtRtx
 }
 
 impl RvcPipeline {

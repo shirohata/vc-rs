@@ -1319,76 +1319,86 @@ fn windows_ml_catalog_ep_for_provider(
 
 #[cfg(feature = "ort")]
 #[cfg(all(windows, feature = "windowsml"))]
-fn windows_ml_catalog_ep_dispatch(
-    catalog_ep: crate::windows_ml::CatalogExecutionProvider,
-) -> ep::ExecutionProviderDispatch {
-    match catalog_ep {
-        crate::windows_ml::CatalogExecutionProvider::NvTensorRtRtx => ep::NVRTX::default().build(),
-        crate::windows_ml::CatalogExecutionProvider::Qnn => ep::QNN::default().build(),
-        crate::windows_ml::CatalogExecutionProvider::OpenVino => ep::OpenVINO::default().build(),
-        crate::windows_ml::CatalogExecutionProvider::MiGraphX => ep::MIGraphX::default().build(),
-        crate::windows_ml::CatalogExecutionProvider::VitisAi => ep::Vitis::default().build(),
-    }
-}
-
-#[cfg(feature = "ort")]
-#[cfg(all(windows, feature = "windowsml"))]
 fn with_windows_ml_catalog_ep(
     builder: ort::session::builder::SessionBuilder,
     catalog_ep: crate::windows_ml::CatalogExecutionProvider,
     path: &Path,
+    tensor_rt_profile: Option<&TensorRtSessionProfile>,
 ) -> Result<ort::session::builder::SessionBuilder> {
-    match catalog_ep {
-        crate::windows_ml::CatalogExecutionProvider::NvTensorRtRtx => {
-            info!(
-                "using Windows ML catalog EP NvTensorRtRtx for {}",
+    let env = ort::environment::Environment::current()?;
+    let devices = env
+        .devices()
+        .filter(|device| {
+            device
+                .ep()
+                .ok()
+                .and_then(crate::windows_ml::CatalogExecutionProvider::from_catalog_name)
+                == Some(catalog_ep)
+        })
+        .collect::<Vec<_>>();
+    if devices.is_empty() {
+        bail!(
+            "Windows ML catalog EP {} was registered, but ONNX Runtime did not expose a matching EP device for {}",
+            catalog_ep.label(),
+            path.display()
+        );
+    }
+    let ep_name = devices[0].ep()?.to_string();
+    let mut options = Vec::<(String, String)>::new();
+    if catalog_ep == crate::windows_ml::CatalogExecutionProvider::NvTensorRtRtx {
+        let profile = tensor_rt_profile.ok_or_else(|| {
+            anyhow!(
+                "Windows ML NvTensorRtRtx requires a fixed-shape profile for {}",
                 path.display()
-            );
-            builder
-                .with_execution_providers([
-                    windows_ml_catalog_ep_dispatch(catalog_ep).error_on_failure()
-                ])
-                .map_err(|err| anyhow!("failed to register Windows ML NvTensorRtRtx EP: {err}"))
+            )
+        })?;
+        // TensorRT RTX falls back to a fully dynamic profile when these are
+        // omitted, which can generate invalid min/opt/max shapes for RVC models.
+        // Use the same fixed profile machinery as the native TensorRT backend.
+        for key in [
+            "nv_profile_min_shapes",
+            "nv_profile_opt_shapes",
+            "nv_profile_max_shapes",
+        ] {
+            options.push((format!("{ep_name}.{key}"), profile.profile_shapes.clone()));
         }
-        crate::windows_ml::CatalogExecutionProvider::Qnn => {
-            info!("using Windows ML catalog EP QNN for {}", path.display());
-            builder
-                .with_execution_providers([
-                    windows_ml_catalog_ep_dispatch(catalog_ep).error_on_failure()
-                ])
-                .map_err(|err| anyhow!("failed to register Windows ML QNN EP: {err}"))
-        }
-        crate::windows_ml::CatalogExecutionProvider::OpenVino => {
-            info!(
-                "using Windows ML catalog EP OpenVINO for {}",
-                path.display()
-            );
-            builder
-                .with_execution_providers([
-                    windows_ml_catalog_ep_dispatch(catalog_ep).error_on_failure()
-                ])
-                .map_err(|err| anyhow!("failed to register Windows ML OpenVINO EP: {err}"))
-        }
-        crate::windows_ml::CatalogExecutionProvider::MiGraphX => {
-            info!(
-                "using Windows ML catalog EP MIGraphX for {}",
-                path.display()
-            );
-            builder
-                .with_execution_providers([
-                    windows_ml_catalog_ep_dispatch(catalog_ep).error_on_failure()
-                ])
-                .map_err(|err| anyhow!("failed to register Windows ML MIGraphX EP: {err}"))
-        }
-        crate::windows_ml::CatalogExecutionProvider::VitisAi => {
-            info!("using Windows ML catalog EP VitisAI for {}", path.display());
-            builder
-                .with_execution_providers([
-                    windows_ml_catalog_ep_dispatch(catalog_ep).error_on_failure()
-                ])
-                .map_err(|err| anyhow!("failed to register Windows ML VitisAI EP: {err}"))
+        if let Ok(cache_root) = tensor_rt_cache_root() {
+            if let Ok(cache_dir) = profile.cache_dir_from_root(&cache_root) {
+                std::fs::create_dir_all(&cache_dir).with_context(|| {
+                    format!(
+                        "failed to create Windows ML NvTensorRtRtx runtime cache dir {}",
+                        cache_dir.display()
+                    )
+                })?;
+                options.push((
+                    format!("{ep_name}.nv_runtime_cache_path"),
+                    cache_dir.display().to_string(),
+                ));
+            }
         }
     }
+    info!(
+        "using Windows ML catalog EP {} via ORT EP device API for {} profile={} runtime_cache={}",
+        catalog_ep.label(),
+        path.display(),
+        tensor_rt_profile
+            .map(|profile| profile.profile_shapes.as_str())
+            .unwrap_or("-"),
+        options
+            .iter()
+            .find(|(key, _)| key.ends_with(".nv_runtime_cache_path"))
+            .map(|(_, value)| value.as_str())
+            .unwrap_or("-")
+    );
+    let options = (!options.is_empty()).then_some(options);
+    builder
+        .with_devices(devices, options.as_deref())
+        .map_err(|err| {
+            anyhow!(
+                "failed to append Windows ML catalog EP {}: {err}",
+                catalog_ep.label()
+            )
+        })
 }
 
 #[cfg(feature = "ort")]
@@ -1396,7 +1406,7 @@ pub(super) fn load_session(
     path: &Path,
     provider: Provider,
     role: ModelRole,
-    _tensor_rt_profile: Option<&TensorRtSessionProfile>,
+    tensor_rt_profile: Option<&TensorRtSessionProfile>,
     tensor_rt_run_mode: TensorRtRunMode,
     tensor_rt_session_purpose: TensorRtSessionPurpose,
 ) -> Result<Session> {
@@ -1479,14 +1489,17 @@ pub(super) fn load_session(
                             catalog_ep.label(),
                             path.display()
                         );
+                        builder = with_windows_ml_catalog_ep(
+                            builder,
+                            catalog_ep,
+                            path,
+                            tensor_rt_profile,
+                        )?;
                         builder = builder
-                            .with_execution_providers([
-                                windows_ml_catalog_ep_dispatch(catalog_ep),
-                                ep::DirectML::default().build(),
-                            ])
+                            .with_execution_providers([ep::DirectML::default().build()])
                             .map_err(|err| {
                                 anyhow!(
-                                    "failed to configure Windows ML catalog/DirectML fallback EPs: {err}"
+                                    "failed to configure Windows ML DirectML fallback EP: {err}"
                                 )
                             })?;
                     }
@@ -1536,7 +1549,7 @@ pub(super) fn load_session(
                         path.display()
                     );
                 }
-                builder = with_windows_ml_catalog_ep(builder, catalog_ep, path)?;
+                builder = with_windows_ml_catalog_ep(builder, catalog_ep, path, tensor_rt_profile)?;
             }
         }
         Provider::WindowsMlDirectMl => {

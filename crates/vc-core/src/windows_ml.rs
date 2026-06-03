@@ -27,6 +27,8 @@ type WinMLEpCatalogHandle = *mut c_void;
 type WinMLEpHandle = *mut c_void;
 type WinMLEpCatalogCreate = unsafe extern "system" fn(*mut WinMLEpCatalogHandle) -> Hresult;
 type WinMLEpCatalogRelease = unsafe extern "system" fn(WinMLEpCatalogHandle);
+type WinMLEpCatalogEnumProviders =
+    unsafe extern "system" fn(WinMLEpCatalogHandle, WinMLEpEnumCallback, *mut c_void) -> Hresult;
 type WinMLEpCatalogFindProvider = unsafe extern "system" fn(
     WinMLEpCatalogHandle,
     *const c_char,
@@ -38,6 +40,19 @@ type WinMLEpEnsureReady = unsafe extern "system" fn(WinMLEpHandle) -> Hresult;
 type WinMLEpGetLibraryPathSize = unsafe extern "system" fn(WinMLEpHandle, *mut usize) -> Hresult;
 type WinMLEpGetLibraryPath =
     unsafe extern "system" fn(WinMLEpHandle, usize, *mut c_char, *mut usize) -> Hresult;
+type WinMLEpEnumCallback =
+    unsafe extern "system" fn(WinMLEpHandle, *const WinMLEpInfoRaw, *mut c_void) -> i32;
+
+#[repr(C)]
+struct WinMLEpInfoRaw {
+    name: *const c_char,
+    version: *const c_char,
+    package_family_name: *const c_char,
+    library_path: *const c_char,
+    package_root_path: *const c_char,
+    ready_state: i32,
+    certification: i32,
+}
 
 #[link(name = "kernel32")]
 extern "system" {
@@ -67,7 +82,7 @@ static CATALOG_MIGRAPHX_EP: OnceLock<Result<bool, String>> = OnceLock::new();
 static CATALOG_VITISAI_EP: OnceLock<Result<bool, String>> = OnceLock::new();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CatalogExecutionProvider {
+pub enum CatalogExecutionProvider {
     NvTensorRtRtx,
     Qnn,
     OpenVino,
@@ -76,7 +91,7 @@ pub(crate) enum CatalogExecutionProvider {
 }
 
 impl CatalogExecutionProvider {
-    pub(crate) fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Self::NvTensorRtRtx => "NvTensorRtRtx",
             Self::Qnn => "QNN",
@@ -85,6 +100,63 @@ impl CatalogExecutionProvider {
             Self::VitisAi => "VitisAI",
         }
     }
+
+    pub fn vc_provider_name(self) -> &'static str {
+        match self {
+            Self::NvTensorRtRtx => "windowsml-nvtrtx",
+            Self::Qnn => "windowsml-qnn",
+            Self::OpenVino => "windowsml-openvino",
+            Self::MiGraphX => "windowsml-migraphx",
+            Self::VitisAi => "windowsml-vitisai",
+        }
+    }
+
+    pub fn from_catalog_name(name: &str) -> Option<Self> {
+        CATALOG_PRIORITY
+            .iter()
+            .find(|candidate| candidate.catalog_name == name)
+            .map(|candidate| candidate.provider)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CatalogReadyState {
+    Ready,
+    NotReady,
+    NotPresent,
+    Unknown(i32),
+}
+
+impl CatalogReadyState {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Ready => "Ready",
+            Self::NotReady => "NotReady",
+            Self::NotPresent => "NotPresent",
+            Self::Unknown(_) => "Unknown",
+        }
+    }
+
+    fn from_raw(state: i32) -> Self {
+        match state {
+            0 => Self::Ready,
+            1 => Self::NotReady,
+            2 => Self::NotPresent,
+            other => Self::Unknown(other),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct CatalogProviderInfo {
+    pub name: String,
+    pub version: String,
+    pub package_family_name: String,
+    pub library_path: String,
+    pub package_root_path: String,
+    pub ready_state: CatalogReadyState,
+    pub certification: i32,
+    pub vc_provider: Option<CatalogExecutionProvider>,
 }
 
 pub(crate) fn ensure_initialized() -> Result<()> {
@@ -108,6 +180,57 @@ pub(crate) fn try_register_catalog_ep(provider: CatalogExecutionProvider) -> Res
         .as_ref()
         .copied()
         .map_err(|err| anyhow!(err.clone()))
+}
+
+pub fn list_catalog_providers() -> Result<Vec<CatalogProviderInfo>> {
+    ensure_initialized()?;
+    with_catalog(|catalog_api, catalog| {
+        let mut providers = Vec::<CatalogProviderInfo>::new();
+        check_hr(
+            unsafe {
+                (catalog_api.enum_providers)(
+                    catalog,
+                    enum_provider_info,
+                    (&mut providers as *mut Vec<CatalogProviderInfo>).cast(),
+                )
+            },
+            "WinMLEpCatalogEnumProviders",
+        )?;
+        Ok(providers)
+    })
+}
+
+pub fn select_best_catalog_provider(
+    providers: &[CatalogProviderInfo],
+) -> Option<CatalogExecutionProvider> {
+    CATALOG_PRIORITY
+        .iter()
+        .find(|candidate| {
+            providers
+                .iter()
+                .any(|provider| provider.name == candidate.catalog_name)
+        })
+        .map(|candidate| candidate.provider)
+}
+
+pub fn ensure_catalog_provider_ready(
+    provider: CatalogExecutionProvider,
+) -> Result<CatalogProviderInfo> {
+    ensure_initialized()?;
+    with_catalog(|catalog_api, catalog| {
+        let candidate =
+            find_catalog_candidate(catalog_api, catalog, provider)?.ok_or_else(|| {
+                anyhow!(
+                    "Windows ML catalog EP {} is not available on this device",
+                    provider.label()
+                )
+            })?;
+        check_hr(
+            unsafe { (catalog_api.ensure_ready)(candidate.handle) },
+            "WinMLEpEnsureReady",
+        )?;
+        provider_info_from_handle(catalog_api, candidate.handle, candidate.candidate)
+    })
 }
 
 fn initialize() -> Result<BootstrapState, String> {
@@ -154,36 +277,27 @@ fn register_best_catalog_ep() -> Result<Option<CatalogExecutionProvider>, String
 }
 
 fn register_best_catalog_ep_inner() -> Result<Option<CatalogExecutionProvider>> {
-    let catalog_api = CatalogApi::load()?;
-    let mut catalog = ptr::null_mut();
-    check_hr(
-        unsafe { (catalog_api.create)(&mut catalog) },
-        "WinMLEpCatalogCreate",
-    )?;
-    let _catalog = ReleaseCatalog {
-        handle: catalog,
-        release: catalog_api.release,
-    };
-
-    for candidate in CATALOG_PRIORITY {
-        match try_register_candidate(&catalog_api, catalog, candidate) {
-            Ok(true) => {
-                info!(
-                    "registered Windows ML catalog EP {} from {}",
-                    candidate.catalog_name, candidate.registration_name
-                );
-                return Ok(Some(candidate.provider));
-            }
-            Ok(false) => {}
-            Err(err) => {
-                warn!(
-                    "failed to register Windows ML catalog EP {}: {err:#}",
-                    candidate.catalog_name
-                );
+    with_catalog(|catalog_api, catalog| {
+        for candidate in CATALOG_PRIORITY {
+            match try_register_candidate(catalog_api, catalog, candidate) {
+                Ok(true) => {
+                    info!(
+                        "registered Windows ML catalog EP {}",
+                        candidate.catalog_name
+                    );
+                    return Ok(Some(candidate.provider));
+                }
+                Ok(false) => {}
+                Err(err) => {
+                    warn!(
+                        "failed to register Windows ML catalog EP {}: {err:#}",
+                        candidate.catalog_name
+                    );
+                }
             }
         }
-    }
-    Ok(None)
+        Ok(None)
+    })
 }
 
 fn register_catalog_ep(provider: CatalogExecutionProvider) -> Result<bool, String> {
@@ -191,6 +305,39 @@ fn register_catalog_ep(provider: CatalogExecutionProvider) -> Result<bool, Strin
 }
 
 fn register_catalog_ep_inner(provider: CatalogExecutionProvider) -> Result<bool> {
+    with_catalog(|catalog_api, catalog| {
+        let mut saw_candidate = false;
+        for candidate in CATALOG_PRIORITY
+            .iter()
+            .filter(|candidate| candidate.provider == provider)
+        {
+            saw_candidate = true;
+            match try_register_candidate(catalog_api, catalog, candidate) {
+                Ok(true) => {
+                    info!(
+                        "registered Windows ML catalog EP {}",
+                        candidate.catalog_name
+                    );
+                    return Ok(true);
+                }
+                Ok(false) => {}
+                Err(err) => {
+                    warn!(
+                        "failed to register Windows ML catalog EP {}: {err:#}",
+                        candidate.catalog_name
+                    );
+                }
+            }
+        }
+
+        if !saw_candidate {
+            bail!("unknown Windows ML catalog EP {}", provider.label());
+        }
+        Ok(false)
+    })
+}
+
+fn with_catalog<T>(f: impl FnOnce(&CatalogApi, WinMLEpCatalogHandle) -> Result<T>) -> Result<T> {
     let catalog_api = CatalogApi::load()?;
     let mut catalog = ptr::null_mut();
     check_hr(
@@ -201,35 +348,7 @@ fn register_catalog_ep_inner(provider: CatalogExecutionProvider) -> Result<bool>
         handle: catalog,
         release: catalog_api.release,
     };
-
-    let mut saw_candidate = false;
-    for candidate in CATALOG_PRIORITY
-        .iter()
-        .filter(|candidate| candidate.provider == provider)
-    {
-        saw_candidate = true;
-        match try_register_candidate(&catalog_api, catalog, candidate) {
-            Ok(true) => {
-                info!(
-                    "registered Windows ML catalog EP {} from {}",
-                    candidate.catalog_name, candidate.registration_name
-                );
-                return Ok(true);
-            }
-            Ok(false) => {}
-            Err(err) => {
-                warn!(
-                    "failed to register Windows ML catalog EP {}: {err:#}",
-                    candidate.catalog_name
-                );
-            }
-        }
-    }
-
-    if !saw_candidate {
-        bail!("unknown Windows ML catalog EP {}", provider.label());
-    }
-    Ok(false)
+    f(&catalog_api, catalog)
 }
 
 fn catalog_ep_cache(provider: CatalogExecutionProvider) -> &'static OnceLock<Result<bool, String>> {
@@ -240,6 +359,85 @@ fn catalog_ep_cache(provider: CatalogExecutionProvider) -> &'static OnceLock<Res
         CatalogExecutionProvider::MiGraphX => &CATALOG_MIGRAPHX_EP,
         CatalogExecutionProvider::VitisAi => &CATALOG_VITISAI_EP,
     }
+}
+
+struct FoundCatalogCandidate<'a> {
+    handle: WinMLEpHandle,
+    candidate: &'a CatalogCandidate,
+}
+
+fn find_catalog_candidate(
+    api: &CatalogApi,
+    catalog: WinMLEpCatalogHandle,
+    provider: CatalogExecutionProvider,
+) -> Result<Option<FoundCatalogCandidate<'static>>> {
+    for candidate in CATALOG_PRIORITY
+        .iter()
+        .filter(|candidate| candidate.provider == provider)
+    {
+        let catalog_name = CString::new(candidate.catalog_name)?;
+        let mut ep = ptr::null_mut();
+        let hr =
+            unsafe { (api.find_provider)(catalog, catalog_name.as_ptr(), ptr::null(), &mut ep) };
+        if hr >= 0 && !ep.is_null() {
+            return Ok(Some(FoundCatalogCandidate {
+                handle: ep,
+                candidate,
+            }));
+        }
+    }
+    Ok(None)
+}
+
+fn provider_info_from_handle(
+    api: &CatalogApi,
+    ep: WinMLEpHandle,
+    candidate: &CatalogCandidate,
+) -> Result<CatalogProviderInfo> {
+    let mut state = 0;
+    check_hr(
+        unsafe { (api.get_ready_state)(ep, &mut state) },
+        "WinMLEpGetReadyState",
+    )?;
+    let library_path = read_ep_library_path(api, ep).unwrap_or_default();
+    Ok(CatalogProviderInfo {
+        name: candidate.catalog_name.to_string(),
+        version: String::new(),
+        package_family_name: String::new(),
+        library_path,
+        package_root_path: String::new(),
+        ready_state: CatalogReadyState::from_raw(state),
+        certification: 0,
+        vc_provider: Some(candidate.provider),
+    })
+}
+
+unsafe extern "system" fn enum_provider_info(
+    _ep: WinMLEpHandle,
+    info: *const WinMLEpInfoRaw,
+    context: *mut c_void,
+) -> i32 {
+    if info.is_null() || context.is_null() {
+        return 1;
+    }
+    let providers = &mut *(context.cast::<Vec<CatalogProviderInfo>>());
+    let info = &*info;
+    let name = cstr_or_empty(info.name);
+    providers.push(CatalogProviderInfo {
+        vc_provider: catalog_provider_from_name(&name),
+        name,
+        version: cstr_or_empty(info.version),
+        package_family_name: cstr_or_empty(info.package_family_name),
+        library_path: cstr_or_empty(info.library_path),
+        package_root_path: cstr_or_empty(info.package_root_path),
+        ready_state: CatalogReadyState::from_raw(info.ready_state),
+        certification: info.certification,
+    });
+    1
+}
+
+fn catalog_provider_from_name(name: &str) -> Option<CatalogExecutionProvider> {
+    CatalogExecutionProvider::from_catalog_name(name)
 }
 
 fn try_register_candidate(
@@ -270,7 +468,7 @@ fn try_register_candidate(
     }
 
     let env = Environment::current()?;
-    let _library = env.register_ep_library(candidate.registration_name, &path)?;
+    let _library = env.register_ep_library(candidate.catalog_name, &path)?;
     Ok(true)
 }
 
@@ -295,10 +493,19 @@ fn read_ep_library_path(api: &CatalogApi, ep: WinMLEpHandle) -> Result<String> {
     Ok(path)
 }
 
+unsafe fn cstr_or_empty(ptr: *const c_char) -> String {
+    if ptr.is_null() {
+        String::new()
+    } else {
+        CStr::from_ptr(ptr).to_string_lossy().into_owned()
+    }
+}
+
 struct CatalogApi {
     _module: Hmodule,
     create: WinMLEpCatalogCreate,
     release: WinMLEpCatalogRelease,
+    enum_providers: WinMLEpCatalogEnumProviders,
     find_provider: WinMLEpCatalogFindProvider,
     get_ready_state: WinMLEpGetReadyState,
     ensure_ready: WinMLEpEnsureReady,
@@ -319,6 +526,7 @@ impl CatalogApi {
             _module: module,
             create: unsafe { load_symbol(module, b"WinMLEpCatalogCreate\0")? },
             release: unsafe { load_symbol(module, b"WinMLEpCatalogRelease\0")? },
+            enum_providers: unsafe { load_symbol(module, b"WinMLEpCatalogEnumProviders\0")? },
             find_provider: unsafe { load_symbol(module, b"WinMLEpCatalogFindProvider\0")? },
             get_ready_state: unsafe { load_symbol(module, b"WinMLEpGetReadyState\0")? },
             ensure_ready: unsafe { load_symbol(module, b"WinMLEpEnsureReady\0")? },
@@ -341,40 +549,33 @@ impl Drop for ReleaseCatalog {
 
 struct CatalogCandidate {
     catalog_name: &'static str,
-    registration_name: &'static str,
     provider: CatalogExecutionProvider,
 }
 
 const CATALOG_PRIORITY: &[CatalogCandidate] = &[
     CatalogCandidate {
         catalog_name: "NvTensorRtRtxExecutionProvider",
-        registration_name: "NvTensorRtRtx",
         provider: CatalogExecutionProvider::NvTensorRtRtx,
     },
     // Older catalog builds used this all-caps RTX spelling.
     CatalogCandidate {
         catalog_name: "NvTensorRTRTXExecutionProvider",
-        registration_name: "NvTensorRtRtx",
         provider: CatalogExecutionProvider::NvTensorRtRtx,
     },
     CatalogCandidate {
         catalog_name: "QNNExecutionProvider",
-        registration_name: "QNN",
         provider: CatalogExecutionProvider::Qnn,
     },
     CatalogCandidate {
         catalog_name: "OpenVINOExecutionProvider",
-        registration_name: "OpenVINO",
         provider: CatalogExecutionProvider::OpenVino,
     },
     CatalogCandidate {
         catalog_name: "MIGraphXExecutionProvider",
-        registration_name: "MIGraphX",
         provider: CatalogExecutionProvider::MiGraphX,
     },
     CatalogCandidate {
         catalog_name: "VitisAIExecutionProvider",
-        registration_name: "VitisAI",
         provider: CatalogExecutionProvider::VitisAi,
     },
 ];

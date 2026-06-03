@@ -35,6 +35,10 @@ pub enum Command {
     Devices(DevicesArgs),
     /// Inspect ONNX model inputs, outputs, and metadata.
     Inspect(InspectArgs),
+    /// List or install Windows ML catalog execution providers.
+    #[cfg(all(windows, feature = "windowsml"))]
+    #[command(name = "windowsml-eps", alias = "windows-ml-eps", alias = "winml-eps")]
+    WindowsMlEps(WindowsMlEpsArgs),
     /// Run realtime microphone-to-speaker conversion.
     Run(RunArgs),
     /// Run conversion against a wav file for model/DSP verification.
@@ -198,6 +202,48 @@ pub struct WavArgs {
 pub struct InspectArgs {
     #[arg(long)]
     pub model: PathBuf,
+}
+
+#[cfg(all(windows, feature = "windowsml"))]
+#[derive(Debug, Parser)]
+pub struct WindowsMlEpsArgs {
+    #[command(subcommand)]
+    pub command: WindowsMlEpsCommand,
+}
+
+#[cfg(all(windows, feature = "windowsml"))]
+#[derive(Debug, Subcommand)]
+pub enum WindowsMlEpsCommand {
+    /// List Windows ML catalog EPs visible on this device.
+    List,
+    /// Download/install or prepare a Windows ML catalog EP.
+    Install(WindowsMlEpsInstallArgs),
+}
+
+#[cfg(all(windows, feature = "windowsml"))]
+#[derive(Debug, Parser)]
+pub struct WindowsMlEpsInstallArgs {
+    /// EP to install. Omit to select the best compatible EP by vc-rs priority.
+    #[arg(long, value_enum)]
+    pub provider: Option<WindowsMlEpProvider>,
+    /// Skip the confirmation prompt before downloading/installing.
+    #[arg(long)]
+    pub yes: bool,
+}
+
+#[cfg(all(windows, feature = "windowsml"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum WindowsMlEpProvider {
+    #[value(alias = "tensorrt", alias = "windowsml-nvtrtx", alias = "winml-nvtrtx")]
+    Nvtrtx,
+    #[value(alias = "windowsml-qnn", alias = "winml-qnn")]
+    Qnn,
+    #[value(alias = "windowsml-openvino", alias = "winml-openvino")]
+    Openvino,
+    #[value(alias = "windowsml-migraphx", alias = "winml-migraphx")]
+    Migraphx,
+    #[value(alias = "windowsml-vitisai", alias = "winml-vitisai")]
+    Vitisai,
 }
 
 impl Cli {
@@ -438,6 +484,34 @@ mod tests {
             panic!("expected wav command");
         };
         assert_eq!(args.provider, Provider::WindowsMlOpenVino);
+    }
+
+    #[cfg(all(windows, feature = "windowsml"))]
+    #[test]
+    fn parses_windowsml_eps_commands() {
+        let cli = Cli::try_parse_from(["vc-rs", "windowsml-eps", "list"]).unwrap();
+        let Command::WindowsMlEps(args) = cli.command else {
+            panic!("expected windowsml-eps command");
+        };
+        assert!(matches!(args.command, WindowsMlEpsCommand::List));
+
+        let cli = Cli::try_parse_from([
+            "vc-rs",
+            "windowsml-eps",
+            "install",
+            "--provider",
+            "nvtrtx",
+            "--yes",
+        ])
+        .unwrap();
+        let Command::WindowsMlEps(args) = cli.command else {
+            panic!("expected windowsml-eps command");
+        };
+        let WindowsMlEpsCommand::Install(args) = args.command else {
+            panic!("expected install command");
+        };
+        assert_eq!(args.provider, Some(WindowsMlEpProvider::Nvtrtx));
+        assert!(args.yes);
     }
 
     #[test]

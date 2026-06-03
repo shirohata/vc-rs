@@ -14,7 +14,7 @@
 
 mod provider;
 #[cfg(all(windows, feature = "windowsml"))]
-mod windows_ml;
+pub mod windows_ml;
 
 pub mod dsp;
 pub mod model_rvc;
