@@ -136,6 +136,20 @@ impl NativeContentVecEngine {
         })
     }
 
+    /// ContentVec frame count derived from the engine's self-reported output
+    /// length. The engine knows its fixed output shape after deserialize, so the
+    /// frame count needs no warmup inference.
+    pub(super) fn output_frames(&self) -> Result<usize> {
+        if !self.output_len.get().is_multiple_of(self.expected_channels.get()) {
+            bail!(
+                "native TensorRT ContentVec output length {} is not divisible by expected channels {}",
+                self.output_len.get(),
+                self.expected_channels.get()
+            );
+        }
+        Ok(self.output_len.get() / self.expected_channels.get())
+    }
+
     pub(super) fn extract(&mut self, audio_16k: &[f32]) -> Result<FeatureTensor> {
         if audio_16k.len() != self.input_len.get() {
             bail!(
@@ -276,6 +290,12 @@ impl NativeRvcEngine {
 
     pub(super) fn channels(&self) -> usize {
         self.channels.get()
+    }
+
+    /// RVC `audio` output length self-reported by the engine after deserialize.
+    /// Replaces the throwaway warmup inference previously used to learn it.
+    pub(super) fn output_len(&self) -> usize {
+        self.output_len.get()
     }
 }
 

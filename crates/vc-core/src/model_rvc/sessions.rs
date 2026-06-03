@@ -84,6 +84,13 @@ impl HubertEmbedderSession {
         })
     }
 
+    /// ContentVec output frame count from the native TensorRT engine, when this
+    /// embedder is backed by one. `None` for ORT-backed sessions. The engine
+    /// self-reports its fixed output length, so this needs no warmup inference.
+    pub(super) fn native_contentvec_output_frames(&self) -> Option<Result<usize>> {
+        self.native.as_ref().map(|native| native.output_frames())
+    }
+
     pub(super) fn enable_tensorrt_binding(
         &mut self,
         output_shape: &[i64],
@@ -715,7 +722,7 @@ impl RvcModelSession {
         feature_channels: i64,
         speaker_id: i64,
     ) -> Result<Vec<i64>> {
-        if let Some(native) = self.native_rvc.as_mut() {
+        if let Some(native) = self.native_rvc.as_ref() {
             if native.frames() != feature_len {
                 bail!(
                     "native TensorRT RVC engine frame count {} does not match runtime feature_len {}",
@@ -732,14 +739,11 @@ impl RvcModelSession {
                     feature_channels
                 );
             }
-            // Load-time warmup keeps native TensorRT allocations and first enqueue
-            // outside the realtime audio path. Do not move this into per-chunk code.
-            let feats = vec![0.0f32; native.frames() * native.channels()];
-            let pitch = vec![1i64; native.frames()];
-            let pitchf = vec![0.0f32; native.frames()];
-            let output = native.infer(&feats, &pitch, &pitchf, speaker_id)?;
+            // The engine self-reports its fixed `audio` output length after
+            // deserialize, so no warmup inference is needed to learn the shape.
+            // `speaker_id` is consumed only by the ORT branch below.
             return Ok(vec![
-                i64::try_from(output.len()).context("native RVC output length overflow")?
+                i64::try_from(native.output_len()).context("native RVC output length overflow")?
             ]);
         }
         let feats_shape = vec![1i64, feature_len as i64, feature_channels];

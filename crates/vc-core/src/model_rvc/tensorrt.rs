@@ -1018,24 +1018,40 @@ pub(super) fn tensor_rt_benchmark_profile(role: ModelRole) -> Result<TensorRtSes
     }
 }
 
+/// Derive the RVC `feature_len` from the ContentVec output frame count, purely
+/// arithmetically. Mirrors the realtime feature pipeline: ContentVec frames are
+/// doubled (`repeat_frames(2)`) and the leading silence frames are trimmed. The
+/// result is a deterministic function of the (fixed) input shape, so neither the
+/// run-based warmup nor the engine-based path needs to run the model to learn it.
+pub(super) fn derive_rvc_feature_len(
+    contentvec_frames: usize,
+    extra_convert_samples: usize,
+) -> Result<usize> {
+    let frames2 = contentvec_frames
+        .checked_mul(2)
+        .context("RVC feature length overflow")?;
+    let silence_front_frames = onnx_silence_front_feature_frames(extra_convert_samples);
+    let feature_len = if silence_front_frames > 0 && silence_front_frames < frames2 {
+        frames2 - silence_front_frames
+    } else {
+        frames2
+    };
+    if feature_len == 0 {
+        bail!("derived zero RVC frames");
+    }
+    Ok(feature_len)
+}
+
 pub(super) fn tensor_rt_warmup_feature_len(
     embedder: &mut HubertEmbedderSession,
     input_samples_16k: usize,
     extra_convert_samples: usize,
 ) -> Result<TensorRtWarmupInfo> {
     let silence = vec![0.0; input_samples_16k];
-    let mut features = embedder.extract(&silence)?;
+    let features = embedder.extract(&silence)?;
     let contentvec_output_shape = features.shape.clone();
-    features.repeat_frames(2)?;
-    let feature_len = feature_len_from_shape(&features.shape, "embedder warmup output")?;
-    let silence_front_frames = onnx_silence_front_feature_frames(extra_convert_samples);
-    if silence_front_frames > 0 && silence_front_frames < feature_len {
-        features.trim_front_frames(silence_front_frames)?;
-    }
-    let feature_len = feature_len_from_shape(&features.shape, "trimmed embedder warmup output")?;
-    if feature_len == 0 {
-        bail!("TensorRT warmup produced zero RVC frames");
-    }
+    let contentvec_frames = feature_len_from_shape(&features.shape, "embedder warmup output")?;
+    let feature_len = derive_rvc_feature_len(contentvec_frames, extra_convert_samples)?;
     info!(
         "TensorRT warmup derived RVC frame count: contentvec_input_samples={} rvc_frames={}",
         input_samples_16k, feature_len
@@ -1387,4 +1403,32 @@ pub(super) fn format_usize_shape(shape: &[usize]) -> String {
         .map(|dim| dim.to_string())
         .collect::<Vec<_>>()
         .join("x")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn derive_rvc_feature_len_doubles_then_trims_silence_front() {
+        // No extra convert window -> no leading silence to trim -> exactly 2x,
+        // matching the realtime pipeline's repeat_frames(2).
+        assert_eq!(derive_rvc_feature_len(100, 0).unwrap(), 200);
+
+        // With a nonzero extra window the result is 2x minus the trimmed leading
+        // silence frames, exactly what tensor_rt_warmup_feature_len computes from
+        // a run (repeat_frames(2) followed by trim_front_frames).
+        let frames = 100usize;
+        let extra = 48_000usize;
+        let silence_front = onnx_silence_front_feature_frames(extra);
+        assert!(silence_front > 0, "test input should exercise the trim branch");
+        let frames2 = frames * 2;
+        let expected = frames2 - silence_front;
+        assert_eq!(derive_rvc_feature_len(frames, extra).unwrap(), expected);
+    }
+
+    #[test]
+    fn derive_rvc_feature_len_rejects_zero_frames() {
+        assert!(derive_rvc_feature_len(0, 0).is_err());
+    }
 }

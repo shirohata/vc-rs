@@ -21,8 +21,9 @@ use super::shape::{
 };
 use super::stream::RvcStreamState;
 use super::tensorrt::{
-    tensor_rt_model_cache_key, tensor_rt_warmup_feature_len, ModelRole, TensorRtRunMode,
-    TensorRtSessionProfile, TensorRtSessionPurpose, TensorRtSharedWaveform, CUDA_GRAPH_ENV,
+    derive_rvc_feature_len, tensor_rt_model_cache_key, tensor_rt_warmup_feature_len, ModelRole,
+    TensorRtRunMode, TensorRtSessionProfile, TensorRtSessionPurpose, TensorRtSharedWaveform,
+    CUDA_GRAPH_ENV,
 };
 
 const SKIP_SILENT_CHUNKS: bool = false;
@@ -299,27 +300,27 @@ impl RvcPipeline {
             rvc.enable_tensorrt_binding(&rvc_output_shape, config.speaker_id)?;
             (embedder, pitch, rvc, shared_waveform)
         } else if config.provider.is_tensorrt() {
-            // Use CPU ORT for the shape probe so the first native TensorRT build
-            // in this process is the RVC graph. Building RVC after a prior
-            // native TensorRT ContentVec build/run can trigger Myelin/NVRTC
-            // tactic failures even though the same RVC profile succeeds in
-            // trtexec and in an isolated Builder API probe.
-            let mut embedder_probe = HubertEmbedderSession::load(
+            // Native TensorRT engines self-report their fixed output shapes after
+            // deserialize, so there is no warmup inference here: the RVC
+            // `feature_len` is derived arithmetically from the ContentVec engine's
+            // output frame count. Engine builds run in an isolated helper process
+            // (native_tensorrt.rs has no in-process Builder), so the historical
+            // "build RVC before other TensorRT runtimes in the same process"
+            // ordering no longer applies and ContentVec can load first.
+            let mut embedder = HubertEmbedderSession::load(
                 config.embedder,
-                Provider::Cpu,
+                config.provider,
                 expected_feat_channels,
                 config.embedder_output,
-                None,
-                TensorRtRunMode::PinnedCpu,
-                TensorRtSessionPurpose::Probe,
+                Some(contentvec_profile),
+                tensor_rt_run_mode,
+                TensorRtSessionPurpose::Final,
             )?;
-            let warmup = tensor_rt_warmup_feature_len(
-                &mut embedder_probe,
-                input_samples_16k,
-                extra_convert_samples,
-            )?;
-            drop(embedder_probe);
-            let feature_len = warmup.rvc_feature_len;
+            let contentvec_frames = match embedder.native_contentvec_output_frames() {
+                Some(frames) => frames?,
+                None => bail!("native TensorRT embedder is missing its engine"),
+            };
+            let feature_len = derive_rvc_feature_len(contentvec_frames, extra_convert_samples)?;
             let rvc_profile =
                 TensorRtSessionProfile::rvc(feature_len, expected_feat_channels_usize)
                     .with_optional_model_cache_key(rvc_model_cache_key.clone());
@@ -328,15 +329,19 @@ impl RvcPipeline {
                 config.provider.label(),
                 config.sample_rate,
                 config.chunk_samples,
-                contentvec_profile.profile_shapes,
+                embedder
+                    .tensor_rt_profile
+                    .as_ref()
+                    .map(|profile| profile.profile_shapes.as_str())
+                    .unwrap_or("none"),
                 rmvpe_profile.profile_shapes,
                 rvc_profile.profile_shapes
             );
+            // Ignored by native engines (enable_tensorrt_binding early-returns);
+            // derived here only for the binding log on the ORT-IoBinding path.
+            let contentvec_output_shape = vec![1, contentvec_frames as i64, expected_feat_channels];
+            embedder.enable_tensorrt_binding(&contentvec_output_shape, None)?;
 
-            // Build/load the RVC engine before keeping the other native TensorRT
-            // engines alive. The RVC graph exercises Myelin/NVRTC heavily, and
-            // building it after other TensorRT runtimes in the same process has
-            // reproduced tactic-selection failures even when trtexec succeeds.
             let mut rvc = RvcModelSession::load(
                 config.model,
                 config.provider,
@@ -351,17 +356,6 @@ impl RvcPipeline {
                 config.speaker_id,
             )?;
             rvc.enable_tensorrt_binding(&rvc_output_shape, config.speaker_id)?;
-
-            let mut embedder = HubertEmbedderSession::load(
-                config.embedder,
-                config.provider,
-                expected_feat_channels,
-                config.embedder_output,
-                Some(contentvec_profile),
-                tensor_rt_run_mode,
-                TensorRtSessionPurpose::Final,
-            )?;
-            embedder.enable_tensorrt_binding(&warmup.contentvec_output_shape, None)?;
 
             let mut pitch = RmvpePitchSession::load(
                 config.f0_model,
