@@ -35,6 +35,49 @@ pub enum Provider {
         )
     )]
     WindowsMlDirectMl,
+    #[cfg_attr(
+        feature = "clap",
+        value(
+            name = "windowsml-nvtrtx",
+            alias = "windows-ml-nvtrtx",
+            alias = "winml-nvtrtx",
+            alias = "windowsml-tensorrt",
+            alias = "winml-tensorrt"
+        )
+    )]
+    WindowsMlNvTensorRtRtx,
+    #[cfg_attr(
+        feature = "clap",
+        value(
+            name = "windowsml-openvino",
+            alias = "windows-ml-openvino",
+            alias = "winml-openvino"
+        )
+    )]
+    WindowsMlOpenVino,
+    #[cfg_attr(
+        feature = "clap",
+        value(name = "windowsml-qnn", alias = "windows-ml-qnn", alias = "winml-qnn")
+    )]
+    WindowsMlQnn,
+    #[cfg_attr(
+        feature = "clap",
+        value(
+            name = "windowsml-migraphx",
+            alias = "windows-ml-migraphx",
+            alias = "winml-migraphx"
+        )
+    )]
+    WindowsMlMiGraphX,
+    #[cfg_attr(
+        feature = "clap",
+        value(
+            name = "windowsml-vitisai",
+            alias = "windows-ml-vitisai",
+            alias = "winml-vitisai"
+        )
+    )]
+    WindowsMlVitisAi,
 }
 
 impl Provider {
@@ -46,6 +89,11 @@ impl Provider {
             Provider::WindowsMl => "windowsml",
             Provider::WindowsMlCpu => "windowsml-cpu",
             Provider::WindowsMlDirectMl => "windowsml-directml",
+            Provider::WindowsMlNvTensorRtRtx => "windowsml-nvtrtx",
+            Provider::WindowsMlOpenVino => "windowsml-openvino",
+            Provider::WindowsMlQnn => "windowsml-qnn",
+            Provider::WindowsMlMiGraphX => "windowsml-migraphx",
+            Provider::WindowsMlVitisAi => "windowsml-vitisai",
         }
     }
 
@@ -60,7 +108,14 @@ impl Provider {
     pub fn is_windows_ml(self) -> bool {
         matches!(
             self,
-            Provider::WindowsMl | Provider::WindowsMlCpu | Provider::WindowsMlDirectMl
+            Provider::WindowsMl
+                | Provider::WindowsMlCpu
+                | Provider::WindowsMlDirectMl
+                | Provider::WindowsMlNvTensorRtRtx
+                | Provider::WindowsMlOpenVino
+                | Provider::WindowsMlQnn
+                | Provider::WindowsMlMiGraphX
+                | Provider::WindowsMlVitisAi
         )
     }
 

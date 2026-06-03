@@ -103,8 +103,12 @@ cargo xtask bundle vc-vst3 --release
 Enables `vc-core/windowsml`. Model loading bootstraps Windows App SDK Runtime
 2.x on the worker thread, then loads the runtime's shared ONNX Runtime
 (`onnxruntime.dll`) with ORT API 24. The default provider is `windowsml`, which
-currently uses DirectML and can be set explicitly as `windowsml-directml`;
-`windowsml-cpu` forces the Windows ML ORT CPU path.
+tries Windows ML catalog EPs first and falls back to DirectML, then CPU.
+`windowsml-directml` and `windowsml-cpu` force those paths. Explicit catalog
+providers are also accepted: `windowsml-nvtrtx`, `windowsml-qnn`,
+`windowsml-openvino`, `windowsml-migraphx`, and `windowsml-vitisai`. These
+explicit providers do not fallback; they fail if the requested catalog EP is not
+present or ready.
 
 End users must have **Windows App SDK Runtime 2.x** installed. After bundling,
 copy the bootstrapper DLL into the bundle:

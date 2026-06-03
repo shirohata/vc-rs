@@ -403,6 +403,41 @@ mod tests {
             panic!("expected wav command");
         };
         assert_eq!(args.provider, Provider::WindowsMlDirectMl);
+
+        let cli = Cli::try_parse_from([
+            "vc-rs",
+            "run",
+            "--passthrough",
+            "--provider",
+            "windowsml-nvtrtx",
+        ])
+        .unwrap();
+        let Command::Run(args) = cli.command else {
+            panic!("expected run command");
+        };
+        assert_eq!(args.provider, Provider::WindowsMlNvTensorRtRtx);
+
+        let cli = Cli::try_parse_from([
+            "vc-rs",
+            "wav",
+            "--model",
+            "model.onnx",
+            "--embedder",
+            "embedder.onnx",
+            "--f0-model",
+            "f0.onnx",
+            "--input",
+            "input.wav",
+            "--output",
+            "output.wav",
+            "--provider",
+            "windowsml-openvino",
+        ])
+        .unwrap();
+        let Command::Wav(args) = cli.command else {
+            panic!("expected wav command");
+        };
+        assert_eq!(args.provider, Provider::WindowsMlOpenVino);
     }
 
     #[test]

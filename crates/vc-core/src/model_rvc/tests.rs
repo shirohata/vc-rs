@@ -72,8 +72,14 @@ fn tensorrt_run_mode_controls_graph_device_io() {
     assert!(Provider::Cuda.is_cuda());
     assert!(Provider::WindowsMl.is_windows_ml());
     assert!(Provider::WindowsMlDirectMl.is_windows_ml_directml());
+    assert!(Provider::WindowsMlNvTensorRtRtx.is_windows_ml());
+    assert!(Provider::WindowsMlOpenVino.is_windows_ml());
+    assert!(Provider::WindowsMlQnn.is_windows_ml());
+    assert!(Provider::WindowsMlMiGraphX.is_windows_ml());
+    assert!(Provider::WindowsMlVitisAi.is_windows_ml());
     assert!(!Provider::WindowsMl.is_cuda());
     assert!(!Provider::WindowsMl.is_tensorrt());
+    assert!(!Provider::WindowsMlNvTensorRtRtx.is_tensorrt());
     assert!(!Provider::Cpu.is_tensorrt());
 }
 

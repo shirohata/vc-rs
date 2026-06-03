@@ -18,7 +18,7 @@ RVC モデルで音声変換を実行します。
 - ONNX モデルの入力/出力/メタデータ確認（`inspect`）
 - WAV ファイル変換（`wav`）
 - リアルタイム変換またはパススルー（`run`）
-- ONNX Runtime の CPU / CUDA / TensorRT Provider 利用
+- ONNX Runtime の CPU / CUDA / Windows ML / TensorRT Provider 利用
 - CPAL / WASAPI による音声入出力
 
 ## 外部モデルについて
@@ -99,7 +99,7 @@ CPU でリアルタイム性を優先する場合は、まず `100` ms 付近か
   0.0 に近いほど入力音量の起伏を強く反映し、1.0 に近いほどモデル出力の
   音量を保持します。たとえば `0.5` はその中間の補正量です。
 
-## GPU / TensorRT 実行
+## GPU / Windows ML / TensorRT 実行
 
 GPU 実行は `wav` / `run` の `--provider` で指定します。
 
@@ -110,6 +110,12 @@ cargo run -- wav --model .\assets\voice.onnx --embedder .\assets\content_vec_500
 ```powershell
 cargo run -- run --model .\assets\voice.onnx --embedder .\assets\content_vec_500.onnx --f0-model .\assets\rmvpe.onnx --input "Microphone" --output "Speakers" --chunk-ms 200 --extra-convert-ms 1000 --provider tensorrt --speaker-id 0
 ```
+
+Windows ML build では `--provider windowsml` が catalog EP を優先し、使える EP
+がなければ DirectML、最後に CPU へ寄せます。特定の catalog EP を強制したい
+場合は `windowsml-nvtrtx` / `windowsml-qnn` / `windowsml-openvino` /
+`windowsml-migraphx` / `windowsml-vitisai` を指定します。これらの明示指定は
+fallback せず、EP が未導入または未準備ならエラーになります。
 
 GPU 実行では、CPU より小さい `--chunk-ms` や大きい `--extra-convert-ms` を使えることが
 あります。設定を詰めるときは、先に音切れしない値を見つけ、その後に遅延を下げる

@@ -30,9 +30,9 @@ pub struct PluginConfig {
     /// are no longer user-provided; native TensorRT builds cache entries from
     /// the ONNX model and fixed profile.
     pub rvc_engine: Option<PathBuf>,
-    /// "cpu" | "windowsml" | "windowsml-cpu" | "windowsml-directml" | "cuda"
-    /// | "tensorrt". GPU spellings resolve to whichever GPU-capable backend
-    /// this package was built with (see [`PluginConfig::provider`]).
+    /// "cpu" | "windowsml*" | "cuda" | "tensorrt". GPU spellings resolve
+    /// to whichever GPU-capable backend this package was built with (see
+    /// [`PluginConfig::provider`]).
     pub provider: String,
     pub f0_threshold: f32,
     pub silence_threshold: f32,
@@ -95,6 +95,18 @@ impl PluginConfig {
             | "winml-directml"
             | "windowsml-dml"
             | "winml-dml" => Provider::WindowsMlDirectMl,
+            "windowsml-nvtrtx" | "windows-ml-nvtrtx" | "winml-nvtrtx" | "windowsml-tensorrt"
+            | "winml-tensorrt" => Provider::WindowsMlNvTensorRtRtx,
+            "windowsml-openvino" | "windows-ml-openvino" | "winml-openvino" => {
+                Provider::WindowsMlOpenVino
+            }
+            "windowsml-qnn" | "windows-ml-qnn" | "winml-qnn" => Provider::WindowsMlQnn,
+            "windowsml-migraphx" | "windows-ml-migraphx" | "winml-migraphx" => {
+                Provider::WindowsMlMiGraphX
+            }
+            "windowsml-vitisai" | "windows-ml-vitisai" | "winml-vitisai" => {
+                Provider::WindowsMlVitisAi
+            }
             "cuda" => gpu_provider("cuda"),
             "tensorrt" | "trt" | "tensor-rt" => gpu_provider("tensorrt"),
             _ => Provider::Cpu,

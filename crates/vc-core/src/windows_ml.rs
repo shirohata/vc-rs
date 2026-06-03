@@ -60,14 +60,31 @@ unsafe impl Sync for BootstrapState {}
 
 static WINDOWS_ML_BOOTSTRAP: OnceLock<Result<BootstrapState, String>> = OnceLock::new();
 static CATALOG_EP: OnceLock<Result<Option<CatalogExecutionProvider>, String>> = OnceLock::new();
+static CATALOG_NV_TENSORRT_RTX_EP: OnceLock<Result<bool, String>> = OnceLock::new();
+static CATALOG_QNN_EP: OnceLock<Result<bool, String>> = OnceLock::new();
+static CATALOG_OPENVINO_EP: OnceLock<Result<bool, String>> = OnceLock::new();
+static CATALOG_MIGRAPHX_EP: OnceLock<Result<bool, String>> = OnceLock::new();
+static CATALOG_VITISAI_EP: OnceLock<Result<bool, String>> = OnceLock::new();
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CatalogExecutionProvider {
     NvTensorRtRtx,
     Qnn,
     OpenVino,
     MiGraphX,
     VitisAi,
+}
+
+impl CatalogExecutionProvider {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::NvTensorRtRtx => "NvTensorRtRtx",
+            Self::Qnn => "QNN",
+            Self::OpenVino => "OpenVINO",
+            Self::MiGraphX => "MIGraphX",
+            Self::VitisAi => "VitisAI",
+        }
+    }
 }
 
 pub(crate) fn ensure_initialized() -> Result<()> {
@@ -82,6 +99,15 @@ pub(crate) fn try_register_best_catalog_ep() -> Result<Option<CatalogExecutionPr
     ensure_initialized()?;
     let ep = CATALOG_EP.get_or_init(register_best_catalog_ep);
     ep.as_ref().copied().map_err(|err| anyhow!(err.clone()))
+}
+
+pub(crate) fn try_register_catalog_ep(provider: CatalogExecutionProvider) -> Result<bool> {
+    ensure_initialized()?;
+    let registered = catalog_ep_cache(provider).get_or_init(|| register_catalog_ep(provider));
+    registered
+        .as_ref()
+        .copied()
+        .map_err(|err| anyhow!(err.clone()))
 }
 
 fn initialize() -> Result<BootstrapState, String> {
@@ -158,6 +184,62 @@ fn register_best_catalog_ep_inner() -> Result<Option<CatalogExecutionProvider>> 
         }
     }
     Ok(None)
+}
+
+fn register_catalog_ep(provider: CatalogExecutionProvider) -> Result<bool, String> {
+    register_catalog_ep_inner(provider).map_err(|err| format!("{err:#}"))
+}
+
+fn register_catalog_ep_inner(provider: CatalogExecutionProvider) -> Result<bool> {
+    let catalog_api = CatalogApi::load()?;
+    let mut catalog = ptr::null_mut();
+    check_hr(
+        unsafe { (catalog_api.create)(&mut catalog) },
+        "WinMLEpCatalogCreate",
+    )?;
+    let _catalog = ReleaseCatalog {
+        handle: catalog,
+        release: catalog_api.release,
+    };
+
+    let mut saw_candidate = false;
+    for candidate in CATALOG_PRIORITY
+        .iter()
+        .filter(|candidate| candidate.provider == provider)
+    {
+        saw_candidate = true;
+        match try_register_candidate(&catalog_api, catalog, candidate) {
+            Ok(true) => {
+                info!(
+                    "registered Windows ML catalog EP {} from {}",
+                    candidate.catalog_name, candidate.registration_name
+                );
+                return Ok(true);
+            }
+            Ok(false) => {}
+            Err(err) => {
+                warn!(
+                    "failed to register Windows ML catalog EP {}: {err:#}",
+                    candidate.catalog_name
+                );
+            }
+        }
+    }
+
+    if !saw_candidate {
+        bail!("unknown Windows ML catalog EP {}", provider.label());
+    }
+    Ok(false)
+}
+
+fn catalog_ep_cache(provider: CatalogExecutionProvider) -> &'static OnceLock<Result<bool, String>> {
+    match provider {
+        CatalogExecutionProvider::NvTensorRtRtx => &CATALOG_NV_TENSORRT_RTX_EP,
+        CatalogExecutionProvider::Qnn => &CATALOG_QNN_EP,
+        CatalogExecutionProvider::OpenVino => &CATALOG_OPENVINO_EP,
+        CatalogExecutionProvider::MiGraphX => &CATALOG_MIGRAPHX_EP,
+        CatalogExecutionProvider::VitisAi => &CATALOG_VITISAI_EP,
+    }
 }
 
 fn try_register_candidate(

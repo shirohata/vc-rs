@@ -1301,6 +1301,97 @@ impl RvcModelSession {
 }
 
 #[cfg(feature = "ort")]
+#[cfg(all(windows, feature = "windowsml"))]
+fn windows_ml_catalog_ep_for_provider(
+    provider: Provider,
+) -> Option<crate::windows_ml::CatalogExecutionProvider> {
+    match provider {
+        Provider::WindowsMlNvTensorRtRtx => {
+            Some(crate::windows_ml::CatalogExecutionProvider::NvTensorRtRtx)
+        }
+        Provider::WindowsMlQnn => Some(crate::windows_ml::CatalogExecutionProvider::Qnn),
+        Provider::WindowsMlOpenVino => Some(crate::windows_ml::CatalogExecutionProvider::OpenVino),
+        Provider::WindowsMlMiGraphX => Some(crate::windows_ml::CatalogExecutionProvider::MiGraphX),
+        Provider::WindowsMlVitisAi => Some(crate::windows_ml::CatalogExecutionProvider::VitisAi),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "ort")]
+#[cfg(all(windows, feature = "windowsml"))]
+fn windows_ml_catalog_ep_dispatch(
+    catalog_ep: crate::windows_ml::CatalogExecutionProvider,
+) -> ep::ExecutionProviderDispatch {
+    match catalog_ep {
+        crate::windows_ml::CatalogExecutionProvider::NvTensorRtRtx => ep::NVRTX::default().build(),
+        crate::windows_ml::CatalogExecutionProvider::Qnn => ep::QNN::default().build(),
+        crate::windows_ml::CatalogExecutionProvider::OpenVino => ep::OpenVINO::default().build(),
+        crate::windows_ml::CatalogExecutionProvider::MiGraphX => ep::MIGraphX::default().build(),
+        crate::windows_ml::CatalogExecutionProvider::VitisAi => ep::Vitis::default().build(),
+    }
+}
+
+#[cfg(feature = "ort")]
+#[cfg(all(windows, feature = "windowsml"))]
+fn with_windows_ml_catalog_ep(
+    builder: ort::session::builder::SessionBuilder,
+    catalog_ep: crate::windows_ml::CatalogExecutionProvider,
+    path: &Path,
+) -> Result<ort::session::builder::SessionBuilder> {
+    match catalog_ep {
+        crate::windows_ml::CatalogExecutionProvider::NvTensorRtRtx => {
+            info!(
+                "using Windows ML catalog EP NvTensorRtRtx for {}",
+                path.display()
+            );
+            builder
+                .with_execution_providers([
+                    windows_ml_catalog_ep_dispatch(catalog_ep).error_on_failure()
+                ])
+                .map_err(|err| anyhow!("failed to register Windows ML NvTensorRtRtx EP: {err}"))
+        }
+        crate::windows_ml::CatalogExecutionProvider::Qnn => {
+            info!("using Windows ML catalog EP QNN for {}", path.display());
+            builder
+                .with_execution_providers([
+                    windows_ml_catalog_ep_dispatch(catalog_ep).error_on_failure()
+                ])
+                .map_err(|err| anyhow!("failed to register Windows ML QNN EP: {err}"))
+        }
+        crate::windows_ml::CatalogExecutionProvider::OpenVino => {
+            info!(
+                "using Windows ML catalog EP OpenVINO for {}",
+                path.display()
+            );
+            builder
+                .with_execution_providers([
+                    windows_ml_catalog_ep_dispatch(catalog_ep).error_on_failure()
+                ])
+                .map_err(|err| anyhow!("failed to register Windows ML OpenVINO EP: {err}"))
+        }
+        crate::windows_ml::CatalogExecutionProvider::MiGraphX => {
+            info!(
+                "using Windows ML catalog EP MIGraphX for {}",
+                path.display()
+            );
+            builder
+                .with_execution_providers([
+                    windows_ml_catalog_ep_dispatch(catalog_ep).error_on_failure()
+                ])
+                .map_err(|err| anyhow!("failed to register Windows ML MIGraphX EP: {err}"))
+        }
+        crate::windows_ml::CatalogExecutionProvider::VitisAi => {
+            info!("using Windows ML catalog EP VitisAI for {}", path.display());
+            builder
+                .with_execution_providers([
+                    windows_ml_catalog_ep_dispatch(catalog_ep).error_on_failure()
+                ])
+                .map_err(|err| anyhow!("failed to register Windows ML VitisAI EP: {err}"))
+        }
+    }
+}
+
+#[cfg(feature = "ort")]
 pub(super) fn load_session(
     path: &Path,
     provider: Provider,
@@ -1377,80 +1468,75 @@ pub(super) fn load_session(
             }
             #[cfg(all(windows, feature = "windowsml"))]
             {
+                // Auto Windows ML optimizes for "works with the platform runtime":
+                // catalog EP if ready, then DirectML, then ORT's CPU fallback.
+                // Explicit windowsml-* providers below intentionally fail
+                // instead of silently changing the requested accelerator.
                 match crate::windows_ml::try_register_best_catalog_ep()? {
-                    Some(crate::windows_ml::CatalogExecutionProvider::NvTensorRtRtx) => {
+                    Some(catalog_ep) => {
                         info!(
-                            "using Windows ML catalog EP NvTensorRtRtx for {}",
+                            "using Windows ML catalog EP {} with DirectML/CPU fallback for {}",
+                            catalog_ep.label(),
                             path.display()
                         );
                         builder = builder
-                            .with_execution_providers([ep::NVRTX::default()
-                                .build()
-                                .error_on_failure()])
+                            .with_execution_providers([
+                                windows_ml_catalog_ep_dispatch(catalog_ep),
+                                ep::DirectML::default().build(),
+                            ])
                             .map_err(|err| {
-                                anyhow!("failed to register Windows ML NvTensorRtRtx EP: {err}")
-                            })?;
-                    }
-                    Some(crate::windows_ml::CatalogExecutionProvider::Qnn) => {
-                        info!("using Windows ML catalog EP QNN for {}", path.display());
-                        builder = builder
-                            .with_execution_providers([ep::QNN::default()
-                                .build()
-                                .error_on_failure()])
-                            .map_err(|err| {
-                                anyhow!("failed to register Windows ML QNN EP: {err}")
-                            })?;
-                    }
-                    Some(crate::windows_ml::CatalogExecutionProvider::OpenVino) => {
-                        info!(
-                            "using Windows ML catalog EP OpenVINO for {}",
-                            path.display()
-                        );
-                        builder = builder
-                            .with_execution_providers([ep::OpenVINO::default()
-                                .build()
-                                .error_on_failure()])
-                            .map_err(|err| {
-                                anyhow!("failed to register Windows ML OpenVINO EP: {err}")
-                            })?;
-                    }
-                    Some(crate::windows_ml::CatalogExecutionProvider::MiGraphX) => {
-                        info!(
-                            "using Windows ML catalog EP MIGraphX for {}",
-                            path.display()
-                        );
-                        builder = builder
-                            .with_execution_providers([ep::MIGraphX::default()
-                                .build()
-                                .error_on_failure()])
-                            .map_err(|err| {
-                                anyhow!("failed to register Windows ML MIGraphX EP: {err}")
-                            })?;
-                    }
-                    Some(crate::windows_ml::CatalogExecutionProvider::VitisAi) => {
-                        info!("using Windows ML catalog EP VitisAI for {}", path.display());
-                        builder = builder
-                            .with_execution_providers([ep::Vitis::default()
-                                .build()
-                                .error_on_failure()])
-                            .map_err(|err| {
-                                anyhow!("failed to register Windows ML VitisAI EP: {err}")
+                                anyhow!(
+                                    "failed to configure Windows ML catalog/DirectML fallback EPs: {err}"
+                                )
                             })?;
                     }
                     None => {
                         info!(
-                            "no ready Windows ML catalog EP found; using DirectML fallback for {}",
+                            "no ready Windows ML catalog EP found; using DirectML/CPU fallback for {}",
                             path.display()
                         );
                         builder = builder
-                            .with_execution_providers([ep::DirectML::default()
-                                .build()
-                                .error_on_failure()])
+                            .with_execution_providers([ep::DirectML::default().build()])
                             .map_err(|err| {
-                                anyhow!("failed to register Windows ML DirectML fallback EP: {err}")
+                                anyhow!(
+                                    "failed to configure Windows ML DirectML/CPU fallback EP: {err}"
+                                )
                             })?;
                     }
                 }
+            }
+        }
+        Provider::WindowsMlNvTensorRtRtx
+        | Provider::WindowsMlOpenVino
+        | Provider::WindowsMlQnn
+        | Provider::WindowsMlMiGraphX
+        | Provider::WindowsMlVitisAi => {
+            #[cfg(not(all(windows, feature = "windowsml")))]
+            {
+                bail!(
+                    "provider {} is unavailable in this build; rebuild on Windows with the `windowsml` feature for {}",
+                    provider.label(),
+                    path.display()
+                );
+            }
+            #[cfg(all(windows, feature = "windowsml"))]
+            {
+                let catalog_ep = windows_ml_catalog_ep_for_provider(provider).ok_or_else(|| {
+                    anyhow!(
+                        "provider {} has no Windows ML catalog EP mapping for {}",
+                        provider.label(),
+                        path.display()
+                    )
+                })?;
+                if !crate::windows_ml::try_register_catalog_ep(catalog_ep)? {
+                    bail!(
+                        "Windows ML catalog EP {} requested by provider {} is not present or not ready for {}; install/enable that EP with Windows ML tooling, or use provider windowsml for DirectML/CPU fallback",
+                        catalog_ep.label(),
+                        provider.label(),
+                        path.display()
+                    );
+                }
+                builder = with_windows_ml_catalog_ep(builder, catalog_ep, path)?;
             }
         }
         Provider::WindowsMlDirectMl => {
