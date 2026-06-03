@@ -94,10 +94,13 @@ cargo xtask bundle vc-vst3 --release --no-default-features --features tensorrt
 Drops the ONNX Runtime CUDA EP entirely and runs the GPU path through the
 **native TensorRT** shim (`vc-core/tensorrt`). This avoids shipping the ~2 GB
 CUDA EP + cuDNN/cuBLAS/cuFFT set; instead it needs the TensorRT runtime beside
-the plugin (`nvinfer_10.dll`, `nvinfer_plugin_10.dll`, the matching
-`nvinfer_builder_resource_sm*_10.dll` for your GPU, and `cudart64_12.dll`).
+the plugin (`nvinfer_<N>.dll`, `nvinfer_plugin_<N>.dll`, the matching
+`nvinfer_builder_resource_sm*_<N>.dll` for your GPU, and `cudart64_<M>.dll`).
+`<N>` is the TensorRT major version (10, 11, ...) and `<M>` the paired CUDA
+major (12 for TRT10, 13 for TRT11), both detected from the install at build and
+packaging time.
 
-> ⚠️ The native shim links `nvinfer_10.dll` at **load time**, so this package
+> ⚠️ The native shim links `nvinfer_<N>.dll` at **load time**, so this package
 > fails to load in a DAW unless those TensorRT DLLs resolve on the OS DLL search
 > path. Windows searches the loaded module's own directory first, so placing the
 > DLLs next to the plugin binary (in `Contents/<arch>/`) satisfies the implicit
@@ -148,12 +151,16 @@ for redistribution terms.
 For the **TensorRT package**, [`package-tensorrt.ps1`](package-tensorrt.ps1)
 copies the TensorRT DLLs into the bundle. There are two dependency layers:
 
-- **Runtime** (plugin load + engine execution): `nvinfer_10.dll`,
-  `nvinfer_plugin_10.dll`, `cudart64_12.dll`. Always copied.
+- **Runtime** (plugin load + engine execution): `nvinfer_<N>.dll`,
+  `nvinfer_plugin_<N>.dll`, `cudart64_<M>.dll`. Always copied.
 - **Engine build** (first run, on a cache miss): the ORT-free helper
   `vc-tensorrt-builder.exe` builds engines from the ONNX models, which needs
-  `nvonnxparser_10.dll` and the `nvinfer_builder_resource_sm*_10.dll` matching
+  `nvonnxparser_<N>.dll` and the `nvinfer_builder_resource_sm*_<N>.dll` matching
   the user's GPU. Copied unless `-RuntimeOnly`.
+
+The TensorRT major `<N>` is read from the chosen install (the newest TensorRT
+folder under the repo root, or `%TENSORRT_ROOT%`), and the CUDA major `<M>` is
+paired automatically (TRT10 → CUDA 12, TRT11 → CUDA 13).
 
 ```powershell
 # Self-contained for the target GPU's SM (e.g. sm86 = RTX 30xx, sm89 = RTX 40xx;

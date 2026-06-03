@@ -10,6 +10,7 @@ unsafe extern "C" {
         onnx_path: *const c_char,
         engine_path: *const c_char,
         profile_shapes: *const c_char,
+        timing_cache_path: *const c_char,
         message: *mut c_char,
         message_len: usize,
     ) -> c_int;
@@ -33,6 +34,7 @@ enum Mode {
         onnx: PathBuf,
         save_engine: PathBuf,
         profile: String,
+        timing_cache: Option<PathBuf>,
     },
     Run {
         engine: PathBuf,
@@ -84,15 +86,23 @@ fn main() {
             onnx,
             save_engine,
             profile,
+            timing_cache,
         } => {
             let onnx = cstring_path(&onnx, "onnx path");
             let save_engine = cstring_path(&save_engine, "engine path");
             let profile = cstring_text(&profile, "profile");
+            let timing_cache = timing_cache
+                .as_ref()
+                .map(|path| cstring_path(path, "timing cache path"));
+            let timing_cache_ptr = timing_cache
+                .as_ref()
+                .map_or(std::ptr::null(), |value| value.as_ptr());
             unsafe {
                 trt_probe_build(
                     onnx.as_ptr(),
                     save_engine.as_ptr(),
                     profile.as_ptr(),
+                    timing_cache_ptr,
                     message.as_mut_ptr(),
                     message.len(),
                 )
@@ -133,6 +143,7 @@ fn parse_args() -> Result<Args, String> {
     let mut onnx = None;
     let mut save_engine = None;
     let mut profile = None;
+    let mut timing_cache = None;
     let mut frames = 40;
     let mut channels = 768;
 
@@ -154,6 +165,11 @@ fn parse_args() -> Result<Args, String> {
             }
             "--profile" => {
                 profile = Some(iter.next().ok_or("--profile requires a value")?);
+            }
+            "--timing-cache" => {
+                timing_cache = Some(PathBuf::from(
+                    iter.next().ok_or("--timing-cache requires a path")?,
+                ));
             }
             "--frames" => {
                 frames = iter
@@ -182,10 +198,11 @@ fn parse_args() -> Result<Args, String> {
             onnx,
             save_engine: save_engine.ok_or("--onnx requires --save-engine")?,
             profile: profile.ok_or("--onnx requires --profile")?,
+            timing_cache,
         }
     } else {
-        if save_engine.is_some() || profile.is_some() {
-            return Err("--save-engine and --profile require --onnx".to_string());
+        if save_engine.is_some() || profile.is_some() || timing_cache.is_some() {
+            return Err("--save-engine, --profile, and --timing-cache require --onnx".to_string());
         }
         let RunArgs {
             engine,
@@ -214,6 +231,6 @@ fn parse_args() -> Result<Args, String> {
 
 fn print_usage() {
     eprintln!(
-        "usage:\n  vc-tensorrt-builder --onnx <model.onnx> --save-engine <file.engine> --profile <name:1x...,...>\n  vc-tensorrt-builder --engine <file.engine> [--frames 40] [--channels 768]"
+        "usage:\n  vc-tensorrt-builder --onnx <model.onnx> --save-engine <file.engine> --profile <name:1x...,...> [--timing-cache <file>]\n  vc-tensorrt-builder --engine <file.engine> [--frames 40] [--channels 768]"
     );
 }

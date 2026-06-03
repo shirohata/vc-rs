@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <iterator>
 #include <map>
@@ -55,12 +56,16 @@ struct TrtDeleter {
 };
 
 struct DeviceBuffer {
-    void* ptr{nullptr};
+    void* ptr{nullptr};   // device buffer bound to the TensorRT tensor
+    void* host{nullptr};  // pinned (page-locked) host staging buffer
     std::size_t bytes{0};
 
     ~DeviceBuffer() {
         if (ptr != nullptr) {
             cudaFree(ptr);
+        }
+        if (host != nullptr) {
+            cudaFreeHost(host);
         }
     }
 
@@ -73,6 +78,14 @@ struct DeviceBuffer {
         auto status = cudaMalloc(&ptr, bytes);
         if (status != cudaSuccess) {
             msg.append("cudaMalloc(%s, %zu) failed: %s\n", name, bytes, cudaGetErrorString(status));
+            return false;
+        }
+        // Pinned host memory makes the H2D/D2H cudaMemcpyAsync truly asynchronous
+        // (DMA) and, crucially, gives the copies a fixed host address so they can
+        // be captured into a CUDA graph and replayed across inferences.
+        status = cudaHostAlloc(&host, bytes, cudaHostAllocDefault);
+        if (status != cudaSuccess) {
+            msg.append("cudaHostAlloc(%s, %zu) failed: %s\n", name, bytes, cudaGetErrorString(status));
             return false;
         }
         return true;
@@ -89,8 +102,12 @@ struct NativeEngine {
     std::map<std::string, nvinfer1::Dims> input_dims;
     std::string output_name;
     std::size_t output_len{0};
+    cudaGraphExec_t graph_exec{nullptr};
 
     ~NativeEngine() {
+        if (graph_exec != nullptr) {
+            cudaGraphExecDestroy(graph_exec);
+        }
         if (stream != nullptr) {
             cudaStreamDestroy(stream);
         }
@@ -266,7 +283,11 @@ bool copy_to_device(NativeEngine& native, char const* name, void const* src, std
         msg.append("TensorRT input %s byte mismatch: got %zu, expected %zu\n", name, bytes, buffer.bytes);
         return false;
     }
-    return cuda_ok(cudaMemcpyAsync(buffer.ptr, src, bytes, cudaMemcpyHostToDevice, native.stream), msg, name);
+    // Stage into the pinned host buffer. The host->device transfer is issued by
+    // the captured CUDA graph (or the manual fallback) at inference time, always
+    // from this fixed address so a captured graph stays valid across calls.
+    std::memcpy(buffer.host, src, bytes);
+    return true;
 }
 
 bool copy_output_to_host(NativeEngine& native, float* dst, std::size_t output_len, Message& msg) {
@@ -279,22 +300,108 @@ bool copy_output_to_host(NativeEngine& native, float* dst, std::size_t output_le
         msg.append("TensorRT output length mismatch: got %zu, expected %zu\n", output_len, native.output_len);
         return false;
     }
-    return cuda_ok(
-        cudaMemcpyAsync(dst, native.buffers[static_cast<std::size_t>(index)].ptr, output_len * sizeof(float), cudaMemcpyDeviceToHost, native.stream),
-        msg,
-        "cudaMemcpyAsync output"
-    );
+    // The device->host copy into the pinned buffer was issued on the stream and
+    // synchronized by the caller; hand the bytes back to the caller's buffer.
+    std::memcpy(dst, native.buffers[static_cast<std::size_t>(index)].host, output_len * sizeof(float));
+    return true;
 }
 
-bool enqueue_and_copy(NativeEngine& native, float* output, std::size_t output_len, Message& msg) {
+// Issue the full inference sequence on the stream: H2D copies of every input
+// from its pinned staging buffer, the TensorRT enqueue, then the D2H copy of the
+// output into its pinned buffer. Used both to capture the CUDA graph and as the
+// fallback path when graph capture is unavailable.
+bool record_io(NativeEngine& native, Message& msg) {
+    int32_t const out_index = tensor_index(native, native.output_name.c_str());
+    if (out_index < 0) {
+        msg.append("engine is missing output tensor %s\n", native.output_name.c_str());
+        return false;
+    }
+    for (std::size_t i = 0; i < native.buffers.size(); ++i) {
+        if (static_cast<int32_t>(i) == out_index) {
+            continue;
+        }
+        auto& buffer = native.buffers[i];
+        if (!cuda_ok(
+                cudaMemcpyAsync(buffer.ptr, buffer.host, buffer.bytes, cudaMemcpyHostToDevice, native.stream),
+                msg,
+                "cudaMemcpyAsync input")) {
+            return false;
+        }
+    }
     if (!native.context->enqueueV3(native.stream)) {
         msg.append("TensorRT enqueueV3 failed\n");
         return false;
     }
-    if (!copy_output_to_host(native, output, output_len, msg)) {
+    auto& out = native.buffers[static_cast<std::size_t>(out_index)];
+    return cuda_ok(
+        cudaMemcpyAsync(out.host, out.ptr, native.output_len * sizeof(float), cudaMemcpyDeviceToHost, native.stream),
+        msg,
+        "cudaMemcpyAsync output");
+}
+
+bool enqueue_and_copy(NativeEngine& native, float* output, std::size_t output_len, Message& msg) {
+    // Replay the captured graph when available; otherwise issue the sequence
+    // directly. Both leave the result in the output tensor's pinned host buffer.
+    if (native.graph_exec != nullptr) {
+        if (!cuda_ok(cudaGraphLaunch(native.graph_exec, native.stream), msg, "cudaGraphLaunch")) {
+            return false;
+        }
+    } else if (!record_io(native, msg)) {
         return false;
     }
-    return cuda_ok(cudaStreamSynchronize(native.stream), msg, "cudaStreamSynchronize after enqueue");
+    if (!cuda_ok(cudaStreamSynchronize(native.stream), msg, "cudaStreamSynchronize after enqueue")) {
+        return false;
+    }
+    return copy_output_to_host(native, output, output_len, msg);
+}
+
+bool cuda_graph_disabled() {
+    char const* value = std::getenv("VC_RS_TENSORRT_DISABLE_CUDA_GRAPH");
+    if (value == nullptr) {
+        return false;
+    }
+    std::string flag(value);
+    return flag == "1" || flag == "true" || flag == "on" || flag == "yes";
+}
+
+// Best-effort CUDA graph capture. Warm up the captured sequence a few times so
+// lazy initialization completes, then capture it once. On success, inferences
+// replay the graph, cutting per-call kernel/copy launch overhead. Any failure
+// leaves graph_exec null and the engine falls back to issuing the sequence
+// directly, so capture problems can never break inference.
+void try_capture_graph(NativeEngine& native, Message& msg) {
+    if (cuda_graph_disabled()) {
+        msg.append("CUDA graph disabled via VC_RS_TENSORRT_DISABLE_CUDA_GRAPH\n");
+        return;
+    }
+    for (int warmup = 0; warmup < 3; ++warmup) {
+        if (!record_io(native, msg) || cudaStreamSynchronize(native.stream) != cudaSuccess) {
+            msg.append("CUDA graph warmup failed; using direct enqueue\n");
+            return;
+        }
+    }
+    if (cudaStreamBeginCapture(native.stream, cudaStreamCaptureModeThreadLocal) != cudaSuccess) {
+        msg.append("cudaStreamBeginCapture failed; using direct enqueue\n");
+        return;
+    }
+    bool const recorded = record_io(native, msg);
+    cudaGraph_t graph = nullptr;
+    cudaError_t const end_status = cudaStreamEndCapture(native.stream, &graph);
+    if (!recorded || end_status != cudaSuccess || graph == nullptr) {
+        if (graph != nullptr) {
+            cudaGraphDestroy(graph);
+        }
+        msg.append("CUDA graph capture failed; using direct enqueue\n");
+        return;
+    }
+    cudaError_t const inst_status = cudaGraphInstantiate(&native.graph_exec, graph, 0);
+    cudaGraphDestroy(graph);
+    if (inst_status != cudaSuccess || native.graph_exec == nullptr) {
+        native.graph_exec = nullptr;
+        msg.append("cudaGraphInstantiate failed; using direct enqueue\n");
+        return;
+    }
+    msg.append("CUDA graph enabled for native TensorRT engine\n");
 }
 
 } // namespace
@@ -403,6 +510,10 @@ extern "C" NativeEngine* vc_rs_trt_engine_create(
             return nullptr;
         }
     }
+
+    // Device buffers and tensor addresses are fixed for the engine's lifetime, so
+    // the inference sequence can be captured once into a CUDA graph and replayed.
+    try_capture_graph(*native, msg);
 
     msg.append("loaded native TensorRT engine=%s output=%s output_len=%zu profile=%s\n", engine_path, output_name, native->output_len, profile_shapes);
     return native.release();

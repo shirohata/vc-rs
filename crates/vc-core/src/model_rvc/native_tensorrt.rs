@@ -352,11 +352,17 @@ fn build_engine(model_path: &Path, engine_path: &Path, profile_shapes: &str) -> 
     let tmp_engine = engine_path.with_extension(format!("engine.tmp-{}", std::process::id()));
     let _ = std::fs::remove_file(&tmp_engine);
 
+    // Persistent timing cache shared by every engine build (all model roles and
+    // shapes), so high builder optimization levels reuse measured tactic timings
+    // instead of re-timing from scratch on each cache miss. Lives at the cache
+    // root; TensorRT validates its header and ignores an incompatible blob.
+    let timing_cache = tensor_rt_cache_root()?.join("timing.cache");
+
     // Keep engine construction out of this process. ORT-free trtexec and the
     // ORT-free helper both build the RVC graph successfully, while the same
     // Builder API fails after ORT has initialized in the main process.
     let output =
-        match tensor_rt_builder_command(model_path, &tmp_engine, profile_shapes)? {
+        match tensor_rt_builder_command(model_path, &tmp_engine, profile_shapes, &timing_cache)? {
             BuilderCommand::Exe(mut command) | BuilderCommand::Cargo(mut command) => command
                 .output()
                 .with_context(|| "failed to launch native TensorRT builder helper")?,
@@ -410,20 +416,33 @@ fn tensor_rt_builder_command(
     model_path: &Path,
     engine_path: &Path,
     profile_shapes: &str,
+    timing_cache: &Path,
 ) -> Result<BuilderCommand> {
     if let Some(path) = std::env::var_os("VC_RS_TENSORRT_BUILDER_HELPER")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
     {
         let mut command = Command::new(&path);
-        add_builder_args(&mut command, model_path, engine_path, profile_shapes);
+        add_builder_args(
+            &mut command,
+            model_path,
+            engine_path,
+            profile_shapes,
+            timing_cache,
+        );
         return Ok(BuilderCommand::Exe(command));
     }
 
     for candidate in tensor_rt_builder_candidates()? {
         if candidate.is_file() {
             let mut command = Command::new(&candidate);
-            add_builder_args(&mut command, model_path, engine_path, profile_shapes);
+            add_builder_args(
+                &mut command,
+                model_path,
+                engine_path,
+                profile_shapes,
+                timing_cache,
+            );
             return Ok(BuilderCommand::Exe(command));
         }
     }
@@ -435,7 +454,13 @@ fn tensor_rt_builder_command(
             .arg("--manifest-path")
             .arg(manifest)
             .arg("--");
-        add_builder_args(&mut command, model_path, engine_path, profile_shapes);
+        add_builder_args(
+            &mut command,
+            model_path,
+            engine_path,
+            profile_shapes,
+            timing_cache,
+        );
         return Ok(BuilderCommand::Cargo(command));
     }
 
@@ -450,6 +475,7 @@ fn add_builder_args(
     model_path: &Path,
     engine_path: &Path,
     profile_shapes: &str,
+    timing_cache: &Path,
 ) {
     command
         .arg("--onnx")
@@ -457,7 +483,9 @@ fn add_builder_args(
         .arg("--save-engine")
         .arg(engine_path)
         .arg("--profile")
-        .arg(profile_shapes);
+        .arg(profile_shapes)
+        .arg("--timing-cache")
+        .arg(timing_cache);
 }
 
 #[cfg(native_tensorrt)]

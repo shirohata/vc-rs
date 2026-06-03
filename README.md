@@ -131,16 +131,18 @@ GPU 実行では、CPU より小さい `--chunk-ms` や大きい `--extra-conver
 | --- | --- | --- |
 | CUDA Toolkit | 12.x（開発環境では 12.9） | [CUDA Toolkit Downloads](https://developer.nvidia.com/cuda-downloads) |
 | cuDNN | 9.x for CUDA 12 | [cuDNN Downloads](https://developer.nvidia.com/cudnn) / [Windows x86_64 zip 一覧](https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64/) |
-| TensorRT | CUDA 12.x 対応版（開発環境では 10.16.1.11 for CUDA 12.9） | [TensorRT SDK](https://developer.nvidia.com/tensorrt) |
+| TensorRT | 10.x（CUDA 12.x 対応）または 11.x（CUDA 13.x 対応）。開発環境では 10.16.1.11 for CUDA 12.9 と 11.0.0.114 for CUDA 13.2 | [TensorRT SDK](https://developer.nvidia.com/tensorrt) |
 
 Windows で zip 版 cuDNN を使う場合は
 CUDA 12 対応の `cudnn-windows-x86_64-9.x_cuda12-archive.zip` を取得し、展開後の
 `bin` を `PATH` に追加してください。CUDA Provider は `ORT_CUDA_VERSION=12` を
 前提にします（repo の Cargo config でも固定しています）。
 
-`--provider tensorrt` を使う場合は、CUDA / cuDNN に加えて
-CUDA 12.x 対応の TensorRT zip を展開し、
-`TensorRT-10.16.1.11\bin` と `TensorRT-10.16.1.11\lib` を `PATH` に追加してください。
+`--provider tensorrt` を使う場合は、CUDA / cuDNN に加えて TensorRT zip を展開し、
+その `bin` と `lib`（例: `TensorRT-10.16.1.11\bin` / `TensorRT-11.0.0.114\bin`）を
+`PATH` に追加してください。TensorRT 10 系は CUDA 12.x、TensorRT 11 系は CUDA 13.x
+が必要です。ビルドはワークスペース直下にある最も新しいバージョンを自動検出し、
+対応する CUDA Toolkit を選択します（`TENSORRT_ROOT` / `CUDA_PATH` で上書き可能）。
 TensorRT は初回実行時やモデル・入力形状が変わったタイミングでエンジンを生成する
 ため、コンパイルに非常に長い時間がかかることがあります。2 回目以降はエンジン
 キャッシュが再利用できれば起動が短くなります。

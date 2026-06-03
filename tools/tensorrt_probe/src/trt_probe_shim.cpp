@@ -274,6 +274,7 @@ extern "C" int trt_probe_build(
     char const* onnx_path,
     char const* engine_path,
     char const* profile_shapes,
+    char const* timing_cache_path,
     char* message,
     std::size_t message_len
 ) {
@@ -298,8 +299,14 @@ extern "C" int trt_probe_build(
         msg.append("createInferBuilder failed\n");
         return 1;
     }
+#if NV_TENSORRT_MAJOR >= 11
+    // TensorRT 11 removed NetworkDefinitionCreationFlag::kEXPLICIT_BATCH: every
+    // network is explicit-batch (and strongly typed) by default.
+    auto const network_flags = 0U;
+#else
     auto const network_flags =
         1U << static_cast<uint32_t>(nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH);
+#endif
     std::unique_ptr<nvinfer1::INetworkDefinition, TrtDeleter<nvinfer1::INetworkDefinition>> network(builder->createNetworkV2(network_flags));
     if (!network) {
         msg.append("createNetworkV2 failed\n");
@@ -327,9 +334,40 @@ extern "C" int trt_probe_build(
         msg.append("failed to create TensorRT builder config/profile\n");
         return 1;
     }
+#if NV_TENSORRT_MAJOR < 11
+    // TensorRT 11 always builds strongly-typed networks, where tensor precision
+    // is taken from the ONNX graph and BuilderFlag::kFP16 was removed. On 10 and
+    // earlier the network is weakly typed, so opt into FP16 kernels explicitly.
     config->setFlag(nvinfer1::BuilderFlag::kFP16);
+#endif
     config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 4ULL * 1024ULL * 1024ULL * 1024ULL);
-    config->setBuilderOptimizationLevel(0);
+    // Max builder optimization level (0..=5, default 3). Level 5 explores and
+    // compiles the most kernel tactics for the fastest engine; the build is
+    // slower but its result is cached to disk per (model, profile), so the cost
+    // is paid once. Worth it for the real-time RVC path, especially on the FP32
+    // strongly-typed engines TensorRT 11 produces.
+    config->setBuilderOptimizationLevel(5);
+
+    // Persistent timing cache: reuse tactic timings measured by previous builds
+    // so high optimization levels don't re-time every tactic from scratch. This
+    // only speeds up the build; the resulting engine is identical. A blob built
+    // for a different GPU / TensorRT version fails the header check and is safely
+    // ignored (we then start from an empty cache and rewrite it).
+    bool const use_timing_cache = timing_cache_path != nullptr && timing_cache_path[0] != '\0';
+    std::unique_ptr<nvinfer1::ITimingCache, TrtDeleter<nvinfer1::ITimingCache>> timing_cache;
+    if (use_timing_cache) {
+        std::vector<char> blob;
+        {
+            std::ifstream cache_file(timing_cache_path, std::ios::binary);
+            if (cache_file) {
+                blob.assign(std::istreambuf_iterator<char>(cache_file), std::istreambuf_iterator<char>());
+            }
+        }
+        timing_cache.reset(config->createTimingCache(blob.data(), blob.size()));
+        if (timing_cache && !config->setTimingCache(*timing_cache, false)) {
+            msg.append("warning: setTimingCache failed; building without a timing cache\n");
+        }
+    }
 
     bool has_dynamic_input = false;
     for (auto const& item : profile) {
@@ -374,6 +412,20 @@ extern "C" int trt_probe_build(
     if (!plan) {
         msg.append("buildSerializedNetwork failed for %s\n", onnx_path);
         return 1;
+    }
+    // Write back the timing cache (now populated by the build) for the next run.
+    // Best-effort: a failure here must not fail an otherwise successful build.
+    if (use_timing_cache && timing_cache) {
+        std::unique_ptr<nvinfer1::IHostMemory, TrtDeleter<nvinfer1::IHostMemory>> cache_blob(timing_cache->serialize());
+        if (cache_blob) {
+            std::ofstream cache_out(timing_cache_path, std::ios::binary | std::ios::trunc);
+            if (cache_out) {
+                cache_out.write(static_cast<char const*>(cache_blob->data()), static_cast<std::streamsize>(cache_blob->size()));
+            }
+            if (!cache_out) {
+                msg.append("warning: failed to write timing cache %s\n", timing_cache_path);
+            }
+        }
     }
     std::ofstream file(engine_path, std::ios::binary);
     if (!file) {
