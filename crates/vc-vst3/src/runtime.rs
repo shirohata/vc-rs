@@ -449,6 +449,15 @@ impl WorkerCtx {
                 self.load_pipeline_inner(settings, provider, chunk_samples)
             });
         }
+        if provider.is_windows_ml() {
+            // Windows ML's small bootstrapper DLL is bundled beside the plugin,
+            // while ONNX Runtime/DirectML come from Windows App SDK Runtime.
+            // Keep this on the worker load path so the realtime callback never
+            // performs package bootstrap or DLL resolution work.
+            return crate::dll_path::with_bundled_dll_directory(|| {
+                self.load_pipeline_inner(settings, provider, chunk_samples)
+            });
+        }
         self.load_pipeline_inner(settings, provider, chunk_samples)
     }
 

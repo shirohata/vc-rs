@@ -27,6 +27,10 @@ tensorrt = []
 # `ort` backend. Off by default so a TensorRT-only build can drop the large CUDA
 # EP binaries. When disabled, selecting `Provider::Cuda` fails with a clear error.
 cuda = ["ort", "ort/cuda"]
+# Enables Windows ML providers. On Windows this bootstraps Windows App SDK
+# Runtime 2.x and dynamically loads its shared ONNX Runtime + DirectML binaries,
+# reducing redistributed DLL size. The Windows ML 2.x runtime exposes ORT API 24.
+windowsml = ["ort", "ort/load-dynamic", "ort/api-24", "ort/directml"]
 
 [dependencies]
 anyhow.workspace = true

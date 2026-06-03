@@ -1,16 +1,16 @@
 //! Make bundled DLLs load from next to the plugin.
 //!
-//! ONNX Runtime's CUDA execution provider is loaded at runtime as separate
-//! DLLs (`onnxruntime_providers_shared.dll`, `onnxruntime_providers_cuda.dll`)
-//! which in turn pull in the CUDA / cuDNN runtime DLLs. Windows resolves those
-//! against the *host process* (the DAW), not the plugin's own folder. Add the
-//! plugin's directory to the user DLL directory list before any ONNX Runtime
-//! session is created, while deliberately avoiding process-wide default DLL
-//! policy changes that could affect the DAW or other plugins.
+//! The CUDA package loads provider/CUDA/cuDNN DLLs from beside the plugin. The
+//! Windows ML package only bundles `Microsoft.WindowsAppRuntime.Bootstrap.dll`
+//! there, while ONNX Runtime and DirectML come from Windows App SDK Runtime.
+//! Windows resolves those DLLs against the *host process* (the DAW), not the
+//! plugin's own folder. Add the plugin's directory to the user DLL directory
+//! list before any ONNX Runtime session is created, while deliberately avoiding
+//! process-wide default DLL policy changes that could affect the DAW or other
+//! plugins.
 //!
-//! The ONNX Runtime *core* is statically linked into the plugin by `ort`, so no
-//! `onnxruntime.dll` needs to be bundled — only the provider DLLs and their
-//! CUDA/cuDNN dependencies.
+//! Windows ML dynamically loads the Windows App SDK Runtime ORT core. CUDA
+//! builds use the traditional ORT CUDA EP packaging.
 
 #[cfg(windows)]
 fn plugin_dir() -> Option<std::path::PathBuf> {

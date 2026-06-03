@@ -70,6 +70,10 @@ fn tensorrt_run_mode_controls_graph_device_io() {
     assert!(!TensorRtRunMode::PinnedCpu.device_io());
     assert!(Provider::TensorRt.is_tensorrt());
     assert!(Provider::Cuda.is_cuda());
+    assert!(Provider::WindowsMl.is_windows_ml());
+    assert!(Provider::WindowsMlDirectMl.is_windows_ml_directml());
+    assert!(!Provider::WindowsMl.is_cuda());
+    assert!(!Provider::WindowsMl.is_tensorrt());
     assert!(!Provider::Cpu.is_tensorrt());
 }
 

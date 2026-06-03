@@ -14,6 +14,27 @@ pub enum Provider {
         value(name = "tensorrt", alias = "trt", alias = "tensor-rt")
     )]
     TensorRt,
+    #[cfg_attr(
+        feature = "clap",
+        value(name = "windowsml", alias = "windows-ml", alias = "winml")
+    )]
+    WindowsMl,
+    #[cfg_attr(
+        feature = "clap",
+        value(name = "windowsml-cpu", alias = "windows-ml-cpu", alias = "winml-cpu")
+    )]
+    WindowsMlCpu,
+    #[cfg_attr(
+        feature = "clap",
+        value(
+            name = "windowsml-directml",
+            alias = "windows-ml-directml",
+            alias = "winml-directml",
+            alias = "windowsml-dml",
+            alias = "winml-dml"
+        )
+    )]
+    WindowsMlDirectMl,
 }
 
 impl Provider {
@@ -22,6 +43,9 @@ impl Provider {
             Provider::Cpu => "cpu",
             Provider::Cuda => "cuda",
             Provider::TensorRt => "tensorrt",
+            Provider::WindowsMl => "windowsml",
+            Provider::WindowsMlCpu => "windowsml-cpu",
+            Provider::WindowsMlDirectMl => "windowsml-directml",
         }
     }
 
@@ -31,5 +55,16 @@ impl Provider {
 
     pub fn is_cuda(self) -> bool {
         matches!(self, Provider::Cuda)
+    }
+
+    pub fn is_windows_ml(self) -> bool {
+        matches!(
+            self,
+            Provider::WindowsMl | Provider::WindowsMlCpu | Provider::WindowsMlDirectMl
+        )
+    }
+
+    pub fn is_windows_ml_directml(self) -> bool {
+        matches!(self, Provider::WindowsMl | Provider::WindowsMlDirectMl)
     }
 }

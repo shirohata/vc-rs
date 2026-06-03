@@ -1307,6 +1307,21 @@ pub(super) fn load_session(
     tensor_rt_run_mode: TensorRtRunMode,
     tensor_rt_session_purpose: TensorRtSessionPurpose,
 ) -> Result<Session> {
+    if provider.is_windows_ml() {
+        #[cfg(not(all(windows, feature = "windowsml")))]
+        {
+            bail!(
+                "provider {} is unavailable in this build; rebuild on Windows with the `windowsml` feature for {}",
+                provider.label(),
+                path.display()
+            );
+        }
+        #[cfg(all(windows, feature = "windowsml"))]
+        {
+            crate::windows_ml::ensure_initialized()?;
+        }
+    }
+
     let mut builder = Session::builder()?
         .with_intra_threads(1)
         .map_err(|err| anyhow!(err.to_string()))?;
@@ -1349,16 +1364,131 @@ pub(super) fn load_session(
                     .map_err(|err| anyhow!("failed to register CUDA execution provider: {err}"))?;
             }
         }
+        Provider::WindowsMl => {
+            #[cfg(not(all(windows, feature = "windowsml")))]
+            {
+                bail!(
+                    "provider {} is unavailable in this build; rebuild on Windows with the `windowsml` feature for {}",
+                    provider.label(),
+                    path.display()
+                );
+            }
+            #[cfg(all(windows, feature = "windowsml"))]
+            {
+                match crate::windows_ml::try_register_best_catalog_ep()? {
+                    Some(crate::windows_ml::CatalogExecutionProvider::NvTensorRtRtx) => {
+                        info!(
+                            "using Windows ML catalog EP NvTensorRtRtx for {}",
+                            path.display()
+                        );
+                        builder = builder
+                            .with_execution_providers([ep::NVRTX::default()
+                                .build()
+                                .error_on_failure()])
+                            .map_err(|err| {
+                                anyhow!("failed to register Windows ML NvTensorRtRtx EP: {err}")
+                            })?;
+                    }
+                    Some(crate::windows_ml::CatalogExecutionProvider::Qnn) => {
+                        info!("using Windows ML catalog EP QNN for {}", path.display());
+                        builder = builder
+                            .with_execution_providers([ep::QNN::default()
+                                .build()
+                                .error_on_failure()])
+                            .map_err(|err| {
+                                anyhow!("failed to register Windows ML QNN EP: {err}")
+                            })?;
+                    }
+                    Some(crate::windows_ml::CatalogExecutionProvider::OpenVino) => {
+                        info!(
+                            "using Windows ML catalog EP OpenVINO for {}",
+                            path.display()
+                        );
+                        builder = builder
+                            .with_execution_providers([ep::OpenVINO::default()
+                                .build()
+                                .error_on_failure()])
+                            .map_err(|err| {
+                                anyhow!("failed to register Windows ML OpenVINO EP: {err}")
+                            })?;
+                    }
+                    Some(crate::windows_ml::CatalogExecutionProvider::MiGraphX) => {
+                        info!(
+                            "using Windows ML catalog EP MIGraphX for {}",
+                            path.display()
+                        );
+                        builder = builder
+                            .with_execution_providers([ep::MIGraphX::default()
+                                .build()
+                                .error_on_failure()])
+                            .map_err(|err| {
+                                anyhow!("failed to register Windows ML MIGraphX EP: {err}")
+                            })?;
+                    }
+                    Some(crate::windows_ml::CatalogExecutionProvider::VitisAi) => {
+                        info!("using Windows ML catalog EP VitisAI for {}", path.display());
+                        builder = builder
+                            .with_execution_providers([ep::Vitis::default()
+                                .build()
+                                .error_on_failure()])
+                            .map_err(|err| {
+                                anyhow!("failed to register Windows ML VitisAI EP: {err}")
+                            })?;
+                    }
+                    None => {
+                        info!(
+                            "no ready Windows ML catalog EP found; using DirectML fallback for {}",
+                            path.display()
+                        );
+                        builder = builder
+                            .with_execution_providers([ep::DirectML::default()
+                                .build()
+                                .error_on_failure()])
+                            .map_err(|err| {
+                                anyhow!("failed to register Windows ML DirectML fallback EP: {err}")
+                            })?;
+                    }
+                }
+            }
+        }
+        Provider::WindowsMlDirectMl => {
+            #[cfg(not(all(windows, feature = "windowsml")))]
+            {
+                bail!(
+                    "provider {} is unavailable in this build; rebuild on Windows with the `windowsml` feature for {}",
+                    provider.label(),
+                    path.display()
+                );
+            }
+            #[cfg(all(windows, feature = "windowsml"))]
+            {
+                info!(
+                    "using Windows ML DirectML execution provider via Windows App SDK Runtime for {}",
+                    path.display()
+                );
+                builder = builder
+                    .with_execution_providers([ep::DirectML::default().build().error_on_failure()])
+                    .map_err(|err| {
+                        anyhow!("failed to register Windows ML DirectML execution provider: {err}")
+                    })?;
+            }
+        }
         Provider::TensorRt => {
             bail!(
                 "Provider::TensorRt is native-only; load a CPU inspection session or a native TensorRT engine for {}",
                 path.display()
             );
         }
-        Provider::Cpu => {
+        Provider::Cpu | Provider::WindowsMlCpu => {
             info!(
-                "using ONNX Runtime CPU execution provider intra_threads={} inter_threads={} arena=true mem_pattern=true flush_to_zero=true",
-                CPU_ONNX_INTRA_THREADS, CPU_ONNX_INTER_THREADS
+                "using {} execution provider intra_threads={} inter_threads={} arena=true mem_pattern=true flush_to_zero=true",
+                if provider == Provider::WindowsMlCpu {
+                    "Windows ML CPU"
+                } else {
+                    "ONNX Runtime CPU"
+                },
+                CPU_ONNX_INTRA_THREADS,
+                CPU_ONNX_INTER_THREADS
             );
             // CPU inference still feeds a latency-sensitive pipeline. Keep
             // these as load-time session options; per-chunk tuning here would

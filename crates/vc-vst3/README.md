@@ -30,7 +30,7 @@ Open the plugin's editor in your DAW ([`editor.rs`](src/editor.rs), egui). From
 there you can:
 
 - **Browse** for the RVC model, embedder, and F0 (RMVPE) `.onnx` files
-- choose the **backend** (CPU / CUDA)
+- choose the **backend** (CPU / Windows ML / CUDA / TensorRT, depending on the package)
 - set the **chunk size** (ms) — larger means more latency but more context
 - hit **Load / Reload** to apply model / backend / chunk edits
 - watch the **status** line (`no models configured` / `models configured; click
@@ -66,24 +66,46 @@ from the config and apply on (re)instantiation.
 
 ## Build
 
-The plugin ships in two mutually exclusive GPU packages, selected by cargo
-feature. Both statically link the ONNX Runtime **CPU core** into the plugin
-binary (~25 MB `.vst3`); they differ only in the GPU backend and therefore in
-the heavy runtime DLLs you ship beside the plugin.
+The default Windows package uses **Windows ML** through Windows App SDK Runtime
+2.x. This keeps `onnxruntime.dll` and `DirectML.dll` out of the bundle; the app
+only ships the small Windows App SDK bootstrapper DLL. CUDA and native TensorRT
+packages remain available as explicit cargo feature builds.
 
-### CUDA package (default)
+### Windows ML package (default, Windows)
 
 ```sh
-ORT_CUDA_VERSION=12
 cargo xtask bundle vc-vst3 --release
 ```
 
-Enables the ONNX Runtime **CUDA execution provider** (`vc-core/cuda`, on by
-default). The plugin has *no* load-time NVIDIA dependency — the CUDA EP and its
-DLLs load at runtime — so it loads in a DAW even without NVIDIA libraries
-installed; GPU execution then needs the CUDA runtime DLLs (see below). The
-repo's Cargo config pins `ORT_CUDA_VERSION=12` so the downloaded ONNX Runtime
-CUDA provider matches the CUDA 12.x DLLs copied by `package-cuda.ps1`.
+Enables `vc-core/windowsml`. Model loading bootstraps Windows App SDK Runtime
+2.x on the worker thread, then loads the runtime's shared ONNX Runtime
+(`onnxruntime.dll`) with ORT API 24. The default provider is `windowsml`, which
+currently uses DirectML and can be set explicitly as `windowsml-directml`;
+`windowsml-cpu` forces the Windows ML ORT CPU path.
+
+End users must have **Windows App SDK Runtime 2.x** installed. After bundling,
+copy the bootstrapper DLL into the bundle:
+
+```powershell
+pwsh crates\vc-vst3\package-windowsml.ps1
+```
+
+Do not bundle `onnxruntime.dll`, `DirectML.dll`, CUDA, or cuDNN DLLs for this
+package. Those are provided by Windows App SDK Runtime.
+
+### CUDA package
+
+```sh
+ORT_CUDA_VERSION=12
+cargo xtask bundle vc-vst3 --release --no-default-features --features cuda
+```
+
+Enables the ONNX Runtime **CUDA execution provider** (`vc-core/cuda`). The
+plugin has *no* load-time NVIDIA dependency — the CUDA EP and its DLLs load at
+runtime — so it loads in a DAW even without NVIDIA libraries installed; GPU
+execution then needs the CUDA runtime DLLs (see below). The repo's Cargo config
+pins `ORT_CUDA_VERSION=12` so the downloaded ONNX Runtime CUDA provider matches
+the CUDA 12.x DLLs copied by `package-cuda.ps1`.
 
 ### TensorRT package
 
@@ -188,8 +210,13 @@ Copy the bundle into a standard plugin search path for your OS:
 - CLAP — Windows: `%CommonProgramFiles%\CLAP\`; macOS:
   `~/Library/Audio/Plug-Ins/CLAP/`; Linux: `~/.clap/`
 
-For GPU execution the plugin needs the ONNX Runtime CUDA provider DLLs and the
-CUDA / cuDNN runtime libraries. Two options:
+For the default Windows ML package, install Windows App SDK Runtime 2.x and run
+`package-windowsml.ps1` so `Microsoft.WindowsAppRuntime.Bootstrap.dll` is beside
+the plugin binary. No ONNX Runtime, DirectML, CUDA, or cuDNN DLLs should be
+copied into that bundle.
+
+For the CUDA package, GPU execution needs the ONNX Runtime CUDA provider DLLs
+and the CUDA / cuDNN runtime libraries. Two options:
 
 - **Self-contained (recommended):** run `package-cuda.ps1` (see above) so the
   DLLs ship inside the bundle. No `PATH` setup needed — only an NVIDIA driver.

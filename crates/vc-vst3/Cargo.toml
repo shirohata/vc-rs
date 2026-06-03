@@ -9,14 +9,14 @@ description = "VST3/CLAP RVC voice conversion plugin"
 crate-type = ["cdylib", "lib"]
 
 [features]
-# Default package: CPU + ONNX Runtime CUDA EP (bundles the large CUDA provider
-# DLLs). Build the leaner TensorRT package with
-# `--no-default-features --features tensorrt`, which drops the CUDA EP and runs
-# the GPU path through native TensorRT instead.
-default = ["cuda"]
+# Default package: CPU + Windows ML via Windows App SDK Runtime 2.x, which keeps
+# ONNX Runtime/DirectML DLLs out of the bundle. Build CUDA or TensorRT packages
+# explicitly with `--no-default-features --features cuda|tensorrt`.
+default = ["windowsml"]
 # The CUDA build bundles and preloads the ONNX Runtime CUDA provider DLLs, so it
 # needs the `ort` dependency. The TensorRT-only build drops ORT entirely.
 cuda = ["vc-core/cuda", "dep:ort"]
+windowsml = ["vc-core/windowsml", "dep:ort"]
 tensorrt = ["vc-core/tensorrt"]
 
 [dependencies]

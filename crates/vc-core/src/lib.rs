@@ -13,6 +13,8 @@
 #![cfg_attr(not(feature = "ort"), allow(dead_code, unused_variables))]
 
 mod provider;
+#[cfg(all(windows, feature = "windowsml"))]
+mod windows_ml;
 
 pub mod dsp;
 pub mod model_rvc;

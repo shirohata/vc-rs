@@ -30,11 +30,9 @@ pub struct PluginConfig {
     /// are no longer user-provided; native TensorRT builds cache entries from
     /// the ONNX model and fixed profile.
     pub rvc_engine: Option<PathBuf>,
-    /// "cpu" | "cuda" | "tensorrt". The GPU spellings resolve to whichever GPU
-    /// backend this package was built with (see [`PluginConfig::provider`]):
-    /// the default package ships the ONNX Runtime CUDA EP, the TensorRT package
-    /// ships native TensorRT. A GPU value that doesn't match the compiled
-    /// backend falls back to the one that is available.
+    /// "cpu" | "windowsml" | "windowsml-cpu" | "windowsml-directml" | "cuda"
+    /// | "tensorrt". GPU spellings resolve to whichever GPU-capable backend
+    /// this package was built with (see [`PluginConfig::provider`]).
     pub provider: String,
     pub f0_threshold: f32,
     pub silence_threshold: f32,
@@ -61,7 +59,7 @@ impl Default for PluginConfig {
             f0_model: PathBuf::new(),
             embedder_output: None,
             rvc_engine: None,
-            provider: "cpu".to_string(),
+            provider: default_provider().to_string(),
             f0_threshold: 0.3,
             silence_threshold: 0.0001,
             chunk_ms: 500,
@@ -90,6 +88,13 @@ impl PluginConfig {
 
     pub fn provider(&self) -> Provider {
         match self.provider.trim().to_ascii_lowercase().as_str() {
+            "windowsml" | "windows-ml" | "winml" => Provider::WindowsMl,
+            "windowsml-cpu" | "windows-ml-cpu" | "winml-cpu" => Provider::WindowsMlCpu,
+            "windowsml-directml"
+            | "windows-ml-directml"
+            | "winml-directml"
+            | "windowsml-dml"
+            | "winml-dml" => Provider::WindowsMlDirectMl,
             "cuda" => gpu_provider("cuda"),
             "tensorrt" | "trt" | "tensor-rt" => gpu_provider("tensorrt"),
             _ => Provider::Cpu,
@@ -145,6 +150,16 @@ impl PluginConfig {
     }
 }
 
+#[cfg(feature = "windowsml")]
+fn default_provider() -> &'static str {
+    "windowsml"
+}
+
+#[cfg(not(feature = "windowsml"))]
+fn default_provider() -> &'static str {
+    "cpu"
+}
+
 /// Resolve a requested GPU provider ("cuda" or "tensorrt") to the GPU backend
 /// this package was compiled with. The variants are mutually exclusive by cargo
 /// feature, so each build sees exactly one of these.
@@ -168,7 +183,18 @@ fn gpu_provider(requested: &str) -> Provider {
     Provider::Cuda
 }
 
-#[cfg(not(any(feature = "cuda", feature = "tensorrt")))]
+#[cfg(all(
+    feature = "windowsml",
+    not(any(feature = "cuda", feature = "tensorrt"))
+))]
+fn gpu_provider(requested: &str) -> Provider {
+    nih_plug::nih_warn!(
+        "vc-vst3: '{requested}' provider is not enabled in this package; using Windows ML"
+    );
+    Provider::WindowsMl
+}
+
+#[cfg(not(any(feature = "cuda", feature = "tensorrt", feature = "windowsml")))]
 fn gpu_provider(requested: &str) -> Provider {
     nih_plug::nih_warn!(
         "vc-vst3: '{requested}' provider is not enabled in this CPU-only package; using CPU"

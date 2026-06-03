@@ -12,9 +12,7 @@ license = "MIT"
 anyhow = "1.0"
 tracing = "0.1"
 rubato = "2"
-# Base ONNX Runtime: CPU core only. The CUDA execution provider (which pulls the
-# large `onnxruntime_providers_cuda.dll` and its cuDNN dependencies) is opt-in
-# via the `vc-core/cuda` feature, and native TensorRT (a load-time `nvinfer_<N>.dll`
-# dependency, N = 10/11/...) via `vc-core/tensorrt`. This lets us ship a TensorRT-only plugin
-# build that drops the CUDA EP entirely, and a CUDA build that drops TensorRT.
+# Base ONNX Runtime: CPU core only. Provider features are opt-in in `vc-core`:
+# Windows ML loads the system Windows App SDK Runtime ORT dynamically, CUDA pulls
+# the large CUDA EP, and native TensorRT avoids ORT entirely.
 ort = { version = "2.0.0-rc.12", features = ["preload-dylibs"] }
