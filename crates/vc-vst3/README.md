@@ -71,6 +71,29 @@ The default Windows package uses **Windows ML** through Windows App SDK Runtime
 only ships the small Windows App SDK bootstrapper DLL. CUDA and native TensorRT
 packages remain available as explicit cargo feature builds.
 
+### One-shot packaging (recommended)
+
+[`package.ps1`](package.ps1) runs the whole distribution pipeline for a chosen
+variant: `cargo xtask bundle` → (TensorRT) build the engine-builder helper →
+the matching `package-<variant>.ps1` populate step → stage `vc-vst3.vst3` +
+`vc-vst3.clap` + `LICENSE` + a generated `INSTALL.txt` → a versioned
+`dist\vc-vst3-<variant>-v<version>-win-x64.zip`.
+
+```powershell
+pwsh crates\vc-vst3\package.ps1                                  # Windows ML (default)
+pwsh crates\vc-vst3\package.ps1 -Variant cuda `
+  -CudaBin "...\CUDA\v12.9\bin" -CudnnBin "...\CUDNN\v9.22\bin\12.9\x64"
+pwsh crates\vc-vst3\package.ps1 -Variant tensorrt -BuilderSm sm86
+```
+
+Variant-specific options are forwarded to the populate script. Useful flags:
+`-OutDir <dir>` (default `dist\`), `-SkipBuild` (reuse `target\bundled`),
+`-NoZip` (populate only), `-Clean` (drop stale bundles first). For the `cuda`
+and `tensorrt` variants set up the matching CUDA/TensorRT toolchain on `PATH`
+first (e.g. dot-source [`scripts\activate.ps1`](../../scripts/activate.ps1)) —
+the script does not modify your environment. The steps below document the
+underlying cargo + populate commands the script orchestrates.
+
 ### Windows ML package (default, Windows)
 
 ```sh
@@ -225,5 +248,5 @@ and the CUDA / cuDNN runtime libraries. Two options:
 
 ## Licensing note
 
-Building the **VST3** target links nih-plug's GPLv3 VST3 bindings, so the
-resulting `.vst3` is GPLv3. The `.clap` bundle is not affected.
+Building the **VST3** target links the Steinberg VST3 SDK bindings (GPLv3) via
+nice-plug, so the resulting `.vst3` is GPLv3. The `.clap` bundle is not affected.
