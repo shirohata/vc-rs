@@ -6,6 +6,12 @@
 //! depend on it and drive `model_rvc::RvcPipeline::process` from their own I/O
 //! layer.
 
+// The TensorRT-only build (no `ort` feature) intentionally leaves a number of
+// ORT-supporting fields, constants, helpers, and run-mode parameters inert; they
+// exist only for the ONNX Runtime backend. The full (ORT) build still enforces
+// these lints, so real dead code there is still caught.
+#![cfg_attr(not(feature = "ort"), allow(dead_code, unused_variables))]
+
 mod provider;
 
 pub mod dsp;

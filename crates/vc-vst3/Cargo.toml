@@ -14,7 +14,9 @@ crate-type = ["cdylib", "lib"]
 # `--no-default-features --features tensorrt`, which drops the CUDA EP and runs
 # the GPU path through native TensorRT instead.
 default = ["cuda"]
-cuda = ["vc-core/cuda"]
+# The CUDA build bundles and preloads the ONNX Runtime CUDA provider DLLs, so it
+# needs the `ort` dependency. The TensorRT-only build drops ORT entirely.
+cuda = ["vc-core/cuda", "dep:ort"]
 tensorrt = ["vc-core/tensorrt"]
 
 [dependencies]
@@ -28,7 +30,7 @@ rfd = "0.15"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 anyhow.workspace = true
-ort.workspace = true
+ort = { workspace = true, optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_System_LibraryLoader"] }

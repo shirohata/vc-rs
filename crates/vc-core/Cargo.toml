@@ -9,20 +9,26 @@ description = "Reusable RVC voice conversion pipeline (model_rvc, dsp, sola)"
 # Enables `clap::ValueEnum` derivation on shared config enums (e.g. `Provider`)
 # so the CLI can use them directly as `value_enum` args. Plugins leave it off.
 clap = ["dep:clap"]
+# Enables the ONNX Runtime backend: the CPU execution provider (`Provider::Cpu`)
+# and all ORT-based inference. Pulls in the `ort` dependency. A TensorRT-only
+# build leaves this off and drops ORT entirely, so ORT and TensorRT can never
+# share a process. Structural model inspection uses the dependency-free
+# `onnx_meta` reader instead of an ORT session, so it works without this feature.
+ort = ["dep:ort"]
 # Enables native TensorRT support. This deliberately does not enable ONNX
 # Runtime's TensorRT EP; `Provider::TensorRt` builds serialized engines through
-# TensorRT's builder API and runs them through the native shim.
+# TensorRT's builder API and runs them through the native shim. Needs no ORT.
 tensorrt = []
-# Enables ONNX Runtime's CUDA execution provider (`Provider::Cuda`). Off by
-# default so a TensorRT-only build can drop the large CUDA EP binaries. When
-# disabled, selecting `Provider::Cuda` fails at session load with a clear error.
-cuda = ["ort/cuda"]
+# Enables ONNX Runtime's CUDA execution provider (`Provider::Cuda`). Implies the
+# `ort` backend. Off by default so a TensorRT-only build can drop the large CUDA
+# EP binaries. When disabled, selecting `Provider::Cuda` fails with a clear error.
+cuda = ["ort", "ort/cuda"]
 
 [dependencies]
 anyhow.workspace = true
 tracing.workspace = true
 rubato.workspace = true
-ort.workspace = true
+ort = { workspace = true, optional = true }
 audioadapter-buffers = "3"
 xxhash-rust = { version = "0.8.15", default-features = false, features = ["xxh3"] }
 clap = { version = "4.5", features = ["derive"], optional = true }

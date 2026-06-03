@@ -1,19 +1,28 @@
 use std::env;
+#[cfg(feature = "ort")]
 use std::ffi::CString;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+#[cfg(feature = "ort")]
 use std::time::Instant;
 
 use anyhow::{anyhow, bail, Context, Result};
+#[cfg(feature = "ort")]
 use ort::memory::{AllocationDevice, Allocator, AllocatorType, MemoryInfo, MemoryType};
+#[cfg(feature = "ort")]
 use ort::session::{IoBinding, Session};
+#[cfg(feature = "ort")]
 use ort::value::Tensor;
+#[cfg(feature = "ort")]
 use ort::{ortsys, AsPointer};
-use tracing::{info, warn};
+#[cfg(feature = "ort")]
+use tracing::info;
+use tracing::warn;
 
 use crate::Provider;
 
+#[cfg(feature = "ort")]
 use super::sessions::HubertEmbedderSession;
 use super::shape::onnx_silence_front_feature_frames;
 
@@ -243,6 +252,7 @@ impl TensorRtSessionPurpose {
     }
 }
 
+#[cfg(feature = "ort")]
 pub(super) struct TensorRtWarmupInfo {
     pub(super) rvc_feature_len: usize,
     pub(super) contentvec_output_shape: Vec<i64>,
@@ -252,6 +262,7 @@ pub(super) struct TensorRtWarmupInfo {
 // pipeline-owned so both sessions bind one stable CUDA address; per-session
 // waveform tensors would duplicate H2D work and break the point of CUDA Graph
 // input-address capture.
+#[cfg(feature = "ort")]
 pub(super) struct TensorRtSharedWaveform {
     pub(super) host_waveform: Tensor<f32>,
     pub(super) device_waveform: Tensor<f32>,
@@ -260,6 +271,7 @@ pub(super) struct TensorRtSharedWaveform {
     pub(super) shape: Vec<usize>,
 }
 
+#[cfg(feature = "ort")]
 impl TensorRtSharedWaveform {
     pub(super) fn new(session: &Session, shape: &[usize]) -> Result<Self> {
         let host_input_allocator = tensor_rt_pinned_allocator(session, MemoryType::CPUInput)?;
@@ -295,6 +307,7 @@ impl TensorRtSharedWaveform {
     }
 }
 
+#[cfg(feature = "ort")]
 fn validate_shared_waveform_shape(
     shared_waveform: &TensorRtSharedWaveform,
     expected_shape: &[usize],
@@ -310,6 +323,7 @@ fn validate_shared_waveform_shape(
     Ok(())
 }
 
+#[cfg(feature = "ort")]
 pub(super) struct HubertTensorRtPinnedBinding {
     pub(super) binding: IoBinding,
     pub(super) audio: Tensor<f32>,
@@ -320,6 +334,7 @@ pub(super) struct HubertTensorRtPinnedBinding {
     pub(super) output_shape: Vec<usize>,
 }
 
+#[cfg(feature = "ort")]
 impl HubertTensorRtPinnedBinding {
     pub(super) fn new(
         session: &Session,
@@ -356,6 +371,7 @@ impl HubertTensorRtPinnedBinding {
     }
 }
 
+#[cfg(feature = "ort")]
 pub(super) struct RmvpeTensorRtPinnedBinding {
     pub(super) binding: IoBinding,
     pub(super) waveform: Tensor<f32>,
@@ -368,6 +384,7 @@ pub(super) struct RmvpeTensorRtPinnedBinding {
     pub(super) bound_threshold: f32,
 }
 
+#[cfg(feature = "ort")]
 impl RmvpeTensorRtPinnedBinding {
     pub(super) fn new(
         session: &Session,
@@ -418,6 +435,7 @@ impl RmvpeTensorRtPinnedBinding {
     }
 }
 
+#[cfg(feature = "ort")]
 pub(super) struct RvcTensorRtPinnedBinding {
     pub(super) binding: IoBinding,
     pub(super) feats: Tensor<f32>,
@@ -435,6 +453,7 @@ pub(super) struct RvcTensorRtPinnedBinding {
     pub(super) bound_sid: i64,
 }
 
+#[cfg(feature = "ort")]
 impl RvcTensorRtPinnedBinding {
     pub(super) fn new(
         session: &Session,
@@ -512,6 +531,7 @@ impl RvcTensorRtPinnedBinding {
     }
 }
 
+#[cfg(feature = "ort")]
 pub(super) struct HubertTensorRtGraphBinding {
     pub(super) binding: IoBinding,
     pub(super) host_audio: Option<Tensor<f32>>,
@@ -526,6 +546,7 @@ pub(super) struct HubertTensorRtGraphBinding {
     pub(super) shared_waveform_input: bool,
 }
 
+#[cfg(feature = "ort")]
 impl HubertTensorRtGraphBinding {
     pub(super) fn new(
         session: &Session,
@@ -655,6 +676,7 @@ impl HubertTensorRtGraphBinding {
     }
 }
 
+#[cfg(feature = "ort")]
 pub(super) struct RmvpeTensorRtGraphBinding {
     pub(super) binding: IoBinding,
     pub(super) host_waveform: Option<Tensor<f32>>,
@@ -672,6 +694,7 @@ pub(super) struct RmvpeTensorRtGraphBinding {
     pub(super) shared_waveform_input: bool,
 }
 
+#[cfg(feature = "ort")]
 impl RmvpeTensorRtGraphBinding {
     pub(super) fn new(
         session: &Session,
@@ -803,6 +826,7 @@ impl RmvpeTensorRtGraphBinding {
     }
 }
 
+#[cfg(feature = "ort")]
 pub(super) struct RvcTensorRtGraphBinding {
     pub(super) binding: IoBinding,
     pub(super) host_feats: Tensor<f32>,
@@ -827,6 +851,7 @@ pub(super) struct RvcTensorRtGraphBinding {
     pub(super) bound_sid: i64,
 }
 
+#[cfg(feature = "ort")]
 impl RvcTensorRtGraphBinding {
     pub(super) fn new(
         session: &Session,
@@ -965,16 +990,19 @@ impl RvcTensorRtGraphBinding {
     }
 }
 
+#[cfg(feature = "ort")]
 pub(super) enum HubertTensorRtBinding {
     Pinned(HubertTensorRtPinnedBinding),
     CudaGraph(HubertTensorRtGraphBinding),
 }
 
+#[cfg(feature = "ort")]
 pub(super) enum RmvpeTensorRtBinding {
     Pinned(RmvpeTensorRtPinnedBinding),
     CudaGraph(RmvpeTensorRtGraphBinding),
 }
 
+#[cfg(feature = "ort")]
 pub(super) enum RvcTensorRtBinding {
     Pinned(RvcTensorRtPinnedBinding),
     CudaGraph(RvcTensorRtGraphBinding),
@@ -1042,6 +1070,7 @@ pub(super) fn derive_rvc_feature_len(
     Ok(feature_len)
 }
 
+#[cfg(feature = "ort")]
 pub(super) fn tensor_rt_warmup_feature_len(
     embedder: &mut HubertEmbedderSession,
     input_samples_16k: usize,
@@ -1188,6 +1217,7 @@ pub(super) fn provider_uses_fixed_shape(provider: Provider) -> bool {
     provider.is_tensorrt() || provider.is_cuda()
 }
 
+#[cfg(feature = "ort")]
 pub(super) fn tensor_rt_pinned_allocator(
     session: &Session,
     memory_type: MemoryType,
@@ -1203,6 +1233,7 @@ pub(super) fn tensor_rt_pinned_allocator(
         .map_err(|err| anyhow!("failed to create CUDA pinned allocator ({memory_type:?}): {err}"))
 }
 
+#[cfg(feature = "ort")]
 pub(super) fn tensor_rt_device_allocator(session: &Session) -> Result<Allocator> {
     let memory_info = MemoryInfo::new(
         AllocationDevice::CUDA,
@@ -1215,6 +1246,7 @@ pub(super) fn tensor_rt_device_allocator(session: &Session) -> Result<Allocator>
         .map_err(|err| anyhow!("failed to create CUDA device allocator: {err}"))
 }
 
+#[cfg(feature = "ort")]
 pub(super) fn bind_output_tensor(
     binding: &mut IoBinding,
     output_name: &str,
@@ -1231,6 +1263,7 @@ pub(super) fn bind_output_tensor(
 // data at bind time, so changing inputs must be re-bound before run_binding.
 // The CUDA Graph path must not copy this pattern: graph capture requires stable
 // CUDA device tensor addresses that remain bound for the session lifetime.
+#[cfg(feature = "ort")]
 pub(super) fn copy_f32_tensor(tensor: &mut Tensor<f32>, src: &[f32], name: &str) -> Result<()> {
     let (_, dst) = tensor.extract_tensor_mut();
     if dst.len() != src.len() {
@@ -1244,6 +1277,7 @@ pub(super) fn copy_f32_tensor(tensor: &mut Tensor<f32>, src: &[f32], name: &str)
     Ok(())
 }
 
+#[cfg(feature = "ort")]
 pub(super) fn zero_f32_tensor(tensor: &mut Tensor<f32>, name: &str) -> Result<()> {
     let (_, dst) = tensor.extract_tensor_mut();
     if dst.is_empty() {
@@ -1253,6 +1287,7 @@ pub(super) fn zero_f32_tensor(tensor: &mut Tensor<f32>, name: &str) -> Result<()
     Ok(())
 }
 
+#[cfg(feature = "ort")]
 pub(super) fn copy_i64_tensor(tensor: &mut Tensor<i64>, src: &[i64], name: &str) -> Result<()> {
     let (_, dst) = tensor.extract_tensor_mut();
     if dst.len() != src.len() {
@@ -1266,6 +1301,7 @@ pub(super) fn copy_i64_tensor(tensor: &mut Tensor<i64>, src: &[i64], name: &str)
     Ok(())
 }
 
+#[cfg(feature = "ort")]
 pub(super) fn fill_i64_tensor(tensor: &mut Tensor<i64>, value: i64, name: &str) -> Result<()> {
     let (_, dst) = tensor.extract_tensor_mut();
     if dst.is_empty() {
@@ -1275,6 +1311,7 @@ pub(super) fn fill_i64_tensor(tensor: &mut Tensor<i64>, value: i64, name: &str) 
     Ok(())
 }
 
+#[cfg(feature = "ort")]
 pub(super) fn write_scalar_f32_tensor(
     tensor: &mut Tensor<f32>,
     value: f32,
@@ -1291,6 +1328,7 @@ pub(super) fn write_scalar_f32_tensor(
     Ok(())
 }
 
+#[cfg(feature = "ort")]
 pub(super) fn write_scalar_i64_tensor(
     tensor: &mut Tensor<i64>,
     value: i64,
@@ -1314,6 +1352,7 @@ pub(super) fn write_scalar_i64_tensor(
 // model path must remain outside the real-time audio callback. The owning model
 // runs through &mut self; do not introduce concurrent runs against a
 // graph-enabled session.
+#[cfg(feature = "ort")]
 pub(super) fn copy_f32_tensor_to_device(
     host_tensor: &Tensor<f32>,
     device_tensor: &mut Tensor<f32>,
@@ -1324,6 +1363,7 @@ pub(super) fn copy_f32_tensor_to_device(
         .with_context(|| format!("failed to copy TensorRT input '{name}' to CUDA device tensor"))
 }
 
+#[cfg(feature = "ort")]
 pub(super) fn copy_i64_tensor_to_device(
     host_tensor: &Tensor<i64>,
     device_tensor: &mut Tensor<i64>,
@@ -1334,6 +1374,7 @@ pub(super) fn copy_i64_tensor_to_device(
         .with_context(|| format!("failed to copy TensorRT input '{name}' to CUDA device tensor"))
 }
 
+#[cfg(feature = "ort")]
 pub(super) fn copy_f32_tensor_to_host(
     device_tensor: &Tensor<f32>,
     host_tensor: &mut Tensor<f32>,
@@ -1344,6 +1385,7 @@ pub(super) fn copy_f32_tensor_to_host(
         .with_context(|| format!("failed to copy TensorRT output '{name}' to host tensor"))
 }
 
+#[cfg(feature = "ort")]
 pub(super) fn validate_host_output_shape(
     tensor: &Tensor<f32>,
     expected_shape: &[usize],

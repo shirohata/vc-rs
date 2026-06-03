@@ -21,10 +21,11 @@ use super::shape::{
 };
 use super::stream::RvcStreamState;
 use super::tensorrt::{
-    derive_rvc_feature_len, tensor_rt_model_cache_key, tensor_rt_warmup_feature_len, ModelRole,
-    TensorRtRunMode, TensorRtSessionProfile, TensorRtSessionPurpose, TensorRtSharedWaveform,
-    CUDA_GRAPH_ENV,
+    derive_rvc_feature_len, tensor_rt_model_cache_key, ModelRole, TensorRtRunMode,
+    TensorRtSessionProfile, TensorRtSessionPurpose, CUDA_GRAPH_ENV,
 };
+#[cfg(feature = "ort")]
+use super::tensorrt::{tensor_rt_warmup_feature_len, TensorRtSharedWaveform};
 
 const SKIP_SILENT_CHUNKS: bool = false;
 
@@ -32,6 +33,7 @@ pub struct RvcPipeline {
     embedder: HubertEmbedderSession,
     pitch: RmvpePitchSession,
     rvc: RvcModelSession,
+    #[cfg(feature = "ort")]
     shared_waveform: Option<TensorRtSharedWaveform>,
     speaker_id: i64,
     pitch_shift: f32,
@@ -116,6 +118,7 @@ impl RvcPipeline {
                 TensorRtSessionPurpose::Main,
             )?,
             rvc,
+            #[cfg(feature = "ort")]
             shared_waveform: None,
             speaker_id: config.speaker_id,
             pitch_shift: config.pitch_shift,
@@ -196,9 +199,18 @@ impl RvcPipeline {
         let rmvpe_profile =
             TensorRtSessionProfile::single_input(ModelRole::Rmvpe, "waveform", input_samples_16k)
                 .with_optional_model_cache_key(rmvpe_model_cache_key);
+        #[cfg(feature = "ort")]
         let shared_waveform_shape = [1usize, input_samples_16k];
+        #[cfg(feature = "ort")]
+        let mut shared_waveform: Option<TensorRtSharedWaveform> = None;
 
-        let (embedder, pitch, rvc, shared_waveform) = if tensor_rt_run_mode.cuda_graph() {
+        let (embedder, pitch, rvc) = if tensor_rt_run_mode.cuda_graph() {
+            #[cfg(not(feature = "ort"))]
+            {
+                unreachable!("cuda_graph run mode requires the `ort` feature")
+            }
+            #[cfg(feature = "ort")]
+            {
             let mut embedder_probe = HubertEmbedderSession::load(
                 config.embedder,
                 config.provider,
@@ -263,7 +275,7 @@ impl RvcPipeline {
                 tensor_rt_run_mode,
                 TensorRtSessionPurpose::Final,
             )?;
-            let shared_waveform = if tensor_rt_run_mode.device_io() {
+            shared_waveform = if tensor_rt_run_mode.device_io() {
                 Some(TensorRtSharedWaveform::new(
                     &embedder.session,
                     &shared_waveform_shape,
@@ -298,7 +310,8 @@ impl RvcPipeline {
                 TensorRtSessionPurpose::Final,
             )?;
             rvc.enable_tensorrt_binding(&rvc_output_shape, config.speaker_id)?;
-            (embedder, pitch, rvc, shared_waveform)
+            (embedder, pitch, rvc)
+            }
         } else if config.provider.is_tensorrt() {
             // Native TensorRT engines self-report their fixed output shapes after
             // deserialize, so there is no warmup inference here: the RVC
@@ -307,7 +320,7 @@ impl RvcPipeline {
             // (native_tensorrt.rs has no in-process Builder), so the historical
             // "build RVC before other TensorRT runtimes in the same process"
             // ordering no longer applies and ContentVec can load first.
-            let mut embedder = HubertEmbedderSession::load(
+            let embedder = HubertEmbedderSession::load(
                 config.embedder,
                 config.provider,
                 expected_feat_channels,
@@ -337,11 +350,6 @@ impl RvcPipeline {
                 rmvpe_profile.profile_shapes,
                 rvc_profile.profile_shapes
             );
-            // Ignored by native engines (enable_tensorrt_binding early-returns);
-            // derived here only for the binding log on the ORT-IoBinding path.
-            let contentvec_output_shape = vec![1, contentvec_frames as i64, expected_feat_channels];
-            embedder.enable_tensorrt_binding(&contentvec_output_shape, None)?;
-
             let mut rvc = RvcModelSession::load(
                 config.model,
                 config.provider,
@@ -350,12 +358,14 @@ impl RvcPipeline {
                 tensor_rt_run_mode,
                 TensorRtSessionPurpose::Final,
             )?;
-            let rvc_output_shape = rvc.warmup_output_shape(
+            // Validates the engine frame/channel counts against the runtime
+            // profile; native engines self-report their output shape and use no
+            // ORT IoBinding, so the returned shape is intentionally discarded.
+            rvc.warmup_output_shape(
                 feature_len,
                 rvc_info.expected_feat_channels,
                 config.speaker_id,
             )?;
-            rvc.enable_tensorrt_binding(&rvc_output_shape, config.speaker_id)?;
 
             let mut pitch = RmvpePitchSession::load(
                 config.f0_model,
@@ -364,12 +374,19 @@ impl RvcPipeline {
                 tensor_rt_run_mode,
                 TensorRtSessionPurpose::Final,
             )?;
-            let rmvpe_output_shape =
-                pitch.warmup_output_shape(input_samples_16k, config.f0_threshold)?;
-            pitch.enable_tensorrt_binding(&rmvpe_output_shape, config.f0_threshold, None)?;
+            pitch.warmup_output_shape(input_samples_16k, config.f0_threshold)?;
 
-            (embedder, pitch, rvc, None)
+            (embedder, pitch, rvc)
         } else {
+            #[cfg(not(feature = "ort"))]
+            {
+                bail!(
+                    "provider {} requires the `ort` feature; this build supports native TensorRT only",
+                    config.provider.label()
+                )
+            }
+            #[cfg(feature = "ort")]
+            {
             let mut embedder = HubertEmbedderSession::load(
                 config.embedder,
                 config.provider,
@@ -385,7 +402,7 @@ impl RvcPipeline {
                 extra_convert_samples,
             )?;
             let feature_len = warmup.rvc_feature_len;
-            let shared_waveform = if tensor_rt_run_mode.device_io() {
+            shared_waveform = if tensor_rt_run_mode.device_io() {
                 Some(TensorRtSharedWaveform::new(
                     &embedder.session,
                     &shared_waveform_shape,
@@ -443,13 +460,15 @@ impl RvcPipeline {
                 config.speaker_id,
             )?;
             rvc.enable_tensorrt_binding(&rvc_output_shape, config.speaker_id)?;
-            (embedder, pitch, rvc, shared_waveform)
+            (embedder, pitch, rvc)
+            }
         };
 
         Ok(Self {
             embedder,
             pitch,
             rvc,
+            #[cfg(feature = "ort")]
             shared_waveform,
             speaker_id: config.speaker_id,
             pitch_shift: config.pitch_shift,
@@ -526,6 +545,7 @@ impl VoiceModel for RvcPipeline {
 
         // Features
         let embedder_start = Instant::now();
+        #[cfg(feature = "ort")]
         if let Some(shared_waveform) = self.shared_waveform.as_mut() {
             // Shared CUDA input is charged to embedder_time because the public
             // metrics do not have a separate transfer bucket. Keep this copy
@@ -748,7 +768,6 @@ impl std::fmt::Debug for RvcPipeline {
             .field("auto_output_gain", &self.auto_output_gain)
             .field("target_output_rms", &self.target_output_rms)
             .field("max_output_gain", &self.max_output_gain)
-            .field("shared_waveform", &self.shared_waveform.is_some())
             .finish_non_exhaustive()
     }
 }

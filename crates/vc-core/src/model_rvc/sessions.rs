@@ -1,26 +1,38 @@
-use std::collections::HashSet;
 use std::path::Path;
+#[cfg(feature = "ort")]
 use std::time::Instant;
 
 use anyhow::{anyhow, bail, Context, Result};
+#[cfg(feature = "ort")]
 use ort::ep;
+#[cfg(feature = "ort")]
 use ort::memory::Allocator;
+#[cfg(feature = "ort")]
 use ort::session::builder::GraphOptimizationLevel;
+#[cfg(feature = "ort")]
 use ort::session::{IoBinding, Session};
+#[cfg(feature = "ort")]
 use ort::value::{Tensor, TensorRef, ValueType};
-use tracing::{debug, info};
+#[cfg(feature = "ort")]
+use tracing::debug;
+use tracing::info;
 
 use crate::Provider;
 
 use super::feature::FeatureTensor;
 use super::native_tensorrt::{NativeContentVecEngine, NativeRmvpeEngine, NativeRvcEngine};
+use super::onnx_meta::read_model_io;
 use super::tensorrt::*;
 
 pub(super) struct HubertEmbedderSession {
+    // Present only in the ORT build, where it backs CPU/CUDA inference. The
+    // native TensorRT-only build drops ORT entirely and runs through `native`.
+    #[cfg(feature = "ort")]
     pub(super) session: Session,
     pub(super) provider: Provider,
     pub(super) tensor_rt_profile: Option<TensorRtSessionProfile>,
     pub(super) tensor_rt_run_mode: TensorRtRunMode,
+    #[cfg(feature = "ort")]
     pub(super) tensor_rt_binding: Option<HubertTensorRtBinding>,
     native: Option<NativeContentVecEngine>,
     pub(super) input_name: String,
@@ -37,21 +49,11 @@ impl HubertEmbedderSession {
         tensor_rt_run_mode: TensorRtRunMode,
         tensor_rt_session_purpose: TensorRtSessionPurpose,
     ) -> Result<Self> {
-        let session_provider = if provider.is_tensorrt() {
-            Provider::Cpu
-        } else {
-            provider
-        };
-        let session = load_session(
-            path,
-            session_provider,
-            ModelRole::ContentVec,
-            tensor_rt_profile.as_ref(),
-            tensor_rt_run_mode,
-            tensor_rt_session_purpose,
-        )?;
-        let input_name = single_input_name(&session)?;
-        let output_name = select_embedder_output(&session, expected_channels, requested_output)?;
+        // Names/validation come from the provider-neutral ONNX reader so the
+        // native TensorRT path needs no ORT session.
+        let io = read_model_io(path)?;
+        let input_name = io.single_input_name()?.to_string();
+        let output_name = io.select_embedder_output(expected_channels, requested_output)?;
         let native = if provider.is_tensorrt() {
             let profile = tensor_rt_profile.as_ref().ok_or_else(|| {
                 anyhow!("native TensorRT ContentVec requires a fixed-shape profile")
@@ -66,6 +68,25 @@ impl HubertEmbedderSession {
         } else {
             None
         };
+        // In the ORT build the session backs CPU/CUDA inference; the native
+        // TensorRT path keeps a CPU session only as an unused placeholder there
+        // (it is compiled out of the TensorRT-only build).
+        #[cfg(feature = "ort")]
+        let session = {
+            let session_provider = if provider.is_tensorrt() {
+                Provider::Cpu
+            } else {
+                provider
+            };
+            load_session(
+                path,
+                session_provider,
+                ModelRole::ContentVec,
+                tensor_rt_profile.as_ref(),
+                tensor_rt_run_mode,
+                tensor_rt_session_purpose,
+            )?
+        };
         info!(
             "loaded embedder: {} input={} output={}",
             path.display(),
@@ -73,10 +94,12 @@ impl HubertEmbedderSession {
             output_name
         );
         Ok(Self {
+            #[cfg(feature = "ort")]
             session,
             provider,
             tensor_rt_profile,
             tensor_rt_run_mode,
+            #[cfg(feature = "ort")]
             tensor_rt_binding: None,
             native,
             input_name,
@@ -91,6 +114,7 @@ impl HubertEmbedderSession {
         self.native.as_ref().map(|native| native.output_frames())
     }
 
+    #[cfg(feature = "ort")]
     pub(super) fn enable_tensorrt_binding(
         &mut self,
         output_shape: &[i64],
@@ -168,15 +192,22 @@ impl HubertEmbedderSession {
             self.input_name.as_str(),
             &input_shape,
         )?;
+        #[cfg(feature = "ort")]
         if self.tensor_rt_binding.is_some() {
             return self.extract_with_binding(audio_16k);
         }
         if let Some(native) = self.native.as_mut() {
             return native.extract(audio_16k);
         }
-        self.extract_with_session_run(audio_16k, &input_shape)
+        #[cfg(feature = "ort")]
+        {
+            self.extract_with_session_run(audio_16k, &input_shape)
+        }
+        #[cfg(not(feature = "ort"))]
+        bail!("ContentVec session inference requires the `ort` feature; this build supports native TensorRT only")
     }
 
+    #[cfg(feature = "ort")]
     pub(super) fn extract_with_session_run(
         &mut self,
         audio_16k: &[f32],
@@ -210,6 +241,7 @@ impl HubertEmbedderSession {
         })
     }
 
+    #[cfg(feature = "ort")]
     pub(super) fn extract_with_binding(&mut self, audio_16k: &[f32]) -> Result<FeatureTensor> {
         let binding = self
             .tensor_rt_binding
@@ -309,10 +341,12 @@ impl HubertEmbedderSession {
 }
 
 pub(super) struct RmvpePitchSession {
+    #[cfg(feature = "ort")]
     pub(super) session: Session,
     pub(super) provider: Provider,
     pub(super) tensor_rt_profile: Option<TensorRtSessionProfile>,
     pub(super) tensor_rt_run_mode: TensorRtRunMode,
+    #[cfg(feature = "ort")]
     pub(super) tensor_rt_binding: Option<RmvpeTensorRtBinding>,
     native: Option<NativeRmvpeEngine>,
 }
@@ -325,21 +359,9 @@ impl RmvpePitchSession {
         tensor_rt_run_mode: TensorRtRunMode,
         tensor_rt_session_purpose: TensorRtSessionPurpose,
     ) -> Result<Self> {
-        let session_provider = if provider.is_tensorrt() {
-            Provider::Cpu
-        } else {
-            provider
-        };
-        let session = load_session(
-            path,
-            session_provider,
-            ModelRole::Rmvpe,
-            tensor_rt_profile.as_ref(),
-            tensor_rt_run_mode,
-            tensor_rt_session_purpose,
-        )?;
-        require_inputs(&session, &["waveform", "threshold"])?;
-        require_output(&session, "pitchf")?;
+        let io = read_model_io(path)?;
+        io.require_inputs(&["waveform", "threshold"])?;
+        io.require_output("pitchf")?;
         let native = if provider.is_tensorrt() {
             let profile = tensor_rt_profile
                 .as_ref()
@@ -348,12 +370,30 @@ impl RmvpePitchSession {
         } else {
             None
         };
+        #[cfg(feature = "ort")]
+        let session = {
+            let session_provider = if provider.is_tensorrt() {
+                Provider::Cpu
+            } else {
+                provider
+            };
+            load_session(
+                path,
+                session_provider,
+                ModelRole::Rmvpe,
+                tensor_rt_profile.as_ref(),
+                tensor_rt_run_mode,
+                tensor_rt_session_purpose,
+            )?
+        };
         info!("loaded RMVPE f0 model: {}", path.display());
         Ok(Self {
+            #[cfg(feature = "ort")]
             session,
             provider,
             tensor_rt_profile,
             tensor_rt_run_mode,
+            #[cfg(feature = "ort")]
             tensor_rt_binding: None,
             native,
         })
@@ -374,26 +414,32 @@ impl RmvpePitchSession {
         if let Some(native) = self.native.as_ref() {
             return Ok(native.warmup_output_shape());
         }
-        let waveform = Tensor::from_array((waveform_shape, vec![0.0f32; audio_16k_samples]))?;
-        let threshold = Tensor::from_array(([1usize], vec![threshold]))?;
-        let run_start = Instant::now();
-        let outputs = self.session.run(ort::inputs![
-            "waveform" => waveform,
-            "threshold" => threshold,
-        ])?;
-        debug!(
-            "rmvpe warmup session.run backend={} input=waveform shape={} elapsed_us={}",
-            self.provider.label(),
-            format_usize_shape(&waveform_shape),
-            run_start.elapsed().as_micros()
-        );
-        let value = outputs
-            .get("pitchf")
-            .ok_or_else(|| anyhow!("RMVPE output 'pitchf' not found"))?;
-        let (shape, _) = value.try_extract_tensor::<f32>()?;
-        Ok(shape.to_vec())
+        #[cfg(feature = "ort")]
+        {
+            let waveform = Tensor::from_array((waveform_shape, vec![0.0f32; audio_16k_samples]))?;
+            let threshold = Tensor::from_array(([1usize], vec![threshold]))?;
+            let run_start = Instant::now();
+            let outputs = self.session.run(ort::inputs![
+                "waveform" => waveform,
+                "threshold" => threshold,
+            ])?;
+            debug!(
+                "rmvpe warmup session.run backend={} input=waveform shape={} elapsed_us={}",
+                self.provider.label(),
+                format_usize_shape(&waveform_shape),
+                run_start.elapsed().as_micros()
+            );
+            let value = outputs
+                .get("pitchf")
+                .ok_or_else(|| anyhow!("RMVPE output 'pitchf' not found"))?;
+            let (shape, _) = value.try_extract_tensor::<f32>()?;
+            Ok(shape.to_vec())
+        }
+        #[cfg(not(feature = "ort"))]
+        bail!("RMVPE warmup requires the `ort` feature; native TensorRT reports its own shape")
     }
 
+    #[cfg(feature = "ort")]
     pub(super) fn enable_tensorrt_binding(
         &mut self,
         output_shape: &[i64],
@@ -471,15 +517,22 @@ impl RmvpePitchSession {
             "waveform",
             &waveform_shape,
         )?;
+        #[cfg(feature = "ort")]
         if self.tensor_rt_binding.is_some() {
             return self.extract_with_binding(audio_16k, pitch_shift, threshold);
         }
         if let Some(native) = self.native.as_mut() {
             return native.extract(audio_16k, pitch_shift, threshold);
         }
-        self.extract_with_session_run(audio_16k, pitch_shift, threshold, &waveform_shape)
+        #[cfg(feature = "ort")]
+        {
+            self.extract_with_session_run(audio_16k, pitch_shift, threshold, &waveform_shape)
+        }
+        #[cfg(not(feature = "ort"))]
+        bail!("RMVPE session inference requires the `ort` feature; this build supports native TensorRT only")
     }
 
+    #[cfg(feature = "ort")]
     pub(super) fn extract_with_session_run(
         &mut self,
         audio_16k: &[f32],
@@ -509,6 +562,7 @@ impl RmvpePitchSession {
         Ok(data.iter().map(|f0| f0 * factor).collect())
     }
 
+    #[cfg(feature = "ort")]
     pub(super) fn extract_with_binding(
         &mut self,
         audio_16k: &[f32],
@@ -601,6 +655,7 @@ impl RmvpePitchSession {
 // CPU output binding is deliberately output-only: inputs still borrow the
 // worker-owned buffers for each synchronous run, while the RVC "audio" tensor
 // keeps stable preallocated storage across chunks with the same shapes.
+#[cfg(feature = "ort")]
 struct RvcCpuOutputBinding {
     binding: IoBinding,
     output: Tensor<f32>,
@@ -609,6 +664,7 @@ struct RvcCpuOutputBinding {
     pitch_shape: Vec<usize>,
 }
 
+#[cfg(feature = "ort")]
 impl RvcCpuOutputBinding {
     fn new(
         session: &Session,
@@ -639,12 +695,15 @@ impl RvcCpuOutputBinding {
 }
 
 pub(super) struct RvcModelSession {
+    #[cfg(feature = "ort")]
     pub(super) session: Option<Session>,
     pub(super) provider: Provider,
     pub(super) tensor_rt_profile: Option<TensorRtSessionProfile>,
     pub(super) tensor_rt_run_mode: TensorRtRunMode,
+    #[cfg(feature = "ort")]
     pub(super) tensor_rt_binding: Option<RvcTensorRtBinding>,
     native_rvc: Option<NativeRvcEngine>,
+    #[cfg(feature = "ort")]
     cpu_output_binding: Option<RvcCpuOutputBinding>,
     pub(super) expected_feat_channels: i64,
 }
@@ -678,42 +737,56 @@ impl RvcModelSession {
                 tensor_rt_session_purpose.label()
             );
             return Ok(Self {
+                #[cfg(feature = "ort")]
                 session: None,
                 provider,
                 tensor_rt_profile,
                 tensor_rt_run_mode,
+                #[cfg(feature = "ort")]
                 tensor_rt_binding: None,
                 native_rvc: Some(native_rvc),
+                #[cfg(feature = "ort")]
                 cpu_output_binding: None,
                 expected_feat_channels,
             });
         }
-        let session = load_session(
-            path,
-            provider,
-            ModelRole::Rvc,
-            tensor_rt_profile.as_ref(),
-            tensor_rt_run_mode,
-            tensor_rt_session_purpose,
-        )?;
-        require_inputs(&session, &["feats", "p_len", "pitch", "pitchf", "sid"])?;
-        require_output(&session, "audio")?;
-        let expected_feat_channels = match expected_feat_channels_override {
-            Some(channels) => channels,
-            None => expected_feat_channels(&session)?,
-        };
-        validate_rvc_metadata(&session)?;
-        info!("loaded RVC model: {}", path.display());
-        Ok(Self {
-            session: Some(session),
-            provider,
-            tensor_rt_profile,
-            tensor_rt_run_mode,
-            tensor_rt_binding: None,
-            native_rvc: None,
-            cpu_output_binding: None,
-            expected_feat_channels,
-        })
+        // CPU/CUDA only: validate via the provider-neutral reader, then load the
+        // ORT session for inference. Unreachable in the TensorRT-only build.
+        #[cfg(feature = "ort")]
+        {
+            let io = read_model_io(path)?;
+            io.require_inputs(&["feats", "p_len", "pitch", "pitchf", "sid"])?;
+            io.require_output("audio")?;
+            let expected_feat_channels = match expected_feat_channels_override {
+                Some(channels) => channels,
+                None => io.expected_feat_channels()?,
+            };
+            io.validate_rvc_metadata()?;
+            let session = load_session(
+                path,
+                provider,
+                ModelRole::Rvc,
+                tensor_rt_profile.as_ref(),
+                tensor_rt_run_mode,
+                tensor_rt_session_purpose,
+            )?;
+            info!("loaded RVC model: {}", path.display());
+            Ok(Self {
+                session: Some(session),
+                provider,
+                tensor_rt_profile,
+                tensor_rt_run_mode,
+                tensor_rt_binding: None,
+                native_rvc: None,
+                cpu_output_binding: None,
+                expected_feat_channels,
+            })
+        }
+        #[cfg(not(feature = "ort"))]
+        bail!(
+            "provider {} requires the `ort` feature; this build supports native TensorRT only",
+            provider.label()
+        )
     }
 
     pub(super) fn warmup_output_shape(
@@ -746,6 +819,13 @@ impl RvcModelSession {
                 i64::try_from(native.output_len()).context("native RVC output length overflow")?
             ]);
         }
+        #[cfg(not(feature = "ort"))]
+        {
+            let _ = (feature_len, feature_channels, speaker_id);
+            bail!("RVC warmup requires the `ort` feature; native TensorRT reports its own shape")
+        }
+        #[cfg(feature = "ort")]
+        {
         let feats_shape = vec![1i64, feature_len as i64, feature_channels];
         let feats_shape_usize = i64_shape_to_usize(&feats_shape, "feats")?;
         validate_tensorrt_input_shape(
@@ -799,8 +879,10 @@ impl RvcModelSession {
             .ok_or_else(|| anyhow!("RVC output 'audio' not found"))?;
         let (shape, _) = value.try_extract_tensor::<f32>()?;
         Ok(shape.to_vec())
+        }
     }
 
+    #[cfg(feature = "ort")]
     pub(super) fn enable_tensorrt_binding(
         &mut self,
         output_shape: &[i64],
@@ -875,6 +957,7 @@ impl RvcModelSession {
         Ok(())
     }
 
+    #[cfg(feature = "ort")]
     fn enable_cpu_output_binding(
         &mut self,
         feats_shape: &[usize],
@@ -933,16 +1016,29 @@ impl RvcModelSession {
         if let Some(native) = self.native_rvc.as_mut() {
             return native.infer(feats, pitch, pitchf, speaker_id);
         }
-        if self.tensor_rt_binding.is_some() {
-            return self.infer_with_binding(feats, frame_len, pitch, pitchf, speaker_id);
-        }
-        if self.provider == Provider::Cpu
-            && self
-                .cpu_output_binding
-                .as_ref()
-                .is_some_and(|binding| binding.matches_input(&feats_shape_usize, &pitch_shape))
+        #[cfg(feature = "ort")]
         {
-            return self.infer_with_cpu_output_binding(
+            if self.tensor_rt_binding.is_some() {
+                return self.infer_with_binding(feats, frame_len, pitch, pitchf, speaker_id);
+            }
+            if self.provider == Provider::Cpu
+                && self
+                    .cpu_output_binding
+                    .as_ref()
+                    .is_some_and(|binding| binding.matches_input(&feats_shape_usize, &pitch_shape))
+            {
+                return self.infer_with_cpu_output_binding(
+                    feats,
+                    feats_shape,
+                    &feats_shape_usize,
+                    frame_len,
+                    pitch,
+                    pitchf,
+                    speaker_id,
+                    &pitch_shape,
+                );
+            }
+            self.infer_with_session_run(
                 feats,
                 feats_shape,
                 &feats_shape_usize,
@@ -951,22 +1047,15 @@ impl RvcModelSession {
                 pitchf,
                 speaker_id,
                 &pitch_shape,
-            );
+            )
         }
-        self.infer_with_session_run(
-            feats,
-            feats_shape,
-            &feats_shape_usize,
-            frame_len,
-            pitch,
-            pitchf,
-            speaker_id,
-            &pitch_shape,
-        )
+        #[cfg(not(feature = "ort"))]
+        bail!("RVC session inference requires the `ort` feature; this build supports native TensorRT only")
     }
 
     // Keep the RVC tensor inputs explicit here: collapsing them into an ad-hoc
     // struct would obscure the ONNX input contract this function validates.
+    #[cfg(feature = "ort")]
     #[allow(clippy::too_many_arguments)]
     pub(super) fn infer_with_session_run(
         &mut self,
@@ -1019,6 +1108,7 @@ impl RvcModelSession {
 
     // Keep the RVC tensor inputs explicit here: collapsing them into an ad-hoc
     // struct would obscure the ONNX input contract this function validates.
+    #[cfg(feature = "ort")]
     #[allow(clippy::too_many_arguments)]
     fn infer_with_cpu_output_binding(
         &mut self,
@@ -1101,6 +1191,7 @@ impl RvcModelSession {
         Ok(data.to_vec())
     }
 
+    #[cfg(feature = "ort")]
     pub(super) fn infer_with_binding(
         &mut self,
         feats: &[f32],
@@ -1207,6 +1298,7 @@ impl RvcModelSession {
     }
 }
 
+#[cfg(feature = "ort")]
 pub(super) fn load_session(
     path: &Path,
     provider: Provider,
@@ -1324,151 +1416,9 @@ pub(super) fn load_session(
     Ok(session)
 }
 
-pub(super) fn single_input_name(session: &Session) -> Result<String> {
-    let inputs = session.inputs();
-    if inputs.len() != 1 {
-        bail!("expected a single input, got {}", inputs.len());
-    }
-    Ok(inputs[0].name().to_string())
-}
-
-pub(super) fn select_embedder_output(
-    session: &Session,
-    expected_channels: i64,
-    requested_output: Option<&str>,
-) -> Result<String> {
-    let outputs = session.outputs();
-    if let Some(name) = requested_output {
-        let output = outputs
-            .iter()
-            .find(|output| output.name() == name)
-            .ok_or_else(|| {
-                let actual: Vec<&str> = outputs.iter().map(|output| output.name()).collect();
-                anyhow!("requested embedder output '{name}' not found; outputs are {actual:?}")
-            })?;
-        validate_embedder_output_selection(
-            "requested embedder output",
-            name,
-            output.dtype(),
-            expected_channels,
-        )?;
-        return Ok(name.to_string());
-    }
-
-    let preferred_output = match expected_channels {
-        768 => Some("unit12"),
-        256 => Some("unit9"),
-        _ => None,
-    };
-    if let Some(name) = preferred_output {
-        for output in outputs {
-            if output.name() == name && output_channels(output.dtype()) == Some(expected_channels) {
-                return Ok(output.name().to_string());
-            }
-        }
-    }
-    for output in outputs {
-        if output_channels(output.dtype()) == Some(expected_channels) {
-            return Ok(output.name().to_string());
-        }
-    }
-    if outputs.len() == 1 {
-        let output = &outputs[0];
-        validate_embedder_output_selection(
-            "single embedder output",
-            output.name(),
-            output.dtype(),
-            expected_channels,
-        )?;
-        return Ok(output.name().to_string());
-    }
-    let actual: Vec<String> = outputs
-        .iter()
-        .map(|output| format!("{}: {}", output.name(), describe_value_type(output.dtype())))
-        .collect();
-    bail!("no embedder output matches {expected_channels} channels; outputs are {actual:?}");
-}
-
-pub(super) fn validate_embedder_output_selection(
-    label: &str,
-    name: &str,
-    value_type: &ValueType,
-    expected_channels: i64,
-) -> Result<()> {
-    if !matches!(value_type, ValueType::Tensor { .. }) {
-        bail!(
-            "{label} '{name}' must be a tensor, got {}",
-            describe_value_type(value_type)
-        );
-    }
-    if let Some(channels) = output_channels(value_type) {
-        if channels != expected_channels {
-            bail!(
-                "{label} '{name}' does not match expected {expected_channels} channels: {}",
-                describe_value_type(value_type)
-            );
-        }
-    }
-    Ok(())
-}
-
-pub(super) fn output_channels(value_type: &ValueType) -> Option<i64> {
-    match value_type {
-        ValueType::Tensor { shape, .. } => shape.last().copied().filter(|channels| *channels > 0),
-        _ => None,
-    }
-}
-
-pub(super) fn expected_feat_channels(session: &Session) -> Result<i64> {
-    let feats = session
-        .inputs()
-        .iter()
-        .find(|input| input.name() == "feats")
-        .ok_or_else(|| anyhow!("RVC model has no 'feats' input"))?;
-    match feats.dtype() {
-        ValueType::Tensor { shape, .. } => shape
-            .last()
-            .copied()
-            .filter(|channels| *channels > 0)
-            .ok_or_else(|| anyhow!("RVC 'feats' input does not expose a static channel count")),
-        other => bail!("RVC 'feats' input must be tensor, got {other:?}"),
-    }
-}
-
-pub(super) fn validate_rvc_metadata(session: &Session) -> Result<()> {
-    let metadata = session.metadata().ok().and_then(|m| m.custom("metadata"));
-    if let Some(metadata) = metadata {
-        if !metadata.contains(r#""f0": 1"#) {
-            bail!("RVC model metadata does not indicate f0=1: {metadata}");
-        }
-        info!("RVC metadata: {metadata}");
-    }
-    Ok(())
-}
-
-pub(super) fn require_inputs(session: &Session, names: &[&str]) -> Result<()> {
-    let actual: HashSet<&str> = session.inputs().iter().map(|input| input.name()).collect();
-    for name in names {
-        if !actual.contains(name) {
-            bail!("required input '{name}' not found; model inputs are {actual:?}");
-        }
-    }
-    Ok(())
-}
-
-pub(super) fn require_output(session: &Session, name: &str) -> Result<()> {
-    let exists = session.outputs().iter().any(|output| output.name() == name);
-    if !exists {
-        let actual: Vec<&str> = session
-            .outputs()
-            .iter()
-            .map(|output| output.name())
-            .collect();
-        bail!("required output '{name}' not found; model outputs are {actual:?}");
-    }
-    Ok(())
-}
-
+/// Format an ORT output value type for the CLI `inspect` command. The pipeline's
+/// own structural checks live on `onnx_meta::ModelIo` and need no ORT.
+#[cfg(feature = "ort")]
 pub(super) fn describe_value_type(value_type: &ValueType) -> String {
     match value_type {
         ValueType::Tensor { ty, shape, .. } => format!("{ty:?} {shape}"),

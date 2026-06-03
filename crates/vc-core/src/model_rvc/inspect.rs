@@ -3,14 +3,19 @@ use std::path::Path;
 use anyhow::Result;
 use tracing::info;
 
-use crate::Provider;
+use super::onnx_meta::read_model_io;
 
-use super::sessions::{
-    describe_value_type, expected_feat_channels, load_session, require_inputs, require_output,
-    select_embedder_output, single_input_name, validate_rvc_metadata,
-};
+#[cfg(feature = "ort")]
+use crate::Provider;
+#[cfg(feature = "ort")]
+use super::sessions::{describe_value_type, load_session};
+#[cfg(feature = "ort")]
 use super::tensorrt::{ModelRole, TensorRtRunMode, TensorRtSessionPurpose};
 
+/// CLI `inspect` command: prints a model's full I/O and metadata via ONNX
+/// Runtime. Only built with the `ort` feature (the CLI always enables it); the
+/// pipeline's own structural checks use the provider-neutral `onnx_meta` reader.
+#[cfg(feature = "ort")]
 pub fn inspect_model(path: &Path) -> Result<()> {
     // Inspect is a structural ONNX query, so keep it CPU-only and provider-neutral.
     // CUDA/TensorRT load validation belongs to `run`/`wav`, where chunk-derived
@@ -75,16 +80,9 @@ pub(super) fn inspect_contentvec_input_name(
     expected_channels: i64,
     requested_output: Option<&str>,
 ) -> Result<String> {
-    let session = load_session(
-        path,
-        Provider::Cpu,
-        ModelRole::Inspect,
-        None,
-        TensorRtRunMode::PinnedCpu,
-        TensorRtSessionPurpose::Main,
-    )?;
-    let input_name = single_input_name(&session)?;
-    let output_name = select_embedder_output(&session, expected_channels, requested_output)?;
+    let io = read_model_io(path)?;
+    let input_name = io.single_input_name()?.to_string();
+    let output_name = io.select_embedder_output(expected_channels, requested_output)?;
     info!(
         "inspected ContentVec model for fixed profile: {} input={} output={}",
         path.display(),
@@ -95,18 +93,11 @@ pub(super) fn inspect_contentvec_input_name(
 }
 
 pub(super) fn inspect_rvc_model(path: &Path) -> Result<RvcModelInfo> {
-    let session = load_session(
-        path,
-        Provider::Cpu,
-        ModelRole::Inspect,
-        None,
-        TensorRtRunMode::PinnedCpu,
-        TensorRtSessionPurpose::Main,
-    )?;
-    require_inputs(&session, &["feats", "p_len", "pitch", "pitchf", "sid"])?;
-    require_output(&session, "audio")?;
-    let expected_feat_channels = expected_feat_channels(&session)?;
-    validate_rvc_metadata(&session)?;
+    let io = read_model_io(path)?;
+    io.require_inputs(&["feats", "p_len", "pitch", "pitchf", "sid"])?;
+    io.require_output("audio")?;
+    let expected_feat_channels = io.expected_feat_channels()?;
+    io.validate_rvc_metadata()?;
     Ok(RvcModelInfo {
         expected_feat_channels,
     })
