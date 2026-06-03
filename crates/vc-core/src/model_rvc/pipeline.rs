@@ -211,26 +211,26 @@ impl RvcPipeline {
             }
             #[cfg(feature = "ort")]
             {
-            let mut embedder_probe = HubertEmbedderSession::load(
-                config.embedder,
-                config.provider,
-                expected_feat_channels,
-                config.embedder_output,
-                Some(contentvec_profile.clone()),
-                TensorRtRunMode::PinnedCpu,
-                TensorRtSessionPurpose::Probe,
-            )?;
-            let warmup = tensor_rt_warmup_feature_len(
-                &mut embedder_probe,
-                input_samples_16k,
-                extra_convert_samples,
-            )?;
-            drop(embedder_probe);
-            let feature_len = warmup.rvc_feature_len;
-            let rvc_profile =
-                TensorRtSessionProfile::rvc(feature_len, expected_feat_channels_usize)
-                    .with_optional_model_cache_key(rvc_model_cache_key.clone());
-            info!(
+                let mut embedder_probe = HubertEmbedderSession::load(
+                    config.embedder,
+                    config.provider,
+                    expected_feat_channels,
+                    config.embedder_output,
+                    Some(contentvec_profile.clone()),
+                    TensorRtRunMode::PinnedCpu,
+                    TensorRtSessionPurpose::Probe,
+                )?;
+                let warmup = tensor_rt_warmup_feature_len(
+                    &mut embedder_probe,
+                    input_samples_16k,
+                    extra_convert_samples,
+                )?;
+                drop(embedder_probe);
+                let feature_len = warmup.rvc_feature_len;
+                let rvc_profile =
+                    TensorRtSessionProfile::rvc(feature_len, expected_feat_channels_usize)
+                        .with_optional_model_cache_key(rvc_model_cache_key.clone());
+                info!(
                 "fixed runtime profiles backend={} sample_rate={} chunk_samples={} contentvec={} rmvpe={} rvc={}",
                 config.provider.label(),
                 config.sample_rate,
@@ -240,77 +240,77 @@ impl RvcPipeline {
                 rvc_profile.profile_shapes
             );
 
-            let mut pitch_probe = RmvpePitchSession::load(
-                config.f0_model,
-                config.provider,
-                Some(rmvpe_profile.clone()),
-                TensorRtRunMode::PinnedCpu,
-                TensorRtSessionPurpose::Probe,
-            )?;
-            let rmvpe_output_shape =
-                pitch_probe.warmup_output_shape(input_samples_16k, config.f0_threshold)?;
-            drop(pitch_probe);
+                let mut pitch_probe = RmvpePitchSession::load(
+                    config.f0_model,
+                    config.provider,
+                    Some(rmvpe_profile.clone()),
+                    TensorRtRunMode::PinnedCpu,
+                    TensorRtSessionPurpose::Probe,
+                )?;
+                let rmvpe_output_shape =
+                    pitch_probe.warmup_output_shape(input_samples_16k, config.f0_threshold)?;
+                drop(pitch_probe);
 
-            let mut rvc_probe = RvcModelSession::load(
-                config.model,
-                config.provider,
-                Some(rvc_profile.clone()),
-                Some(rvc_info.expected_feat_channels),
-                TensorRtRunMode::PinnedCpu,
-                TensorRtSessionPurpose::Probe,
-            )?;
-            let rvc_output_shape = rvc_probe.warmup_output_shape(
-                feature_len,
-                rvc_info.expected_feat_channels,
-                config.speaker_id,
-            )?;
-            drop(rvc_probe);
+                let mut rvc_probe = RvcModelSession::load(
+                    config.model,
+                    config.provider,
+                    Some(rvc_profile.clone()),
+                    Some(rvc_info.expected_feat_channels),
+                    TensorRtRunMode::PinnedCpu,
+                    TensorRtSessionPurpose::Probe,
+                )?;
+                let rvc_output_shape = rvc_probe.warmup_output_shape(
+                    feature_len,
+                    rvc_info.expected_feat_channels,
+                    config.speaker_id,
+                )?;
+                drop(rvc_probe);
 
-            let mut embedder = HubertEmbedderSession::load(
-                config.embedder,
-                config.provider,
-                expected_feat_channels,
-                config.embedder_output,
-                Some(contentvec_profile),
-                tensor_rt_run_mode,
-                TensorRtSessionPurpose::Final,
-            )?;
-            shared_waveform = if tensor_rt_run_mode.device_io() {
-                Some(TensorRtSharedWaveform::new(
-                    &embedder.session,
-                    &shared_waveform_shape,
-                )?)
-            } else {
-                None
-            };
-            embedder.enable_tensorrt_binding(
-                &warmup.contentvec_output_shape,
-                shared_waveform.as_ref(),
-            )?;
+                let mut embedder = HubertEmbedderSession::load(
+                    config.embedder,
+                    config.provider,
+                    expected_feat_channels,
+                    config.embedder_output,
+                    Some(contentvec_profile),
+                    tensor_rt_run_mode,
+                    TensorRtSessionPurpose::Final,
+                )?;
+                shared_waveform = if tensor_rt_run_mode.device_io() {
+                    Some(TensorRtSharedWaveform::new(
+                        &embedder.session,
+                        &shared_waveform_shape,
+                    )?)
+                } else {
+                    None
+                };
+                embedder.enable_tensorrt_binding(
+                    &warmup.contentvec_output_shape,
+                    shared_waveform.as_ref(),
+                )?;
 
-            let mut pitch = RmvpePitchSession::load(
-                config.f0_model,
-                config.provider,
-                Some(rmvpe_profile),
-                tensor_rt_run_mode,
-                TensorRtSessionPurpose::Final,
-            )?;
-            pitch.enable_tensorrt_binding(
-                &rmvpe_output_shape,
-                config.f0_threshold,
-                shared_waveform.as_ref(),
-            )?;
+                let mut pitch = RmvpePitchSession::load(
+                    config.f0_model,
+                    config.provider,
+                    Some(rmvpe_profile),
+                    tensor_rt_run_mode,
+                    TensorRtSessionPurpose::Final,
+                )?;
+                pitch.enable_tensorrt_binding(
+                    &rmvpe_output_shape,
+                    config.f0_threshold,
+                    shared_waveform.as_ref(),
+                )?;
 
-            let mut rvc = RvcModelSession::load(
-                config.model,
-                config.provider,
-                Some(rvc_profile),
-                Some(rvc_info.expected_feat_channels),
-                tensor_rt_run_mode,
-                TensorRtSessionPurpose::Final,
-            )?;
-            rvc.enable_tensorrt_binding(&rvc_output_shape, config.speaker_id)?;
-            (embedder, pitch, rvc)
+                let mut rvc = RvcModelSession::load(
+                    config.model,
+                    config.provider,
+                    Some(rvc_profile),
+                    Some(rvc_info.expected_feat_channels),
+                    tensor_rt_run_mode,
+                    TensorRtSessionPurpose::Final,
+                )?;
+                rvc.enable_tensorrt_binding(&rvc_output_shape, config.speaker_id)?;
+                (embedder, pitch, rvc)
             }
         } else if config.provider.is_tensorrt() {
             // Native TensorRT engines self-report their fixed output shapes after
@@ -387,37 +387,37 @@ impl RvcPipeline {
             }
             #[cfg(feature = "ort")]
             {
-            let mut embedder = HubertEmbedderSession::load(
-                config.embedder,
-                config.provider,
-                expected_feat_channels,
-                config.embedder_output,
-                Some(contentvec_profile),
-                tensor_rt_run_mode,
-                TensorRtSessionPurpose::Final,
-            )?;
-            let warmup = tensor_rt_warmup_feature_len(
-                &mut embedder,
-                input_samples_16k,
-                extra_convert_samples,
-            )?;
-            let feature_len = warmup.rvc_feature_len;
-            shared_waveform = if tensor_rt_run_mode.device_io() {
-                Some(TensorRtSharedWaveform::new(
-                    &embedder.session,
-                    &shared_waveform_shape,
-                )?)
-            } else {
-                None
-            };
-            embedder.enable_tensorrt_binding(
-                &warmup.contentvec_output_shape,
-                shared_waveform.as_ref(),
-            )?;
-            let rvc_profile =
-                TensorRtSessionProfile::rvc(feature_len, expected_feat_channels_usize)
-                    .with_optional_model_cache_key(rvc_model_cache_key.clone());
-            info!(
+                let mut embedder = HubertEmbedderSession::load(
+                    config.embedder,
+                    config.provider,
+                    expected_feat_channels,
+                    config.embedder_output,
+                    Some(contentvec_profile),
+                    tensor_rt_run_mode,
+                    TensorRtSessionPurpose::Final,
+                )?;
+                let warmup = tensor_rt_warmup_feature_len(
+                    &mut embedder,
+                    input_samples_16k,
+                    extra_convert_samples,
+                )?;
+                let feature_len = warmup.rvc_feature_len;
+                shared_waveform = if tensor_rt_run_mode.device_io() {
+                    Some(TensorRtSharedWaveform::new(
+                        &embedder.session,
+                        &shared_waveform_shape,
+                    )?)
+                } else {
+                    None
+                };
+                embedder.enable_tensorrt_binding(
+                    &warmup.contentvec_output_shape,
+                    shared_waveform.as_ref(),
+                )?;
+                let rvc_profile =
+                    TensorRtSessionProfile::rvc(feature_len, expected_feat_channels_usize)
+                        .with_optional_model_cache_key(rvc_model_cache_key.clone());
+                info!(
                 "fixed runtime profiles backend={} sample_rate={} chunk_samples={} contentvec={} rmvpe={} rvc={}",
                 config.provider.label(),
                 config.sample_rate,
@@ -431,36 +431,36 @@ impl RvcPipeline {
                 rvc_profile.profile_shapes
             );
 
-            let mut pitch = RmvpePitchSession::load(
-                config.f0_model,
-                config.provider,
-                Some(rmvpe_profile),
-                tensor_rt_run_mode,
-                TensorRtSessionPurpose::Final,
-            )?;
-            let rmvpe_output_shape =
-                pitch.warmup_output_shape(input_samples_16k, config.f0_threshold)?;
-            pitch.enable_tensorrt_binding(
-                &rmvpe_output_shape,
-                config.f0_threshold,
-                shared_waveform.as_ref(),
-            )?;
+                let mut pitch = RmvpePitchSession::load(
+                    config.f0_model,
+                    config.provider,
+                    Some(rmvpe_profile),
+                    tensor_rt_run_mode,
+                    TensorRtSessionPurpose::Final,
+                )?;
+                let rmvpe_output_shape =
+                    pitch.warmup_output_shape(input_samples_16k, config.f0_threshold)?;
+                pitch.enable_tensorrt_binding(
+                    &rmvpe_output_shape,
+                    config.f0_threshold,
+                    shared_waveform.as_ref(),
+                )?;
 
-            let mut rvc = RvcModelSession::load(
-                config.model,
-                config.provider,
-                Some(rvc_profile),
-                Some(rvc_info.expected_feat_channels),
-                tensor_rt_run_mode,
-                TensorRtSessionPurpose::Final,
-            )?;
-            let rvc_output_shape = rvc.warmup_output_shape(
-                feature_len,
-                rvc_info.expected_feat_channels,
-                config.speaker_id,
-            )?;
-            rvc.enable_tensorrt_binding(&rvc_output_shape, config.speaker_id)?;
-            (embedder, pitch, rvc)
+                let mut rvc = RvcModelSession::load(
+                    config.model,
+                    config.provider,
+                    Some(rvc_profile),
+                    Some(rvc_info.expected_feat_channels),
+                    tensor_rt_run_mode,
+                    TensorRtSessionPurpose::Final,
+                )?;
+                let rvc_output_shape = rvc.warmup_output_shape(
+                    feature_len,
+                    rvc_info.expected_feat_channels,
+                    config.speaker_id,
+                )?;
+                rvc.enable_tensorrt_binding(&rvc_output_shape, config.speaker_id)?;
+                (embedder, pitch, rvc)
             }
         };
 

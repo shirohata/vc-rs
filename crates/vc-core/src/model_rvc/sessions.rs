@@ -826,59 +826,61 @@ impl RvcModelSession {
         }
         #[cfg(feature = "ort")]
         {
-        let feats_shape = vec![1i64, feature_len as i64, feature_channels];
-        let feats_shape_usize = i64_shape_to_usize(&feats_shape, "feats")?;
-        validate_tensorrt_input_shape(
-            self.provider,
-            self.tensor_rt_profile.as_ref(),
-            "feats",
-            &feats_shape_usize,
-        )?;
-        let pitch_shape = [1usize, feature_len];
-        validate_tensorrt_input_shape(
-            self.provider,
-            self.tensor_rt_profile.as_ref(),
-            "pitch",
-            &pitch_shape,
-        )?;
-        validate_tensorrt_input_shape(
-            self.provider,
-            self.tensor_rt_profile.as_ref(),
-            "pitchf",
-            &pitch_shape,
-        )?;
-        let feats_len = feature_len
-            .checked_mul(usize::try_from(feature_channels).context("invalid RVC channel count")?)
-            .context("RVC warmup feats input length overflow")?;
-        let feats = Tensor::from_array((feats_shape.clone(), vec![0.0f32; feats_len]))?;
-        let p_len = Tensor::from_array(([1usize], vec![feature_len as i64]))?;
-        let pitch = Tensor::from_array((pitch_shape, vec![1i64; feature_len]))?;
-        let pitchf = Tensor::from_array((pitch_shape, vec![0.0f32; feature_len]))?;
-        let sid = Tensor::from_array(([1usize], vec![speaker_id]))?;
-        let run_start = Instant::now();
-        let session = self
-            .session
-            .as_mut()
-            .ok_or_else(|| anyhow!("RVC ORT session is not initialized"))?;
-        let outputs = session.run(ort::inputs![
-            "feats" => feats,
-            "p_len" => p_len,
-            "pitch" => pitch,
-            "pitchf" => pitchf,
-            "sid" => sid,
-        ])?;
-        debug!(
-            "rvc warmup session.run backend={} feats_shape={} pitch_shape={} elapsed_us={}",
-            self.provider.label(),
-            format_usize_shape(&feats_shape_usize),
-            format_usize_shape(&pitch_shape),
-            run_start.elapsed().as_micros()
-        );
-        let value = outputs
-            .get("audio")
-            .ok_or_else(|| anyhow!("RVC output 'audio' not found"))?;
-        let (shape, _) = value.try_extract_tensor::<f32>()?;
-        Ok(shape.to_vec())
+            let feats_shape = vec![1i64, feature_len as i64, feature_channels];
+            let feats_shape_usize = i64_shape_to_usize(&feats_shape, "feats")?;
+            validate_tensorrt_input_shape(
+                self.provider,
+                self.tensor_rt_profile.as_ref(),
+                "feats",
+                &feats_shape_usize,
+            )?;
+            let pitch_shape = [1usize, feature_len];
+            validate_tensorrt_input_shape(
+                self.provider,
+                self.tensor_rt_profile.as_ref(),
+                "pitch",
+                &pitch_shape,
+            )?;
+            validate_tensorrt_input_shape(
+                self.provider,
+                self.tensor_rt_profile.as_ref(),
+                "pitchf",
+                &pitch_shape,
+            )?;
+            let feats_len = feature_len
+                .checked_mul(
+                    usize::try_from(feature_channels).context("invalid RVC channel count")?,
+                )
+                .context("RVC warmup feats input length overflow")?;
+            let feats = Tensor::from_array((feats_shape.clone(), vec![0.0f32; feats_len]))?;
+            let p_len = Tensor::from_array(([1usize], vec![feature_len as i64]))?;
+            let pitch = Tensor::from_array((pitch_shape, vec![1i64; feature_len]))?;
+            let pitchf = Tensor::from_array((pitch_shape, vec![0.0f32; feature_len]))?;
+            let sid = Tensor::from_array(([1usize], vec![speaker_id]))?;
+            let run_start = Instant::now();
+            let session = self
+                .session
+                .as_mut()
+                .ok_or_else(|| anyhow!("RVC ORT session is not initialized"))?;
+            let outputs = session.run(ort::inputs![
+                "feats" => feats,
+                "p_len" => p_len,
+                "pitch" => pitch,
+                "pitchf" => pitchf,
+                "sid" => sid,
+            ])?;
+            debug!(
+                "rvc warmup session.run backend={} feats_shape={} pitch_shape={} elapsed_us={}",
+                self.provider.label(),
+                format_usize_shape(&feats_shape_usize),
+                format_usize_shape(&pitch_shape),
+                run_start.elapsed().as_micros()
+            );
+            let value = outputs
+                .get("audio")
+                .ok_or_else(|| anyhow!("RVC output 'audio' not found"))?;
+            let (shape, _) = value.try_extract_tensor::<f32>()?;
+            Ok(shape.to_vec())
         }
     }
 

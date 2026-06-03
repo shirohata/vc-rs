@@ -1463,7 +1463,10 @@ mod tests {
         let frames = 100usize;
         let extra = 48_000usize;
         let silence_front = onnx_silence_front_feature_frames(extra);
-        assert!(silence_front > 0, "test input should exercise the trim branch");
+        assert!(
+            silence_front > 0,
+            "test input should exercise the trim branch"
+        );
         let frames2 = frames * 2;
         let expected = frames2 - silence_front;
         assert_eq!(derive_rvc_feature_len(frames, extra).unwrap(), expected);

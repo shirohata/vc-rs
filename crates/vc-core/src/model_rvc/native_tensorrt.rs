@@ -140,7 +140,11 @@ impl NativeContentVecEngine {
     /// length. The engine knows its fixed output shape after deserialize, so the
     /// frame count needs no warmup inference.
     pub(super) fn output_frames(&self) -> Result<usize> {
-        if !self.output_len.get().is_multiple_of(self.expected_channels.get()) {
+        if !self
+            .output_len
+            .get()
+            .is_multiple_of(self.expected_channels.get())
+        {
             bail!(
                 "native TensorRT ContentVec output length {} is not divisible by expected channels {}",
                 self.output_len.get(),

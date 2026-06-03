@@ -6,11 +6,11 @@ use tracing::info;
 use super::onnx_meta::read_model_io;
 
 #[cfg(feature = "ort")]
-use crate::Provider;
-#[cfg(feature = "ort")]
 use super::sessions::{describe_value_type, load_session};
 #[cfg(feature = "ort")]
 use super::tensorrt::{ModelRole, TensorRtRunMode, TensorRtSessionPurpose};
+#[cfg(feature = "ort")]
+use crate::Provider;
 
 /// CLI `inspect` command: prints a model's full I/O and metadata via ONNX
 /// Runtime. Only built with the `ort` feature (the CLI always enables it); the

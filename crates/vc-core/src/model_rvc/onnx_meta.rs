@@ -133,7 +133,11 @@ impl ModelIo {
                 let actual: Vec<&str> = self.outputs.iter().map(|t| t.name.as_str()).collect();
                 anyhow!("requested embedder output '{name}' not found; outputs are {actual:?}")
             })?;
-            validate_embedder_output_selection("requested embedder output", output, expected_channels)?;
+            validate_embedder_output_selection(
+                "requested embedder output",
+                output,
+                expected_channels,
+            )?;
             return Ok(name.to_string());
         }
 
@@ -156,7 +160,11 @@ impl ModelIo {
         }
         if self.outputs.len() == 1 {
             let output = &self.outputs[0];
-            validate_embedder_output_selection("single embedder output", output, expected_channels)?;
+            validate_embedder_output_selection(
+                "single embedder output",
+                output,
+                expected_channels,
+            )?;
             return Ok(output.name.clone());
         }
         let actual: Vec<String> = self.outputs.iter().map(|t| t.describe()).collect();
@@ -170,7 +178,11 @@ fn validate_embedder_output_selection(
     expected_channels: i64,
 ) -> Result<()> {
     if !tensor.is_tensor() {
-        bail!("{label} '{}' must be a tensor, got {}", tensor.name, tensor.describe());
+        bail!(
+            "{label} '{}' must be a tensor, got {}",
+            tensor.name,
+            tensor.describe()
+        );
     }
     if let Some(channels) = tensor.last_dim_channels() {
         if channels != expected_channels {
@@ -309,7 +321,8 @@ fn parse_model(bytes: &[u8]) -> Result<ModelIo> {
 fn parse_graph(bytes: &[u8], io: &mut ModelIo) -> Result<()> {
     for_each_field(bytes, |field, wire, reader| match (field, wire) {
         (11, 2) => {
-            io.inputs.push(parse_value_info(reader.read_len_prefixed()?)?);
+            io.inputs
+                .push(parse_value_info(reader.read_len_prefixed()?)?);
             Ok(true)
         }
         (12, 2) => {
@@ -520,7 +533,10 @@ mod tests {
         assert_eq!(io.input("feats").unwrap().last_dim_channels(), Some(768));
         assert_eq!(io.input("sid").unwrap().dims, vec![1]);
         assert_eq!(io.output("audio").unwrap().name, "audio");
-        assert!(io.metadata_value("metadata").unwrap().contains(r#""f0": 1"#));
+        assert!(io
+            .metadata_value("metadata")
+            .unwrap()
+            .contains(r#""f0": 1"#));
     }
 
     #[test]
@@ -540,7 +556,15 @@ mod tests {
         let info = parse_value_info(&{
             let mut out = Vec::new();
             len_delimited(1, b"x", &mut out);
-            len_delimited(2, &{ let mut t = Vec::new(); len_delimited(1, &tensor, &mut t); t }, &mut out);
+            len_delimited(
+                2,
+                &{
+                    let mut t = Vec::new();
+                    len_delimited(1, &tensor, &mut t);
+                    t
+                },
+                &mut out,
+            );
             out
         })
         .unwrap();
