@@ -1,153 +1,235 @@
 # vc-rs
 
-`vc-rs` は Rust 製の CLI ベース音声変換（RVC）実験アプリです。
-WAV ファイルまたはリアルタイム入力（マイク）に対して、ONNX 形式の
-RVC モデルで音声変換を実行します。
+> 日本語 | [English](README.en.md)
 
-詳細な内部設計は [`docs/architecture_ja.md`](docs/architecture_ja.md) と
-[`docs/architecture.md`](docs/architecture.md) を参照してください。
+`vc-rs` は Rust 製の **RVC 音声変換アプリ** です。マイク入力や WAV ファイルを、
+ONNX 形式の RVC モデルで別の声に変換します。次の 2 つの使い方があります。
 
-ソースからビルドする場合は、開発者向けの
-[`docs/development_ja.md`](docs/development_ja.md)（必要環境・ビルド・GPU 実行用
-ランタイム・環境構築スクリプト）を参照してください。
+- **CLI 版（`vc-rs.exe`）** — コマンドラインで動かす本体。リアルタイム変換と
+  WAV ファイル変換に対応します。
+- **VST3 プラグイン版（`vc-vst3.vst3`）** — お使いの DAW に読み込んで使う
+  プラグインです。
 
-## 対応機能
+ビルド済みの Windows 用パッケージを配布しています。**ソースからビルドする必要は
+ありません。** ダウンロードして展開し、モデルを用意すればすぐ使えます。
 
-- CLI での実行（GUI なし）
-- オーディオデバイス列挙（`devices`）
-- ONNX モデルの入力/出力/メタデータ確認（`inspect`）
-- WAV ファイル変換（`wav`）
-- リアルタイム変換またはパススルー（`run`）
-- ONNX Runtime の CPU / CUDA / Windows ML / TensorRT Provider 利用
-- CPAL / WASAPI による音声入出力
+> ソースからビルドしたい開発者の方は [`docs/development_ja.md`](docs/development_ja.md)
+> を参照してください。内部設計は [`docs/architecture_ja.md`](docs/architecture_ja.md)
+> にあります。
 
-## 外部モデルについて
+## ダウンロード
 
-このリポジトリには学習済みモデルを同梱しません。利用者側で次の ONNX
-ファイルを準備してください。
+最新版は GitHub の **[Releases](https://github.com/shirohata/vc-rs/releases)**
+から入手できます。配布パッケージは Windows (x64) 向けで、用途と環境に合わせて
+次の 4 種類があります。
 
-- RVC 音声変換モデル: `.\assets\voice.onnx`
-- ContentVec などの埋め込み抽出モデル: `.\assets\content_vec_500.onnx`
-- RMVPE などの F0 推定モデル: `.\assets\rmvpe.onnx`
+| パッケージ | 形態 | バックエンド | 対象環境 | サイズ | 必要なもの |
+| --- | --- | --- | --- | --- | --- |
+| `vc-rs-cli-windowsml-…zip` | CLI | Windows ML | 多くの GPU（NVIDIA 以外も可） | 小（数 MB） | Windows App SDK ランタイム |
+| `vc-rs-cli-tensorrt-…zip` | CLI | TensorRT | NVIDIA GPU | 大（約 1.9 GB） | 最新の NVIDIA ドライバ |
+| `vc-vst3-windowsml-…zip` | VST3 プラグイン | Windows ML | 多くの GPU（NVIDIA 以外も可） | 小 | Windows App SDK ランタイム |
+| `vc-vst3-tensorrt-…zip` | VST3 プラグイン | TensorRT | NVIDIA GPU | 大（約 1.9 GB） | 最新の NVIDIA ドライバ |
 
-RVC 音声変換モデルは **ONNX 形式（`.onnx`）のみ対応**です。`.pth` モデルは
-直接読み込めません。`.pth` を使う場合は、RVC 系ツールや VCClient などを使って
-事前に ONNX へ変換してください。
+**どれを選べばよいか:**
 
-> 以下の使用例はソースから実行する形（`cargo run -- ...`）で記載しています。
-> ビルド方法は [`docs/development_ja.md`](docs/development_ja.md) を参照してください。
+- まず試すなら **windowsml 版**。ダウンロードが軽く、NVIDIA 以外の GPU でも
+  DirectML 経由で動きます。
+- **NVIDIA GPU を持っていて最速を狙う**なら **tensorrt 版**。ダウンロードは
+  大きく、初回起動時にエンジン構築で時間がかかりますが、その後は高速です。
+- DAW で歌や配信に使うなら **VST3 版**、単体・自動化・WAV 一括変換なら **CLI 版**。
 
-## 基本的な使い方
+## 必要なもの
+
+### windowsml 版
+
+- **Windows App SDK ランタイム（2.x 系）** をインストールしてください。ONNX
+  Runtime と DirectML を提供します。Microsoft の
+  [Windows App SDK ダウンロードページ](https://learn.microsoft.com/windows/apps/windows-app-sdk/downloads)
+  から、最新安定版の **Runtime（ランタイム）インストーラ** を入れてください。
+
+### tensorrt 版
+
+- **最新の NVIDIA GPU ドライバ**。TensorRT 本体の DLL はパッケージに同梱して
+  いるので、CUDA や TensorRT を別途インストールする必要はありません。
+
+### 共通: モデルファイル
+
+`vc-rs` はモデルを同梱しません。次の 3 つを自分で用意します。
+
+1. **RVC 音声変換モデル**（`.onnx`） — 変換したい声のモデル。**ONNX 形式のみ
+   対応**です。`.pth` は直接読み込めません（RVC 系ツールや VCClient などで
+   事前に `.onnx` へ変換してください）。
+2. **埋め込み抽出モデル**（ContentVec, `content_vec_500.onnx`）
+3. **F0 推定モデル**（RMVPE, `rmvpe.onnx`）
+
+2 と 3 は付属の `download-models.ps1` で取得できます（下記「モデルの準備」）。
+
+## 使い方（CLI 版）
+
+1. ダウンロードした zip を展開します（**DLL は `vc-rs.exe` と同じフォルダに
+   置いたまま**にしてください）。
+2. そのフォルダで PowerShell を開きます。
+
+### モデルの準備
+
+埋め込み・F0 モデルを取得します（このフォルダで実行）。
+
+```powershell
+pwsh .\download-models.ps1
+```
+
+`.\assets\content_vec_500.onnx` と `.\assets\rmvpe.onnx` がダウンロードされます。
+RVC 音声変換モデル（`.onnx`）は別途自分で用意してください。
+
+> これらのモデルは第三者配布（配布元では GPL-3.0 表示）で、`vc-rs` 本体の
+> MIT License の対象外です。利用・改変・再配布の際は配布元のライセンスに
+> 従ってください。詳細は `download-models.ps1` 内の注記を参照してください。
 
 ### デバイス確認
 
 ```powershell
-cargo run -- devices
-```
-
-### モデル構造確認
-
-`inspect` は実行バックエンドに依存しない構造確認コマンドです。ONNX モデルを CPU で読み、
-入力、出力、メタデータを表示します。
-
-```powershell
-cargo run -- inspect --model .\assets\voice.onnx
-```
-
-### WAV 変換
-
-```powershell
-cargo run -- wav --model .\assets\voice.onnx --embedder .\assets\content_vec_500.onnx --f0-model .\assets\rmvpe.onnx --input input.wav --output out.wav --provider cpu --speaker-id 0
+.\vc-rs.exe devices
 ```
 
 ### リアルタイム変換
 
 ```powershell
-cargo run -- run --model .\assets\voice.onnx --embedder .\assets\content_vec_500.onnx --f0-model .\assets\rmvpe.onnx --input "Microphone" --output "Speakers" --chunk-ms 500 --extra-convert-ms 100 --provider cpu --speaker-id 0
+.\vc-rs.exe run --model <あなたのRVCモデル>.onnx `
+    --embedder .\assets\content_vec_500.onnx `
+    --f0-model .\assets\rmvpe.onnx `
+    --input "Microphone" --output "Speakers" `
+    --chunk-ms 500 --extra-convert-ms 100 `
+    --provider windowsml --speaker-id 0
 ```
 
 `--input` と `--output` には `devices` で表示されるデバイス名の一部を指定します。
+tensorrt 版では `--provider tensorrt` を指定してください。
+
+### WAV ファイル変換
+
+```powershell
+.\vc-rs.exe wav --model <あなたのRVCモデル>.onnx `
+    --embedder .\assets\content_vec_500.onnx `
+    --f0-model .\assets\rmvpe.onnx `
+    --input input.wav --output out.wav `
+    --provider windowsml --speaker-id 0
+```
+
+### モデル構造の確認
+
+```powershell
+.\vc-rs.exe inspect --model <あなたのRVCモデル>.onnx
+```
+
+`inspect` は実行バックエンドに依存せず、ONNX モデルの入力・出力・メタデータを
+表示します。
+
+## 使い方（VST3 プラグイン版）
+
+1. zip を展開し、`vc-vst3.vst3` を VST3 の標準フォルダにコピーします。
+   - Windows: `%CommonProgramFiles%\VST3\`（例: `C:\Program Files\Common Files\VST3`）
+2. 展開したフォルダで `pwsh .\download-models.ps1` を実行し、埋め込み・F0
+   モデルを `.\assets\` に取得します（**インストール先ではなく、展開した
+   フォルダで実行**してください）。
+3. DAW でプラグインを読み込み、エディタ画面を開きます。
+   - **Browse** から RVC モデル・埋め込み（ContentVec）・F0（RMVPE）の各 `.onnx`
+     を指定します。
+   - **バックエンド**を選びます（windowsml 版: `windowsml` / `windowsml-directml`
+     / `cpu`、tensorrt 版: `tensorrt`）。
+   - **chunk size**（ms）を設定します（大きいほど安定しますが遅延が増えます）。
+   - **Load / Reload** を押して反映します。モデル・バックエンド・chunk の変更は
+     このボタンを押すまで適用されません。
+   - Pitch / Speaker / Input・Output ゲインはリアルタイムに反映され、DAW の
+     パラメータとして自動化・保存できます。
+
+モデルパスや設定はプロジェクト/プリセットごとに保存されます。詳細は
+[`crates/vc-vst3/README.md`](crates/vc-vst3/README.md) を参照してください。
 
 ## リアルタイム設定の調整
 
-CPU 実行では、デフォルトの `--chunk-ms` と `--extra-convert-ms` は速い CPU 向けの
-値です。音切れ、遅延の増加、CPU 使用率の張り付きが出る場合は、まず
-`--chunk-ms` を大きくしてください。`500` で不安定なら `750`、`1000` のように
-上げると 1 回あたりの処理時間に余裕ができますが、そのぶん入力から出力までの
-体感遅延も増えます。
+音切れ・遅延・CPU/GPU 負荷のバランスは `--chunk-ms` と `--extra-convert-ms`
+（VST3 では chunk size）で調整します。
 
-`--extra-convert-ms` は変換に渡す前後文脈の長さをミリ秒で指定します。大きくすると
-変換が安定することがありますが、推論するサンプル数が増えるため負荷も増えます。
-CPU でリアルタイム性を優先する場合は、まず `100` ms 付近から試し、品質が足りない
-場合だけ少しずつ増やしてください。
+- `--chunk-ms`: 1 回の処理でまとめる音声の長さ。音切れや負荷の張り付きが出る
+  場合は大きくします（`500` → `750` → `1000`）。大きいほど安定しますが、入力から
+  出力までの体感遅延も増えます。GPU 実行ではより小さい値を使えることがあります。
+- `--extra-convert-ms`: 変換に渡す前後文脈の長さ。大きくすると安定することが
+  ありますが負荷も増えます。まず `100` ms 付近から試してください。
+
+設定を詰めるときは、**先に音切れしない値を見つけ、その後に `--chunk-ms` を
+小さくして遅延を下げる**のが安全です。
 
 主な変換パラメータ:
 
-- `--speaker-id 0`: マルチスピーカーモデルで使う話者 ID です（デフォルト: 0）。
-- `--pitch-shift 0.0`: F0 を半音単位で上下させます（デフォルト: 0.0）。
-  `12.0` で 1 オクターブ上、`-12.0` で 1 オクターブ下です。声質やモデルにより
-  自然に聞こえる範囲は異なります。
+- `--speaker-id 0`: マルチスピーカーモデルで使う話者 ID（デフォルト: 0）。
+- `--pitch-shift 0.0`: F0 を半音単位で上下（デフォルト: 0.0）。`12.0` で 1
+  オクターブ上、`-12.0` で 1 オクターブ下。
+- `--input-gain 1.0` / `--output-gain 1.0`: 入力・出力にかけるゲイン
+  （デフォルト: 1.0）。小さすぎる場合に上げます。上げすぎるとクリップします。
+- `--silence-threshold 0.0001`: 無音とみなすしきい値。
+- `--rms-mix-rate <0.0-1.0>`: 0.0 に近いほど入力音量の起伏を反映、1.0 に近いほど
+  モデル出力の音量を保持（デフォルト: 0.0）。
 
-主な音量関連オプション:
+## Windows ML の実行プロバイダ（windowsml 版）
 
-- `--input-gain 1.0`: モデルへ渡す前の入力音声にかけるゲインです（デフォルト: 1.0）。
-  入力が小さすぎる場合に上げます。大きくしすぎるとモデル入力がクリップしやすくなります。
-- `--output-gain 1.0`: 変換後の出力音声にかけるゲインです（デフォルト: 1.0）。
-  変換結果が小さい場合に上げます。大きくしすぎると出力がクリップしやすくなります。
-- `--silence-threshold 0.0001`: 入力音声を無音扱いするしきい値です。小さくすると小さい声や環境音にも反応しやすくなり、大きくすると無音判定されやすくなります。
-- `--rms-mix-rate <0.0-1.0>`: 0.0 から 1.0 までの数値を指定します。(デフォルト: 0.0)
-  0.0 に近いほど入力音量の起伏を強く反映し、1.0 に近いほどモデル出力の
-  音量を保持します。たとえば `0.5` はその中間の補正量です。
+windowsml 版で `--provider windowsml` を指定すると、Windows ML の catalog EP を
+優先し、使える EP がなければ DirectML、最後に CPU へ寄せます。特定の EP を
+強制したい場合は `windowsml-nvtrtx` / `windowsml-qnn` / `windowsml-openvino` /
+`windowsml-migraphx` / `windowsml-vitisai` を指定します（fallback せず、EP が
+未導入・未準備ならエラー）。
 
-## GPU / Windows ML / TensorRT 実行
-
-GPU 実行は `wav` / `run` の `--provider` で指定します。
-
-```powershell
-cargo run -- wav --model .\assets\voice.onnx --embedder .\assets\content_vec_500.onnx --f0-model .\assets\rmvpe.onnx --input input.wav --output out.wav --provider cuda --speaker-id 0
-```
+catalog EP の状態確認とインストールは CLI から行えます。
 
 ```powershell
-cargo run -- run --model .\assets\voice.onnx --embedder .\assets\content_vec_500.onnx --f0-model .\assets\rmvpe.onnx --input "Microphone" --output "Speakers" --chunk-ms 200 --extra-convert-ms 1000 --provider tensorrt --speaker-id 0
+.\vc-rs.exe windowsml-eps list
+.\vc-rs.exe windowsml-eps install            # 最適な EP を自動選択
+.\vc-rs.exe windowsml-eps install --provider nvtrtx --yes
 ```
 
-Windows ML build では `--provider windowsml` が catalog EP を優先し、使える EP
-がなければ DirectML、最後に CPU へ寄せます。特定の catalog EP を強制したい
-場合は `windowsml-nvtrtx` / `windowsml-qnn` / `windowsml-openvino` /
-`windowsml-migraphx` / `windowsml-vitisai` を指定します。これらの明示指定は
-fallback せず、EP が未導入または未準備ならエラーになります。
+## TensorRT の実行（tensorrt 版）
 
-Windows ML catalog EP の状態確認とインストールは CLI から明示的に実行できます。
-`install` で provider を省略すると、vc-rs の優先順位でそのマシンに compatible
-な最上位 EP を選択します。
+tensorrt 版は GPU 実行を **同梱の TensorRT ランタイム** で行うため、NVIDIA
+ドライバ以外の追加インストールは不要です。
 
-```powershell
-cargo run -- windowsml-eps list
-cargo run -- windowsml-eps install
-cargo run -- windowsml-eps install --provider nvtrtx --yes
-```
+> ⚠️ TensorRT は **初回実行時やモデル・入力形状が変わったとき**にエンジンを
+> 生成するため、起動に非常に長い時間がかかることがあります。2 回目以降は
+> エンジンキャッシュが再利用され、起動が短くなります。
 
-GPU 実行では、CPU より小さい `--chunk-ms` や大きい `--extra-convert-ms` を使えることが
-あります。設定を詰めるときは、先に音切れしない値を見つけ、その後に遅延を下げる
-方向で `--chunk-ms` を小さくしていくのが安全です。
+TensorRT の詳しい性能特性は
+[`docs/tensorrt_performance_ja.md`](docs/tensorrt_performance_ja.md) を参照して
+ください。
 
-GPU 実行に必要なランタイム（CUDA / cuDNN / TensorRT）の準備と `PATH` 設定は、
-開発者向けの [`docs/development_ja.md`](docs/development_ja.md#gpu-実行用ランタイム)
-を参照してください。
+## トラブルシューティング / FAQ
+
+**Q. windowsml 版が起動しない / モデル読み込みに失敗する**
+A. **Windows App SDK ランタイム（2.x 系）** がインストールされているか確認して
+ください（「必要なもの」参照）。
+
+**Q. exe を実行すると SmartScreen の警告が出る**
+A. 配布バイナリはコード署名していないため、Windows が警告を出すことがあります。
+内容を確認のうえ「詳細情報」→「実行」で起動してください。
+
+**Q. VST3 版が DAW でクラッシュする**
+A. プラグインのフォルダに古い `onnxruntime_providers_cuda.dll` などの余分な
+ONNX Runtime プロバイダ DLL が紛れ込んでいないか確認してください。windowsml 版の
+バンドルには ONNX Runtime / DirectML / CUDA の DLL は含めません（システムの
+Windows App SDK ランタイムが提供します）。配布 zip をそのまま展開した状態であれば
+混入しませんが、過去のビルドからコピーした場合は削除してください。
+
+**Q. `.pth` モデルが読み込めない**
+A. RVC 音声変換モデルは **`.onnx` のみ対応**です。RVC 系ツールや VCClient などで
+事前に ONNX へ変換してください。
+
+**Q. リアルタイムで音が途切れる・遅延が大きい**
+A. 「リアルタイム設定の調整」を参照してください。まず `--chunk-ms` を大きくして
+音切れを止め、その後で遅延を詰めます。
 
 ## 補助スクリプト
 
-`download-models.ps1` は任意の補助スクリプトです。第三者の参照用 ONNX モデルを
-[`wok000/weights_gpl`](https://huggingface.co/wok000/weights_gpl) からダウンロードします。
-
-このスクリプトで取得されるモデルファイルは `vc-rs` 本体には含まれず、この
-リポジトリの MIT License の対象でもありません。配布元リポジトリでは GPL-3.0 と
-表示されています。利用、改変、再配布を行う場合は、配布元のライセンスを確認して
-従ってください。
-
-```powershell
-.\download-models.ps1
-```
+`download-models.ps1` は任意の補助スクリプトです。第三者の参照用 ONNX モデル
+（ContentVec / RMVPE）を [`wok000/weights_gpl`](https://huggingface.co/wok000/weights_gpl)
+からダウンロードします。取得されるモデルは `vc-rs` 本体に含まれず、この
+リポジトリの MIT License の対象でもありません（配布元は GPL-3.0 表示）。
 
 ## Acknowledgements
 
@@ -159,4 +241,5 @@ GPU 実行に必要なランタイム（CUDA / cuDNN / TensorRT）の準備と `
 ## License
 
 MIT License（[`LICENSE`](LICENSE) を参照）。外部プロジェクトとモデルファイルに
-関する注意事項は [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) を参照してください。
+関する注意事項は [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) を参照して
+ください。
