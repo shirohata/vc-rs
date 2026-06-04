@@ -35,6 +35,7 @@ $ErrorActionPreference = "Stop"
 $Packages = @(
     @{ Name = "Rustup (Rust toolchain)"; Id = "Rustlang.Rustup"; Probe = "rustup" }
     @{ Name = "Git";                     Id = "Git.Git";         Probe = "git" }
+    @{ Name = "just (command runner)";   Id = "Casey.Just";      Probe = "just" }
 )
 
 function Test-CommandPresent([string]$Name) {
