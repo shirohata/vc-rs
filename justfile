@@ -44,6 +44,10 @@ build-cli variant="windowsml":
 bundle variant="windowsml":
     . ./scripts/activate.ps1; if ('{{variant}}' -eq 'tensorrt') { cargo xtask bundle vc-vst3 --release --no-default-features --features tensorrt } else { cargo xtask bundle vc-vst3 --release }
 
+# Build the VST3 plugin and run Steinberg's validator: `just validate-vst3 [windowsml|tensorrt]`.
+validate-vst3 variant="windowsml":
+    ./scripts/validate-vst3.ps1 -Variant {{variant}}
+
 # End-to-end check (tests + bundle); forwards flags, e.g. `just verify -Variant tensorrt`.
 verify *args:
     ./scripts/verify.ps1 {{args}}

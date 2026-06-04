@@ -61,13 +61,21 @@ tools\vst3sdk-build\bin\Release\validator.exe
 Use it against the local bundle:
 
 ```powershell
-. scripts/activate.ps1
-cargo xtask bundle vc-vst3
-& .\tools\vst3sdk-build\bin\Release\validator.exe .\target\bundled\vc-vst3.vst3
+pwsh -File scripts/validate-vst3.ps1
 ```
 
-Pass `-Update` to pull an existing SDK checkout, or `-CleanBuild` to recreate
-the CMake build directory.
+`validate-vst3.ps1` builds `target\bundled\vc-vst3.vst3` and validates it. If
+the validator is missing, it first runs `install-vst3-validator.ps1`.
+
+Useful flags:
+- `-Variant tensorrt` — build/validate the TensorRT VST3 variant.
+- `-DebugBuild` — validate a debug bundle instead of release.
+- `-PopulateRuntime` — copy the variant runtime DLLs into the bundle before
+  validation.
+- `-NoInstallValidator` — fail instead of auto-building the validator.
+
+For the validator install script itself, pass `-Update` to pull an existing SDK
+checkout, or `-CleanBuild` to recreate the CMake build directory.
 
 ## Package the distributables
 
