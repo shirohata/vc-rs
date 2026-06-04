@@ -220,5 +220,5 @@ the bundle, so end users only need an up-to-date NVIDIA GPU **driver**.
 
 ## Licensing note
 
-The VST3 SDK bindings (via nice-plug) are MIT-licensed, so the `.vst3` keeps the
+The VST3 SDK bindings (via nice-plug) are ISC-licensed, so the `.vst3` keeps the
 workspace's MIT license.

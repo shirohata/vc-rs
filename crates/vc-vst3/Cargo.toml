@@ -20,10 +20,10 @@ windowsml = ["vc-core/windowsml", "dep:ort"]
 tensorrt = ["vc-core/tensorrt"]
 
 [dependencies]
-# The VST3 SDK bindings (via nice-plug) are MIT-licensed, so the .vst3 keeps the
+# The VST3 SDK bindings (via nice-plug) are ISC-licensed, so the .vst3 keeps the
 # workspace's MIT license.
-nice-plug = { git = "https://codeberg.org/RustAudio/nice-plug.git", rev = "1a6858543dd655f77eda56ce9b633bf2af743881", features = ["vst3"] }
-nice-plug-egui = { git = "https://codeberg.org/RustAudio/nice-plug.git", rev = "1a6858543dd655f77eda56ce9b633bf2af743881" }
+nice-plug = { version = "0.1.2", features = ["vst3"] }
+nice-plug-egui = "0.1"
 egui = "0.34.1"
 vc-core = { path = "../vc-core" }
 rtrb = "0.3"

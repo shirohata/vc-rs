@@ -1,0 +1,28 @@
+# Third-Party Licenses
+
+This software bundles the following third-party Rust crates. Each crate is
+distributed under the license(s) shown below. This file is generated with
+`cargo about generate`.
+
+## Overview
+
+{{#each overview}}
+- **{{name}}**: {{count}} crate(s)
+{{/each}}
+
+{{#each licenses}}
+## {{name}}
+
+{{#if link}}<{{link}}>{{/if}}
+
+Used by:
+
+{{#each used_by}}
+- {{crate.name}} {{crate.version}}{{#if crate.repository}} — <{{crate.repository}}>{{/if}}
+{{/each}}
+
+```
+{{{text}}}
+```
+
+{{/each}}

@@ -41,6 +41,6 @@ Notes:
 ## Plugin licensing (both variants)
 
 The `.vst3` plugin binary is under this project's MIT license (the VST3 SDK
-bindings used via nice-plug are MIT-licensed). The bundled NVIDIA / Microsoft
+bindings used via nice-plug are ISC-licensed). The bundled NVIDIA / Microsoft
 DLLs are separate aggregated works under their own licenses listed above (mere
 aggregation).
