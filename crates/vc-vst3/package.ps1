@@ -8,6 +8,8 @@
 
         1. cargo xtask bundle vc-vst3 --release  (with the variant's features)
         2. (tensorrt only) build the ORT-free engine builder helper if needed
+        2b. regenerate dist\licenses\THIRD-PARTY-LICENSES.md with cargo-about so
+            the bundled Rust-crate notice matches this variant's dependencies
         3. the matching populate script (package-windowsml|tensorrt.ps1),
            which copies the runtime DLLs + licenses into the bundle
         4. stage vc-vst3.vst3 + LICENSE + a generated INSTALL.txt
@@ -49,6 +51,11 @@
 .PARAMETER CleanStage
     Remove the staged dist\<stem>\ folder after zipping, overriding the
     default-keep for windowsml.
+
+.PARAMETER SkipLicenseGen
+    Skip running cargo-about to regenerate dist\licenses\THIRD-PARTY-LICENSES.md.
+    The committed copy is shipped as-is. Generation is also skipped automatically
+    (with a warning) when cargo-about is not installed.
 
 .PARAMETER TensorRtBin
     (tensorrt) TensorRT bin directory. Forwarded to package-tensorrt.ps1.
@@ -95,6 +102,10 @@ param(
     # multi-GB). -KeepStage forces keep; -CleanStage forces removal.
     [switch]$KeepStage,
     [switch]$CleanStage,
+
+    # Skip regenerating dist\licenses\THIRD-PARTY-LICENSES.md with cargo-about;
+    # ship the committed copy as-is.
+    [switch]$SkipLicenseGen,
 
     # tensorrt
     [string]$TensorRtBin,
@@ -146,6 +157,29 @@ try {
     }
     else {
         Write-Host "==> Skipping build (-SkipBuild); reusing $bundleDir" -ForegroundColor Yellow
+    }
+
+    # 2b. Regenerate the third-party Rust-crate license notice so the shipped
+    #     THIRD-PARTY-LICENSES.md reflects THIS variant's dependency tree (e.g.
+    #     the tensorrt build drops ORT). It lives in dist\licenses\, which the
+    #     populate step copies into the bundle, so this must run first. The
+    #     feature flags match the bundle build. Skipped gracefully when
+    #     cargo-about is absent so packaging never hard-depends on it.
+    if (-not $SkipLicenseGen) {
+        if (Get-Command cargo-about -ErrorAction SilentlyContinue) {
+            $aboutCfg = Join-Path $PSScriptRoot 'about.toml'
+            $aboutTpl = Join-Path $PSScriptRoot 'about.hbs'
+            $licOut = Join-Path $PSScriptRoot 'dist\licenses\THIRD-PARTY-LICENSES.md'
+            Write-Host "==> cargo about generate ($Variant features)" -ForegroundColor Cyan
+            cargo about generate --manifest-path $PSScriptRoot\Cargo.toml -c $aboutCfg --locked @bundleFeatureArgs $aboutTpl -o $licOut
+            if ($LASTEXITCODE -ne 0) { throw "cargo about generate failed (exit $LASTEXITCODE)." }
+        }
+        else {
+            Write-Warning @"
+cargo-about not found; shipping the committed THIRD-PARTY-LICENSES.md as-is.
+Install it to regenerate the notice: cargo install cargo-about --features cli
+"@
+        }
     }
 
     # 3. Populate the bundle with the variant's runtime DLLs + licenses by
