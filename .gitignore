@@ -1,5 +1,7 @@
 /target/
 /tools/*/target/
+/tools/vst3sdk/
+/tools/vst3sdk-build/
 /dist/
 
 *.wav

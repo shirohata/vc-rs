@@ -42,6 +42,33 @@ Runs `cargo test --workspace` then `cargo xtask bundle vc-vst3`. Flags:
 - `-SkipBundle` — tests only.
 - `-NoNativeTensorRT` — skip the GPU stack and run tests fast.
 
+## Local VST3 validator
+
+For VST3 smoke tests, build Steinberg's command-line validator into the
+repository:
+
+```powershell
+pwsh -File scripts/install-vst3-validator.ps1
+```
+
+This clones the VST3 SDK into `tools\vst3sdk\`, builds it in
+`tools\vst3sdk-build\`, and leaves the validator at:
+
+```powershell
+tools\vst3sdk-build\bin\Release\validator.exe
+```
+
+Use it against the local bundle:
+
+```powershell
+. scripts/activate.ps1
+cargo xtask bundle vc-vst3
+& .\tools\vst3sdk-build\bin\Release\validator.exe .\target\bundled\vc-vst3.vst3
+```
+
+Pass `-Update` to pull an existing SDK checkout, or `-CleanBuild` to recreate
+the CMake build directory.
+
 ## Package the distributables
 
 The shipped Windows distributions are four packages: `cli-windowsml`,
