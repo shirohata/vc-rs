@@ -23,6 +23,27 @@ const MS_STEP: u32 = 10;
 const MIN_EXTRA_CONVERT_MS: u32 = 0;
 const MAX_EXTRA_CONVERT_MS: u32 = 3000;
 
+/// Backend choices offered in the GUI, scoped to the providers this package was
+/// actually built with (see `config::PluginConfig::provider`). The variants are
+/// mutually exclusive by cargo feature, so each distributed package shows only
+/// its own backends — e.g. the Windows ML package never lists `cuda`, and the
+/// TensorRT package (no ORT) lists only `tensorrt`.
+#[cfg(feature = "windowsml")]
+const PROVIDER_OPTIONS: &[&str] = &["windowsml", "windowsml-directml", "cpu"];
+
+#[cfg(all(feature = "tensorrt", not(feature = "windowsml")))]
+const PROVIDER_OPTIONS: &[&str] = &["tensorrt"];
+
+#[cfg(all(
+    feature = "cuda",
+    not(feature = "windowsml"),
+    not(feature = "tensorrt")
+))]
+const PROVIDER_OPTIONS: &[&str] = &["cuda", "cpu"];
+
+#[cfg(not(any(feature = "windowsml", feature = "tensorrt", feature = "cuda")))]
+const PROVIDER_OPTIONS: &[&str] = &["cpu"];
+
 /// Shared state handed to the egui update closure.
 pub struct EditorState {
     pub params: Arc<VcRvcParams>,
@@ -106,7 +127,7 @@ fn draw_contents(ui: &mut egui::Ui, setter: &ParamSetter, state: &mut EditorStat
         egui::ComboBox::from_id_salt("provider")
             .selected_text(provider.to_uppercase())
             .show_ui(ui, |ui| {
-                for option in ["cpu", "cuda"] {
+                for &option in PROVIDER_OPTIONS {
                     if ui
                         .selectable_label(provider == option, option.to_uppercase())
                         .clicked()

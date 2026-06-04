@@ -1,4 +1,4 @@
-# vc-rs VST3/CLAP plugin configuration — OPTIONAL headless seed.
+# vc-rs VST3 plugin configuration — OPTIONAL headless seed.
 #
 # The plugin normally gets its models from the GUI (Browse buttons) and stores
 # them in the project's plugin state. This file only SEEDS a fresh instance that

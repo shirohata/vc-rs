@@ -18,13 +18,15 @@
     Two layers of dependency:
       * Runtime (engine execution): nvinfer_<N>, nvinfer_plugin_<N>, cudart64_<M>.
         Always copied.
-      * Engine build (first run, on a cache miss): vc-rs links ONNX Runtime for its
-        Windows ML / CPU providers, and ORT cannot share a process with the
-        TensorRT builder, so engine construction is delegated to the ORT-free
-        helper `vc-tensorrt-builder.exe`. The CLI auto-discovers it beside its own
-        executable (no env var needed, unlike the plugin). The helper needs
-        nvonnxparser_<N> and the `nvinfer_builder_resource_sm*_<N>.dll` matching
-        the user's GPU. Copied unless -RuntimeOnly.
+      * Engine build (first run, on a cache miss): the TensorRT builder API can't
+        run in a process where ONNX Runtime has already initialized, so engine
+        construction is delegated to the ORT-free helper `vc-tensorrt-builder.exe`.
+        (This packaged build drops ORT entirely — `--features tensorrt` pulls in
+        no ONNX Runtime — but the helper is the shared, robust build path.) The
+        CLI auto-discovers it beside its own executable (no env var needed, unlike
+        the plugin). The helper needs nvonnxparser_<N> and the
+        `nvinfer_builder_resource_sm*_<N>.dll` matching the user's GPU. Copied
+        unless -RuntimeOnly.
 
 .PARAMETER DestDir
     Directory holding vc-rs.exe to populate. Default: target\release.

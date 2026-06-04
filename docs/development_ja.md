@@ -35,7 +35,7 @@ CLI（`vc-rs`）:
 cargo build --release
 ```
 
-VST3 / CLAP プラグイン（`vc-vst3`）:
+VST3 プラグイン（`vc-vst3`）:
 
 ```powershell
 cargo xtask bundle vc-vst3 --release

@@ -1,15 +1,15 @@
 <#
 .SYNOPSIS
     Verify the vc-rs build environment by running the test suite and bundling
-    the VST3/CLAP plugin.
+    the VST3 plugin.
 
 .DESCRIPTION
     Activates the matched CUDA/cuDNN/TensorRT line (via scripts/activate.ps1),
     then runs `cargo test` and `cargo xtask bundle vc-vst3`. A clean pass means
     the toolchain, MSVC C++, and the GPU SDKs are wired up correctly.
 
-    By default it builds the CUDA plugin variant. Use -Variant tensorrt for the
-    TensorRT-only build, or -SkipBundle to only run tests.
+    By default it builds the Windows ML plugin variant. Use -Variant tensorrt for
+    the TensorRT-only build, or -SkipBundle to only run tests.
 
     Tests link the native TensorRT shim (via the CLI's `tensorrt` feature), so
     the TensorRT bin must be on PATH or the test exes fail to launch with
@@ -17,7 +17,7 @@
     GPU stack, pass -NoNativeTensorRT (sets VC_RS_ENABLE_NATIVE_TENSORRT=0).
 
 .PARAMETER Variant
-    Plugin bundle variant to build: 'cuda' (default) or 'tensorrt'.
+    Plugin bundle variant to build: 'windowsml' (default) or 'tensorrt'.
 
 .EXAMPLE
     pwsh -File scripts/verify.ps1
@@ -27,8 +27,8 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('cuda', 'tensorrt')]
-    [string]$Variant = 'cuda',
+    [ValidateSet('windowsml', 'tensorrt')]
+    [string]$Variant = 'windowsml',
 
     [switch]$SkipBundle,
 
@@ -69,7 +69,7 @@ try {
                 cargo xtask bundle vc-vst3 --release --no-default-features --features tensorrt
             }
         } else {
-            Invoke-Step "cargo xtask bundle vc-vst3 (cuda)" {
+            Invoke-Step "cargo xtask bundle vc-vst3 (windowsml)" {
                 cargo xtask bundle vc-vst3 --release
             }
         }

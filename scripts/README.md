@@ -38,9 +38,36 @@ pwsh -File scripts/verify.ps1
 ```
 
 Runs `cargo test --workspace` then `cargo xtask bundle vc-vst3`. Flags:
-- `-Variant tensorrt` — build the TensorRT-only bundle instead of CUDA.
+- `-Variant tensorrt` — build the TensorRT bundle instead of the default Windows ML one.
 - `-SkipBundle` — tests only.
 - `-NoNativeTensorRT` — skip the GPU stack and run tests fast.
+
+## Package the distributables
+
+The shipped Windows distributions are four packages: `cli-windowsml`,
+`cli-tensorrt`, `vst3-windowsml`, and `vst3-tensorrt`. Each crate's
+`package.ps1` builds one (`-Variant windowsml|tensorrt`); `package-all.ps1`
+drives all four into `dist\`:
+
+```powershell
+. scripts/activate.ps1                 # tensorrt targets need the GPU toolchain
+pwsh scripts/package-all.ps1 -BuilderSm sm86
+```
+
+Alongside each `.zip`, a populated, ready-to-run `dist\<stem>\` folder (binary +
+DLLs + licenses) is left in place for quick local testing — kept by default for
+the windowsml variants and removed for tensorrt (which can be multiple GB). All
+of `dist\` is gitignored.
+
+Flags:
+- `-Targets cli-windowsml,vst3-windowsml` — build only a subset (e.g. the
+  Windows ML pair, which needs no GPU toolchain).
+- `-BuilderSm <sm..>` / `-RuntimeOnly` / `-TensorRtBin <dir>` — forwarded to the
+  tensorrt targets (see each crate's `package-tensorrt.ps1`).
+- `-KeepStage` / `-CleanStage` — force keeping (e.g. tensorrt) or removing the
+  ready-to-run `dist\<stem>\` folders, overriding the per-variant default.
+- `-OutDir <dir>` — where the `.zip` files (and kept folders) land (default `dist\`).
+- `-ContinueOnError` — keep building after a failure and report a summary.
 
 ## Gotcha: STATUS_DLL_NOT_FOUND
 

@@ -1,4 +1,4 @@
-# vc-vst3 — RVC voice conversion VST3 / CLAP plugin
+# vc-vst3 — RVC voice conversion VST3 plugin
 
 A DAW plugin front-end for the same RVC pipeline the CLI (`vc-cli`) uses. It
 reuses `vc-core` and feeds the pipeline from the host's `process()` callback
@@ -30,7 +30,9 @@ Open the plugin's editor in your DAW ([`editor.rs`](src/editor.rs), egui). From
 there you can:
 
 - **Browse** for the RVC model, embedder, and F0 (RMVPE) `.onnx` files
-- choose the **backend** (CPU / Windows ML / CUDA / TensorRT, depending on the package)
+- choose the **backend** — the GUI lists only the providers this package was
+  built with: the Windows ML package offers `windowsml` (auto), `windowsml-directml`,
+  and `cpu`; the TensorRT package offers `tensorrt`
 - set the **chunk size** (ms) — larger means more latency but more context
 - hit **Load / Reload** to apply model / backend / chunk edits
 - watch the **status** line (`no models configured` / `models configured; click
@@ -68,31 +70,31 @@ from the config and apply on (re)instantiation.
 
 The default Windows package uses **Windows ML** through Windows App SDK Runtime
 2.x. This keeps `onnxruntime.dll` and `DirectML.dll` out of the bundle; the app
-only ships the small Windows App SDK bootstrapper DLL. CUDA and native TensorRT
-packages remain available as explicit cargo feature builds.
+only ships the small Windows App SDK bootstrapper DLL. A native **TensorRT**
+package is the other distributed variant. (A `cuda` cargo feature still exists
+for local development — `--no-default-features --features cuda` — but it is no
+longer a packaged distribution; see git history for the old `package-cuda.ps1`.)
 
 ### One-shot packaging (recommended)
 
 [`package.ps1`](package.ps1) runs the whole distribution pipeline for a chosen
 variant: `cargo xtask bundle` → (TensorRT) build the engine-builder helper →
 the matching `package-<variant>.ps1` populate step → stage `vc-vst3.vst3` +
-`vc-vst3.clap` + `LICENSE` + a generated `INSTALL.txt` → a versioned
+`LICENSE` + a generated `INSTALL.txt` → a versioned
 `dist\vc-vst3-<variant>-v<version>-win-x64.zip`.
 
 ```powershell
 pwsh crates\vc-vst3\package.ps1                                  # Windows ML (default)
-pwsh crates\vc-vst3\package.ps1 -Variant cuda `
-  -CudaBin "...\CUDA\v12.9\bin" -CudnnBin "...\CUDNN\v9.22\bin\12.9\x64"
 pwsh crates\vc-vst3\package.ps1 -Variant tensorrt -BuilderSm sm86
 ```
 
 Variant-specific options are forwarded to the populate script. Useful flags:
 `-OutDir <dir>` (default `dist\`), `-SkipBuild` (reuse `target\bundled`),
-`-NoZip` (populate only), `-Clean` (drop stale bundles first). For the `cuda`
-and `tensorrt` variants set up the matching CUDA/TensorRT toolchain on `PATH`
-first (e.g. dot-source [`scripts\activate.ps1`](../../scripts/activate.ps1)) —
-the script does not modify your environment. The steps below document the
-underlying cargo + populate commands the script orchestrates.
+`-NoZip` (populate only), `-Clean` (drop stale bundles first). For the `tensorrt`
+variant set up the matching CUDA/TensorRT toolchain on `PATH` first (e.g.
+dot-source [`scripts\activate.ps1`](../../scripts/activate.ps1)) — the script
+does not modify your environment. The steps below document the underlying cargo +
+populate commands the script orchestrates.
 
 ### Windows ML package (default, Windows)
 
@@ -120,19 +122,17 @@ pwsh crates\vc-vst3\package-windowsml.ps1
 Do not bundle `onnxruntime.dll`, `DirectML.dll`, CUDA, or cuDNN DLLs for this
 package. Those are provided by Windows App SDK Runtime.
 
-### CUDA package
+### CUDA build (development only — not a distributed package)
 
 ```sh
 ORT_CUDA_VERSION=12
 cargo xtask bundle vc-vst3 --release --no-default-features --features cuda
 ```
 
-Enables the ONNX Runtime **CUDA execution provider** (`vc-core/cuda`). The
-plugin has *no* load-time NVIDIA dependency — the CUDA EP and its DLLs load at
-runtime — so it loads in a DAW even without NVIDIA libraries installed; GPU
-execution then needs the CUDA runtime DLLs (see below). The repo's Cargo config
-pins `ORT_CUDA_VERSION=12` so the downloaded ONNX Runtime CUDA provider matches
-the CUDA 12.x DLLs copied by `package-cuda.ps1`.
+Enables the ONNX Runtime **CUDA execution provider** (`vc-core/cuda`). This is
+kept for local development; it is no longer one of the packaged distributions, so
+there is no populate script for it (the old `package-cuda.ps1` lives in git
+history). For self-contained GPU distribution, prefer the TensorRT package below.
 
 ### TensorRT package
 
@@ -164,36 +164,10 @@ After bundling, populate the TensorRT runtime with
 [`package-tensorrt.ps1`](package-tensorrt.ps1) (see *Bundling the TensorRT
 runtime* below).
 
-Output bundles land in `target/bundled/`:
+The output bundle lands in `target/bundled/`:
 
 - `vc-vst3.vst3` — a bundle; the binary lives in a platform-specific
   `Contents/<arch>/` subfolder (e.g. `x86_64-win`, `x86_64-linux`, `MacOS`)
-- `vc-vst3.clap`
-
-### Bundling the CUDA runtime (self-contained GPU build, Windows)
-
-So users don't have to install CUDA/cuDNN or edit `PATH`, the required CUDA
-12.x / cuDNN 9.x DLLs can be shipped beside the plugin. The ONNX Runtime *core*
-is statically linked, so only its CUDA execution-provider DLLs and their
-CUDA/cuDNN dependencies are needed; the plugin makes its own folder discoverable
-for bundled DLLs at startup without changing the DAW process' default DLL search
-policy, and preloads the bundled DLLs on the explicit CUDA Load / Reload path
-when they are present ([`src/dll_path.rs`](src/dll_path.rs)).
-
-After bundling, run [`package-cuda.ps1`](package-cuda.ps1):
-
-```powershell
-pwsh crates\vc-vst3\package-cuda.ps1 `
-  -CudaBin "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9\bin" `
-  -CudnnBin "C:\Program Files\NVIDIA\CUDNN\v9.22\bin\12.9\x64"
-```
-
-This copies the minimal set (ONNX Runtime CUDA provider DLLs + `cudart`,
-`cublas`, `cublasLt`, `cufft`, and the `cudnn*64_9` libraries) plus the license
-files in [`dist/licenses/`](dist/licenses) into the bundle. End users then only
-need an up-to-date NVIDIA GPU **driver** — no CUDA/cuDNN install. See
-[`dist/licenses/THIRD-PARTY-NOTICES.md`](dist/licenses/THIRD-PARTY-NOTICES.md)
-for redistribution terms.
 
 ### Bundling the TensorRT runtime (self-contained GPU build, Windows)
 
@@ -222,7 +196,7 @@ pwsh crates\vc-vst3\package-tensorrt.ps1 -RuntimeOnly
 
 The builder resource DLLs are GPU-architecture specific and large (~160–640 MB
 each); with no `-BuilderSm` the script bundles them all (~2.5 GB) and warns.
-Because a VST3/CLAP host's process is the DAW (not the plugin), the plugin finds
+Because a VST3 host's process is the DAW (not the plugin), the plugin finds
 the bundled helper via the `VC_RS_TENSORRT_BUILDER_HELPER` env var — set it to
 the helper's path in the installed plugin folder (the script prints the exact
 command). With engines prebuilt and cached, only the runtime layer is needed at
@@ -230,27 +204,21 @@ play time. End users otherwise need just an up-to-date NVIDIA GPU **driver**.
 
 ## Install
 
-Copy the bundle into a standard plugin search path for your OS:
+Copy the `vc-vst3.vst3` bundle into a standard VST3 search path for your OS:
 
-- VST3 — Windows: `%CommonProgramFiles%\VST3\`; macOS:
+- Windows: `%CommonProgramFiles%\VST3\`; macOS:
   `~/Library/Audio/Plug-Ins/VST3/`; Linux: `~/.vst3/`
-- CLAP — Windows: `%CommonProgramFiles%\CLAP\`; macOS:
-  `~/Library/Audio/Plug-Ins/CLAP/`; Linux: `~/.clap/`
 
 For the default Windows ML package, install Windows App SDK Runtime 2.x and run
 `package-windowsml.ps1` so `Microsoft.WindowsAppRuntime.Bootstrap.dll` is beside
 the plugin binary. No ONNX Runtime, DirectML, CUDA, or cuDNN DLLs should be
 copied into that bundle.
 
-For the CUDA package, GPU execution needs the ONNX Runtime CUDA provider DLLs
-and the CUDA / cuDNN runtime libraries. Two options:
-
-- **Self-contained (recommended):** run `package-cuda.ps1` (see above) so the
-  DLLs ship inside the bundle. No `PATH` setup needed — only an NVIDIA driver.
-- **System install:** put the CUDA / cuDNN library directories on the OS dynamic
-  library search path, or launch the DAW from a shell that already has them set.
+For the TensorRT package, GPU execution needs the bundled TensorRT runtime DLLs
+beside the plugin binary — `package-tensorrt.ps1` (see above) copies them into
+the bundle, so end users only need an up-to-date NVIDIA GPU **driver**.
 
 ## Licensing note
 
-Building the **VST3** target links the Steinberg VST3 SDK bindings (GPLv3) via
-nice-plug, so the resulting `.vst3` is GPLv3. The `.clap` bundle is not affected.
+The VST3 SDK bindings (via nice-plug) are MIT-licensed, so the `.vst3` keeps the
+workspace's MIT license.

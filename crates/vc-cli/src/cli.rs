@@ -4,6 +4,30 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 pub use vc_core::Provider;
 
+/// Default inference backend for this build. The distribution packages are
+/// single-provider (`package.ps1` builds `--no-default-features --features
+/// windowsml|tensorrt`), so the default tracks the one backend that package
+/// ships — Windows ML for the windowsml package, native TensorRT for the
+/// tensorrt package. The combined dev binary (both features, via `cargo build`)
+/// and any CPU-only build fall back to `cpu`, which always works there.
+#[cfg(all(feature = "windowsml", not(feature = "tensorrt")))]
+pub fn default_provider() -> Provider {
+    Provider::WindowsMl
+}
+
+#[cfg(all(feature = "tensorrt", not(feature = "windowsml")))]
+pub fn default_provider() -> Provider {
+    Provider::TensorRt
+}
+
+#[cfg(not(any(
+    all(feature = "windowsml", not(feature = "tensorrt")),
+    all(feature = "tensorrt", not(feature = "windowsml")),
+)))]
+pub fn default_provider() -> Provider {
+    Provider::Cpu
+}
+
 pub const DEFAULT_CROSSFADE_MS: u32 = 85;
 pub const DEFAULT_EXTRA_CONVERT_MS: u32 = 100;
 pub const DEFAULT_INPUT_GAIN: f32 = 1.0;
@@ -116,7 +140,7 @@ pub struct RunArgs {
     pub extra_convert_ms: u32,
     #[arg(long, default_value_t = 0.0001)]
     pub silence_threshold: f32,
-    #[arg(long, value_enum, default_value_t = Provider::Cpu)]
+    #[arg(long, value_enum, default_value_t = default_provider())]
     pub provider: Provider,
     #[arg(long, default_value_t = 0)]
     pub speaker_id: i64,
@@ -168,7 +192,7 @@ pub struct WavArgs {
     pub smoother: Smoother,
     #[arg(long, default_value_t = DEFAULT_RVC_OUTPUT_TAIL_DISCARD_MS)]
     pub rvc_output_tail_discard_ms: u32,
-    #[arg(long, value_enum, default_value_t = Provider::Cpu)]
+    #[arg(long, value_enum, default_value_t = default_provider())]
     pub provider: Provider,
     #[arg(long, default_value_t = 0)]
     pub speaker_id: i64,

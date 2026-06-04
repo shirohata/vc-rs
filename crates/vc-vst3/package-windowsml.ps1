@@ -30,11 +30,16 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot '..\..')
+$licenseSrc = Join-Path $PSScriptRoot 'dist\licenses'
 if (-not $BundleDir) { $BundleDir = Join-Path $repoRoot 'target\bundled' }
 # Don't hard-fail here if the bundle dir is missing; let the bundle check below
 # report the actionable "run cargo xtask bundle first" message instead.
 if (Test-Path $BundleDir) { $BundleDir = (Resolve-Path $BundleDir).Path }
 
+# When downloading the nupkg we also grab its license.txt — the bootstrapper we
+# redistribute is under Microsoft's Windows App SDK license terms, which require
+# the license to travel with the redistributed DLL.
+$SdkLicense = $null
 if (-not $BootstrapDll) {
     $cache = Join-Path ([System.IO.Path]::GetTempPath()) "vc-rs-windowsappsdk-foundation-$FoundationVersion"
     $nupkg = Join-Path $cache "Microsoft.WindowsAppSDK.Foundation.$FoundationVersion.nupkg"
@@ -46,6 +51,8 @@ if (-not $BootstrapDll) {
     }
     Expand-Archive -LiteralPath $nupkg -DestinationPath $extract -Force
     $BootstrapDll = Join-Path $extract 'runtimes\win-x64\native\Microsoft.WindowsAppRuntime.Bootstrap.dll'
+    $nupkgLicense = Join-Path $extract 'license.txt'
+    if (Test-Path $nupkgLicense) { $SdkLicense = $nupkgLicense }
 }
 
 if (-not (Test-Path $BootstrapDll)) {
@@ -55,11 +62,30 @@ if (-not (Test-Path $BootstrapDll)) {
 $dests = @()
 $vst3Bin = Join-Path $BundleDir 'vc-vst3.vst3\Contents\x86_64-win'
 if (Test-Path $vst3Bin) { $dests += $vst3Bin }
-if (Test-Path (Join-Path $BundleDir 'vc-vst3.clap')) { $dests += $BundleDir }
 if (-not $dests) { throw "No bundle found in $BundleDir. Run 'cargo xtask bundle vc-vst3 --release' first." }
 
 foreach ($dest in $dests) {
     Copy-Item $BootstrapDll (Join-Path $dest 'Microsoft.WindowsAppRuntime.Bootstrap.dll') -Force
+
+    # Third-party license texts next to the binary (onnxruntime + notices), plus
+    # the Windows App SDK license for the bootstrapper we just copied.
+    $licDest = Join-Path $dest 'licenses'
+    New-Item -ItemType Directory -Force -Path $licDest | Out-Null
+    if (Test-Path $licenseSrc) {
+        Copy-Item -Path (Join-Path $licenseSrc '*') -Destination $licDest -Recurse -Force
+    }
+    if ($SdkLicense) {
+        Copy-Item $SdkLicense (Join-Path $licDest 'WindowsAppSDK-LICENSE.txt') -Force
+    }
 }
 
-Write-Host "Done: bundled Microsoft.WindowsAppRuntime.Bootstrap.dll into $($dests.Count) location(s)." -ForegroundColor Green
+if (-not $SdkLicense) {
+    Write-Warning @"
+Windows App SDK license text was not bundled (you passed -BootstrapDll directly,
+so the nupkg license.txt was not available). The redistributed bootstrapper is
+under Microsoft's Windows App SDK license terms — copy the matching license.txt
+into each bundle's licenses\WindowsAppSDK-LICENSE.txt before shipping.
+"@
+}
+
+Write-Host "Done: bundled Microsoft.WindowsAppRuntime.Bootstrap.dll + licenses into $($dests.Count) location(s)." -ForegroundColor Green

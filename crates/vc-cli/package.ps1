@@ -34,8 +34,17 @@
     The stage, populate, and archive steps still run.
 
 .PARAMETER NoZip
-    Stage and populate the package but stop before creating the .zip (useful for
-    inspecting dist\_stage_<variant>).
+    Stage and populate the package but stop before creating the .zip. The
+    populated, ready-to-run dist\<stem>\ folder is left in place.
+
+.PARAMETER KeepStage
+    Keep the populated dist\<stem>\ folder beside the .zip. By default it is kept
+    for windowsml and removed for tensorrt (which can be multiple GB). Use this to
+    keep a tensorrt folder too.
+
+.PARAMETER CleanStage
+    Remove the populated dist\<stem>\ folder after zipping, overriding the
+    default-keep for windowsml.
 
 .PARAMETER TensorRtBin
     (tensorrt) TensorRT bin directory. Forwarded to package-tensorrt.ps1.
@@ -83,6 +92,11 @@ param(
     [string]$OutDir,
     [switch]$SkipBuild,
     [switch]$NoZip,
+    # Keep the populated, ready-to-run dist\<stem>\ folder beside the .zip. By
+    # default it is kept for windowsml (small, handy for testing) and removed for
+    # tensorrt (can be multi-GB). -KeepStage forces keep; -CleanStage forces removal.
+    [switch]$KeepStage,
+    [switch]$CleanStage,
 
     # tensorrt
     [string]$TensorRtBin,
@@ -134,7 +148,8 @@ try {
     if (-not (Test-Path $exe)) { throw "vc-rs.exe not found in $releaseDir. Run without -SkipBuild first." }
 
     # 2. Stage vc-rs.exe into its own folder so the populate step drops the
-    #    variant DLLs beside it (and so we don't pollute target\release).
+    #    variant DLLs beside it (and so we don't pollute target\release). The
+    #    folder is named after the archive stem so a kept dir sits next to its .zip.
     $tag = $Variant
     if ($Variant -eq 'tensorrt') {
         if ($RuntimeOnly) { $tag += '-runtime' }
@@ -143,7 +158,14 @@ try {
         }
     }
 
-    $staging = Join-Path $OutDir "_stage_$tag"
+    $version = '0.0.0'
+    $wsToml = Get-Content (Join-Path $repoRoot 'Cargo.toml') -Raw
+    if ($wsToml -match '(?ms)\[workspace\.package\].*?^\s*version\s*=\s*"([^"]+)"') {
+        $version = $Matches[1]
+    }
+    $stem = "vc-rs-cli-$tag-v$version-win-x64"
+
+    $staging = Join-Path $OutDir $stem
     if (Test-Path $staging) { Remove-Item -Recurse -Force $staging }
     New-Item -ItemType Directory -Force -Path $staging | Out-Null
     Copy-Item $exe (Join-Path $staging 'vc-rs.exe') -Force
@@ -169,15 +191,14 @@ try {
     Write-Host "==> $((Split-Path $populateScript -Leaf))" -ForegroundColor Cyan
     & $populateScript @forward
 
-    # 4. License + a short install/usage note.
+    # 4. License + a short install/usage note. Also ship the optional model
+    #    downloader beside vc-rs.exe; it fetches the shared embedder + F0 models
+    #    into .\assets\ (relative to itself), which the run flags below point at.
     $license = Join-Path $repoRoot 'LICENSE'
     if (Test-Path $license) { Copy-Item $license (Join-Path $staging 'LICENSE') -Force }
 
-    $version = '0.0.0'
-    $wsToml = Get-Content (Join-Path $repoRoot 'Cargo.toml') -Raw
-    if ($wsToml -match '(?ms)\[workspace\.package\].*?^\s*version\s*=\s*"([^"]+)"') {
-        $version = $Matches[1]
-    }
+    $modelDl = Join-Path $repoRoot 'download-models.ps1'
+    if (Test-Path $modelDl) { Copy-Item $modelDl (Join-Path $staging 'download-models.ps1') -Force }
 
     $reqLine = switch ($Variant) {
         'windowsml' { '  Windows App SDK Runtime 2.x installed (provides ONNX Runtime + DirectML).' }
@@ -198,7 +219,17 @@ vc-rs — RVC voice conversion CLI ($Variant build, v$version)
 Run from this folder (keep the DLLs beside vc-rs.exe):
     .\vc-rs.exe --help
     .\vc-rs.exe devices
-    .\vc-rs.exe run --model <model.onnx> --provider $(if ($Variant -eq 'tensorrt') { 'tensorrt' } else { 'windowsml' })
+
+Models — get the shared embedder + F0 models (optional helper):
+    pwsh .\download-models.ps1
+This downloads ContentVec + RMVPE into .\assets\. You still supply your own RVC
+voice model (.onnx). Then run:
+    .\vc-rs.exe run --model <your-rvc-model.onnx> ``
+        --embedder .\assets\content_vec_500.onnx ``
+        --f0-model .\assets\rmvpe.onnx ``
+        --provider $(if ($Variant -eq 'tensorrt') { 'tensorrt' } else { 'windowsml' })
+The downloaded models are third-party (GPL-3.0 upstream), not covered by this
+package's MIT license — see download-models.ps1.
 
 Requirements for this ($Variant) build:
 $reqLine
@@ -214,11 +245,20 @@ See licenses\ for third-party license texts.
 
     # 5. Archive.
     New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
-    $stem = "vc-rs-cli-$tag-v$version-win-x64"
     $zip = Join-Path $OutDir "$stem.zip"
     if (Test-Path $zip) { Remove-Item -Force $zip }
     Compress-Archive -Path (Join-Path $staging '*') -DestinationPath $zip -CompressionLevel Optimal
-    Remove-Item -Recurse -Force $staging
+
+    # 6. Keep or remove the ready-to-run dir. Default: keep windowsml (small,
+    #    handy for testing), drop tensorrt (can be multi-GB). Flags override.
+    if ($KeepStage -and $CleanStage) { throw "Pass only one of -KeepStage / -CleanStage." }
+    $keepDir = if ($KeepStage) { $true } elseif ($CleanStage) { $false } else { $Variant -eq 'windowsml' }
+    if ($keepDir) {
+        Write-Host "==> Kept ready-to-run dir: $staging" -ForegroundColor Green
+    }
+    else {
+        Remove-Item -Recurse -Force $staging
+    }
 
     $size = (Get-Item $zip).Length
     Write-Host ("==> Done: {0} ({1:N1} MB)" -f $zip, ($size / 1MB)) -ForegroundColor Green

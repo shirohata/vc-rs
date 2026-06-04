@@ -8,23 +8,23 @@
 
         1. cargo xtask bundle vc-vst3 --release  (with the variant's features)
         2. (tensorrt only) build the ORT-free engine builder helper if needed
-        3. the matching populate script (package-windowsml|cuda|tensorrt.ps1),
+        3. the matching populate script (package-windowsml|tensorrt.ps1),
            which copies the runtime DLLs + licenses into the bundle
-        4. stage vc-vst3.vst3 + vc-vst3.clap + LICENSE + a generated INSTALL.txt
+        4. stage vc-vst3.vst3 + LICENSE + a generated INSTALL.txt
         5. Compress-Archive into dist\vc-vst3-<variant>-v<version>-win-x64.zip
 
     The populate scripts are reused as-is; this only orchestrates them and adds
     the build + archive steps. Variant-specific options are forwarded to the
     populate script (see the parameters below and the examples).
 
-    Toolchain note: the cuda and tensorrt builds compile native code that needs
-    the matching CUDA/TensorRT toolchain reachable (e.g. dot-source
+    Toolchain note: the tensorrt build compiles native code that needs the
+    matching CUDA/TensorRT toolchain reachable (e.g. dot-source
     scripts\activate.ps1 first). This script does not modify your environment;
-    set it up before running so the cuda (CUDA 12.x) or tensorrt (CUDA 13.x /
-    TensorRT) build links correctly.
+    set it up before running so the tensorrt (CUDA 13.x / TensorRT) build links
+    correctly.
 
 .PARAMETER Variant
-    Which backend package to build: windowsml (default), cuda, or tensorrt.
+    Which backend package to build: windowsml (default) or tensorrt.
 
 .PARAMETER OutDir
     Where to write the .zip. Default: <repo>\dist.
@@ -38,14 +38,17 @@
     target\bundled).
 
 .PARAMETER Clean
-    Remove any existing vc-vst3.vst3 / vc-vst3.clap from target\bundled before
-    building, so stale DLLs from a previous variant cannot linger in the bundle.
+    Remove any existing target\bundled output before building, so DLLs from a
+    previous variant cannot linger in the bundle.
 
-.PARAMETER CudaBin
-    (cuda) CUDA Toolkit bin directory. Forwarded to package-cuda.ps1.
+.PARAMETER KeepStage
+    Keep the staged, install-ready dist\<stem>\ folder beside the .zip. By default
+    it is kept for windowsml and removed for tensorrt (which can be multiple GB).
+    Use this to keep a tensorrt folder too.
 
-.PARAMETER CudnnBin
-    (cuda) cuDNN bin directory. Forwarded to package-cuda.ps1.
+.PARAMETER CleanStage
+    Remove the staged dist\<stem>\ folder after zipping, overriding the
+    default-keep for windowsml.
 
 .PARAMETER TensorRtBin
     (tensorrt) TensorRT bin directory. Forwarded to package-tensorrt.ps1.
@@ -76,27 +79,22 @@
     pwsh crates\vc-vst3\package.ps1
 
 .EXAMPLE
-    # CUDA package, DLLs pulled from explicit toolkit dirs:
-    pwsh crates\vc-vst3\package.ps1 -Variant cuda `
-        -CudaBin "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9\bin" `
-        -CudnnBin "C:\Program Files\NVIDIA\CUDNN\v9.22\bin\12.9\x64"
-
-.EXAMPLE
     # Self-contained TensorRT package for an RTX 30xx (sm86):
     pwsh crates\vc-vst3\package.ps1 -Variant tensorrt -BuilderSm sm86
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('windowsml', 'cuda', 'tensorrt')]
+    [ValidateSet('windowsml', 'tensorrt')]
     [string]$Variant = 'windowsml',
     [string]$OutDir,
     [switch]$SkipBuild,
     [switch]$NoZip,
     [switch]$Clean,
-
-    # cuda
-    [string]$CudaBin,
-    [string]$CudnnBin,
+    # Keep the staged, install-ready dist\<stem>\ folder beside the .zip. By
+    # default it is kept for windowsml and removed for tensorrt (which can be
+    # multi-GB). -KeepStage forces keep; -CleanStage forces removal.
+    [switch]$KeepStage,
+    [switch]$CleanStage,
 
     # tensorrt
     [string]$TensorRtBin,
@@ -118,15 +116,14 @@ if (-not $OutDir) { $OutDir = Join-Path $repoRoot 'dist' }
 # feature set, so it needs no extra flags.
 $bundleFeatureArgs = switch ($Variant) {
     'windowsml' { @() }
-    'cuda' { @('--no-default-features', '--features', 'cuda') }
     'tensorrt' { @('--no-default-features', '--features', 'tensorrt') }
 }
 
 Push-Location $repoRoot
 try {
     # 1. Optionally clear the whole bundle dir so DLLs from a prior variant cannot
-    #    survive — the CLAP packaging gathers every loose sidecar beside the .clap,
-    #    so a stale DLL there would otherwise leak into the new package.
+    #    survive into the new package (the populate step drops loose sidecar DLLs
+    #    into target\bundled).
     if ($Clean -and (Test-Path $bundleDir)) {
         Remove-Item -Recurse -Force $bundleDir
     }
@@ -159,7 +156,6 @@ try {
     $forward = @{ BundleDir = $bundleDir }
     $forwardable = switch ($Variant) {
         'windowsml' { @('FoundationVersion', 'BootstrapDll') }
-        'cuda' { @('CudaBin', 'CudnnBin') }
         'tensorrt' { @('TensorRtBin', 'BuilderSm', 'RuntimeOnly', 'BuilderExe') }
     }
     foreach ($name in $forwardable) {
@@ -173,11 +169,9 @@ try {
     Write-Host "==> $((Split-Path $populateScript -Leaf))" -ForegroundColor Cyan
     & $populateScript @forward
 
-    # Locate the freshly populated bundles.
+    # Locate the freshly populated bundle.
     $vst3 = Join-Path $bundleDir 'vc-vst3.vst3'
-    $clap = Join-Path $bundleDir 'vc-vst3.clap'
-    $artifacts = @($vst3, $clap | Where-Object { Test-Path $_ })
-    if (-not $artifacts) { throw "No vc-vst3.vst3 / vc-vst3.clap found in $bundleDir." }
+    if (-not (Test-Path $vst3)) { throw "No vc-vst3.vst3 found in $bundleDir." }
 
     if ($NoZip) {
         Write-Host "==> -NoZip: bundle ready in $bundleDir (skipping archive)." -ForegroundColor Green
@@ -200,38 +194,32 @@ try {
     }
     $stem = "vc-vst3-$tag-v$version-win-x64"
 
-    $staging = Join-Path $bundleDir "_dist_$tag"
+    # Stage into dist\<stem>\ so a kept folder sits next to its .zip as a clean,
+    # install-ready layout (separate from the raw target\bundled build output).
+    New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
+    $staging = Join-Path $OutDir $stem
     if (Test-Path $staging) { Remove-Item -Recurse -Force $staging }
     New-Item -ItemType Directory -Force -Path $staging | Out-Null
 
     # The VST3 bundle is self-contained (its sidecar DLLs live inside
-    # Contents\<arch>\). The CLAP keeps its sidecar DLLs loose beside the .clap in
-    # target\bundled, so ship the .clap together with those DLLs (and licenses\)
-    # in its own folder — everything in the bundle dir except the .vst3 bundle and
-    # our own staging dir.
-    if (Test-Path $vst3) {
-        Copy-Item -Path $vst3 -Destination $staging -Recurse -Force
-    }
-    if (Test-Path $clap) {
-        $clapDir = Join-Path $staging 'vc-vst3-clap'
-        New-Item -ItemType Directory -Force -Path $clapDir | Out-Null
-        Get-ChildItem -Path $bundleDir |
-            Where-Object { $_.Name -ne 'vc-vst3.vst3' -and $_.Name -notlike '_dist_*' } |
-            ForEach-Object { Copy-Item -Path $_.FullName -Destination $clapDir -Recurse -Force }
-    }
+    # Contents\<arch>\), so staging is just the bundle itself.
+    Copy-Item -Path $vst3 -Destination $staging -Recurse -Force
 
     $license = Join-Path $repoRoot 'LICENSE'
     if (Test-Path $license) { Copy-Item $license (Join-Path $staging 'LICENSE') -Force }
 
-    $vst3Note = if (Test-Path $vst3) {
-        "`nNote: the .vst3 links the Steinberg VST3 SDK bindings (GPLv3); the .clap is not affected.`n"
-    }
-    else { '' }
+    # Ship the optional model downloader at the package root — NOT inside the
+    # .vst3 bundle, which installs into %CommonProgramFiles% (admin-only). It
+    # fetches the shared models into .\assets\ beside itself; point the plugin
+    # GUI at those files (model paths are not auto-discovered).
+    $modelDl = Join-Path $repoRoot 'download-models.ps1'
+    if (Test-Path $modelDl) { Copy-Item $modelDl (Join-Path $staging 'download-models.ps1') -Force }
+
     $trtNote = if ($Variant -eq 'tensorrt' -and -not $RuntimeOnly) {
         @"
 
 First-run TensorRT engine builds use the bundled vc-tensorrt-builder.exe. Because
-a VST3/CLAP host's process is the DAW, point the plugin at it after installing:
+a VST3 host's process is the DAW, point the plugin at it after installing:
     setx VC_RS_TENSORRT_BUILDER_HELPER "<install-dir>\vc-tensorrt-builder.exe"
 "@
     }
@@ -240,35 +228,46 @@ a VST3/CLAP host's process is the DAW, point the plugin at it after installing:
     $install = @"
 vc-vst3 — RVC voice conversion plugin ($Variant build, v$version)
 
-Install — copy into a standard plugin search path:
-  VST3:  copy the  vc-vst3.vst3  bundle into
-         %CommonProgramFiles%\VST3\   (e.g. C:\Program Files\Common Files\VST3)
-  CLAP:  copy the whole  vc-vst3-clap\  folder into
-         %CommonProgramFiles%\CLAP\   (e.g. C:\Program Files\Common Files\CLAP)
-         Hosts scan CLAP subfolders, and the DLLs next to vc-vst3.clap must stay
-         beside it — keep the folder intact rather than loose-copying the .clap.
+Install — copy the vc-vst3.vst3 bundle into a standard VST3 search path:
+  %CommonProgramFiles%\VST3\   (e.g. C:\Program Files\Common Files\VST3)
+
+Models — get the shared embedder + F0 models (optional helper):
+    pwsh .\download-models.ps1
+Run it from THIS folder (not from inside the installed plugin). It downloads
+ContentVec + RMVPE into .\assets\. In the plugin GUI, browse to
+assets\content_vec_500.onnx (embedder) and assets\rmvpe.onnx (F0), plus your own
+RVC voice model (.onnx). The downloaded models are third-party (GPL-3.0 upstream),
+not covered by this package's MIT license — see download-models.ps1.
 
 Requirements for this ($Variant) build:
 $(switch ($Variant) {
     'windowsml' { '  Windows App SDK Runtime 2.x installed (provides ONNX Runtime + DirectML).' }
-    'cuda'      { '  An up-to-date NVIDIA GPU driver. CUDA/cuDNN DLLs are bundled — no install needed.' }
     'tensorrt'  { '  An up-to-date NVIDIA GPU driver. TensorRT runtime DLLs are bundled — no install needed.' }
 })
-$trtNote$vst3Note
+$trtNote
 See licenses\ inside each bundle for third-party license texts.
 "@
     Set-Content -Path (Join-Path $staging 'INSTALL.txt') -Value $install -Encoding UTF8
 
     # 5. Archive.
-    New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
     $zip = Join-Path $OutDir "$stem.zip"
     if (Test-Path $zip) { Remove-Item -Force $zip }
     Compress-Archive -Path (Join-Path $staging '*') -DestinationPath $zip -CompressionLevel Optimal
-    Remove-Item -Recurse -Force $staging
+
+    # 6. Keep or remove the install-ready dir. Default: keep windowsml (small,
+    #    handy for testing), drop tensorrt (can be multi-GB). Flags override.
+    if ($KeepStage -and $CleanStage) { throw "Pass only one of -KeepStage / -CleanStage." }
+    $keepDir = if ($KeepStage) { $true } elseif ($CleanStage) { $false } else { $Variant -eq 'windowsml' }
+    if ($keepDir) {
+        Write-Host "==> Kept install-ready dir: $staging" -ForegroundColor Green
+    }
+    else {
+        Remove-Item -Recurse -Force $staging
+    }
 
     $size = (Get-Item $zip).Length
     Write-Host ("==> Done: {0} ({1:N1} MB)" -f $zip, ($size / 1MB)) -ForegroundColor Green
-    Write-Host ("    Contents: {0}" -f (($artifacts | Split-Path -Leaf) -join ', '))
+    Write-Host "    Contents: vc-vst3.vst3"
 }
 finally {
     Pop-Location

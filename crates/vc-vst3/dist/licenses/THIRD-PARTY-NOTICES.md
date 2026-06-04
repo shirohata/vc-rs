@@ -1,27 +1,46 @@
-# Third-party notices — bundled CUDA runtime DLLs
+# Third-party notices
 
-The GPU build of this plugin ships third-party DLLs so it can run the ONNX
-Runtime CUDA execution provider without a separate CUDA/cuDNN install. Each
-component keeps its own license; the texts are included in this folder.
+This folder ships with the vc-rs distributables. Which components actually apply
+depends on the package variant you have (named in `INSTALL.txt`). The matching
+license texts are included here; the GPU / Windows App SDK license files are
+copied from your local install (or the downloaded NuGet package) at packaging
+time.
+
+## Windows ML package
+
+- **Microsoft Windows App SDK bootstrapper** — `Microsoft.WindowsAppRuntime.Bootstrap.dll`
+  is bundled beside the binary. It is redistributed under the Microsoft Windows
+  App SDK license terms — see [`WindowsAppSDK-LICENSE.txt`](WindowsAppSDK-LICENSE.txt).
+- **ONNX Runtime + DirectML** — `onnxruntime.dll` and `DirectML.dll` are **not**
+  bundled. They are provided at runtime by the installed **Windows App SDK
+  Runtime 2.x**; vc-rs loads them dynamically (ORT `load-dynamic`). vc-rs uses
+  the ONNX Runtime API, which is MIT-licensed — see
+  [`onnxruntime.LICENSE.txt`](onnxruntime.LICENSE.txt).
+
+## TensorRT package
+
+The TensorRT build runs the GPU path through native TensorRT and contains **no
+ONNX Runtime** (`onnxruntime.LICENSE.txt` does not apply to this package). It
+ships the NVIDIA TensorRT runtime DLLs so it can run engines without a separate
+TensorRT install.
 
 | Component | DLLs | License |
 |---|---|---|
-| ONNX Runtime (CUDA EP) | `onnxruntime_providers_shared.dll`, `onnxruntime_providers_cuda.dll` | MIT — see [`onnxruntime.LICENSE.txt`](onnxruntime.LICENSE.txt) |
-| NVIDIA CUDA Runtime | `cudart64_12.dll`, `cublas64_12.dll`, `cublasLt64_12.dll`, `cufft64_11.dll` | NVIDIA CUDA Toolkit EULA (redistributable runtime) — see `CUDA-EULA.txt` |
-| NVIDIA cuDNN | `cudnn64_9.dll`, `cudnn_*64_9.dll` | NVIDIA cuDNN Software License Agreement — see `cuDNN-LICENSE.txt` |
+| NVIDIA TensorRT | `nvinfer_<N>.dll`, `nvinfer_plugin_<N>.dll`, `nvonnxparser_<N>.dll`, `nvinfer_builder_resource_sm*_<N>.dll` | NVIDIA TensorRT license — see `TensorRT-LICENSE.txt` |
+| NVIDIA CUDA Runtime | `cudart64_<M>.dll` | NVIDIA CUDA Toolkit EULA (redistributable runtime) — https://docs.nvidia.com/cuda/eula/index.html |
 
 Notes:
 
-- The ONNX Runtime *core* is statically linked into the plugin binary (also
-  MIT); no `onnxruntime.dll` is bundled separately.
-- `CUDA-EULA.txt` and `cuDNN-LICENSE.txt` are copied from your local NVIDIA
-  installations by `package-cuda.ps1`. If they are missing, obtain them from:
-  - CUDA Toolkit EULA: https://docs.nvidia.com/cuda/eula/index.html
-  - cuDNN SLA: https://docs.nvidia.com/deeplearning/cudnn/sla/index.html
-- The NVIDIA CUDA runtime libraries and cuDNN are redistributable under the
-  terms of those agreements. Review them before redistributing this build.
+- `TensorRT-LICENSE.txt` is copied from your local TensorRT install by
+  `package-tensorrt.ps1`. If missing, obtain it from your TensorRT package.
+- The NVIDIA runtime libraries are redistributable under the terms of those
+  agreements. Review them before redistributing this build.
 - An up-to-date NVIDIA GPU **driver** is still required on the end-user machine
   (it provides the CUDA driver, which is not redistributable and not bundled).
-- Building the VST3 target links the Steinberg VST3 SDK bindings (GPLv3) via
-  nice-plug, making the plugin binary GPLv3; the bundled NVIDIA/ONNX DLLs are
-  separate aggregated works under their own licenses (mere aggregation).
+
+## Plugin licensing (both variants)
+
+The `.vst3` plugin binary is under this project's MIT license (the VST3 SDK
+bindings used via nice-plug are MIT-licensed). The bundled NVIDIA / Microsoft
+DLLs are separate aggregated works under their own licenses listed above (mere
+aggregation).

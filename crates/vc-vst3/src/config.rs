@@ -162,12 +162,30 @@ impl PluginConfig {
     }
 }
 
+// The default provider tracks the backend this package was built with, so a
+// fresh instance is usable without first opening the GUI to pick one. The
+// variants are mutually exclusive by cargo feature (one per distributed
+// package); a CPU-only build with none of them falls back to "cpu".
 #[cfg(feature = "windowsml")]
 fn default_provider() -> &'static str {
     "windowsml"
 }
 
-#[cfg(not(feature = "windowsml"))]
+#[cfg(all(feature = "tensorrt", not(feature = "windowsml")))]
+fn default_provider() -> &'static str {
+    "tensorrt"
+}
+
+#[cfg(all(
+    feature = "cuda",
+    not(feature = "windowsml"),
+    not(feature = "tensorrt")
+))]
+fn default_provider() -> &'static str {
+    "cuda"
+}
+
+#[cfg(not(any(feature = "windowsml", feature = "tensorrt", feature = "cuda")))]
 fn default_provider() -> &'static str {
     "cpu"
 }

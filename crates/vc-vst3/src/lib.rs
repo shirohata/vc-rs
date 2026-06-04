@@ -1,4 +1,4 @@
-//! VST3 / CLAP plugin front-end for the vc-rs RVC pipeline.
+//! VST3 plugin front-end for the vc-rs RVC pipeline.
 //!
 //! The plugin reuses `vc_core` (the same RVC pipeline the CLI drives) and feeds
 //! it from the host's `process()` callback instead of driving an audio device
@@ -156,23 +156,9 @@ impl Plugin for VcRvcPlugin {
     }
 }
 
-impl ClapPlugin for VcRvcPlugin {
-    const CLAP_ID: &'static str = "rs.vc.rvc";
-    const CLAP_DESCRIPTION: Option<&'static str> = Some("Realtime RVC voice conversion");
-    const CLAP_MANUAL_URL: Option<&'static str> = Some(Self::URL);
-    const CLAP_SUPPORT_URL: Option<&'static str> = None;
-    const CLAP_FEATURES: &'static [ClapFeature] = &[
-        ClapFeature::AudioEffect,
-        ClapFeature::Stereo,
-        ClapFeature::Mono,
-        ClapFeature::Utility,
-    ];
-}
-
 impl Vst3Plugin for VcRvcPlugin {
     const VST3_CLASS_ID: [u8; 16] = *b"VcRsRvcVoiceConv";
     const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] = &[Vst3SubCategory::Fx];
 }
 
-nice_export_clap!(VcRvcPlugin);
 nice_export_vst3!(VcRvcPlugin);

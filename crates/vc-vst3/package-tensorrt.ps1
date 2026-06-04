@@ -9,13 +9,14 @@
     Run AFTER:
         cargo xtask bundle vc-vst3 --release --no-default-features --features tensorrt
 
-    The ONNX Runtime CPU core is statically linked into the plugin and the GPU
-    path runs through native TensorRT (no ONNX Runtime CUDA EP, no cuDNN/cuBLAS/
-    cuFFT). The plugin binary links `nvinfer_<N>.dll` / `nvinfer_plugin_<N>.dll` /
+    The TensorRT-only build drops ONNX Runtime entirely (`--features tensorrt`
+    pulls in no ORT) and runs the GPU path through native TensorRT (no ONNX
+    Runtime CUDA EP, no cuDNN/cuBLAS/cuFFT). The plugin binary links
+    `nvinfer_<N>.dll` / `nvinfer_plugin_<N>.dll` /
     `cudart` at LOAD time, so those must sit next to the plugin or the DAW fails
     to load it. Windows searches a module's own directory first, so co-locating
-    them in Contents\<arch>\ (and beside the .clap) satisfies the import. The
-    TensorRT major version `<N>` (10, 11, ...) and the matching `cudart64_<M>.dll`
+    them in Contents\<arch>\ satisfies the import. The TensorRT major version
+    `<N>` (10, 11, ...) and the matching `cudart64_<M>.dll`
     are detected from the chosen install rather than hardcoded.
 
     Two layers of dependency:
@@ -225,11 +226,10 @@ $sources = @($runtimeSources + $builderSources)
 $missing = $sources | Where-Object { -not (Test-Path $_) }
 if ($missing) { throw "Missing source files:`n" + ($missing -join "`n") }
 
-# Destinations: the VST3 binary folder and the folder next to the .clap.
+# Destination: the VST3 binary folder.
 $dests = @()
 $vst3Bin = Join-Path $BundleDir 'vc-vst3.vst3\Contents\x86_64-win'
 if (Test-Path $vst3Bin) { $dests += $vst3Bin }
-if (Test-Path (Join-Path $BundleDir 'vc-vst3.clap')) { $dests += $BundleDir }
 if (-not $dests) {
     throw "No bundle found in $BundleDir. Run 'cargo xtask bundle vc-vst3 --release --no-default-features --features tensorrt' first."
 }
@@ -260,7 +260,7 @@ Write-Host ("Done: bundled {0} file(s) ({1:N1} GB) + licenses into {2} location(
 if (-not $RuntimeOnly -and $resolvedBuilderExe) {
     $helperName = Split-Path $resolvedBuilderExe -Leaf
     Write-Host ""
-    Write-Host "First-run engine builds use the bundled helper. Because a VST3/CLAP host's" -ForegroundColor Cyan
+    Write-Host "First-run engine builds use the bundled helper. Because a VST3 host's" -ForegroundColor Cyan
     Write-Host "process is the DAW (not the plugin), point the plugin at it via env var:" -ForegroundColor Cyan
     Write-Host "    setx VC_RS_TENSORRT_BUILDER_HELPER `"<install-dir>\$helperName`"" -ForegroundColor Cyan
     Write-Host "(set it to the helper's path inside the installed plugin folder)." -ForegroundColor Cyan

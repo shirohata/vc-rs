@@ -1410,20 +1410,23 @@ pub(super) fn load_session(
     tensor_rt_run_mode: TensorRtRunMode,
     tensor_rt_session_purpose: TensorRtSessionPurpose,
 ) -> Result<Session> {
+    #[cfg(not(all(windows, feature = "windowsml")))]
     if provider.is_windows_ml() {
-        #[cfg(not(all(windows, feature = "windowsml")))]
-        {
-            bail!(
-                "provider {} is unavailable in this build; rebuild on Windows with the `windowsml` feature for {}",
-                provider.label(),
-                path.display()
-            );
-        }
-        #[cfg(all(windows, feature = "windowsml"))]
-        {
-            crate::windows_ml::ensure_initialized()?;
-        }
+        bail!(
+            "provider {} is unavailable in this build; rebuild on Windows with the `windowsml` feature for {}",
+            provider.label(),
+            path.display()
+        );
     }
+
+    // In the Windows ML build ORT is loaded dynamically from the Windows App SDK
+    // Runtime, so bootstrap it for *every* provider — not just windowsml* — and
+    // bind ORT to that runtime's onnxruntime.dll. Otherwise the plain `cpu`
+    // provider has no initialized dylib and fails to locate onnxruntime.dll on
+    // the default search path (the Windows ML package does not bundle it).
+    // `ensure_initialized` is idempotent (guarded by a OnceLock).
+    #[cfg(all(windows, feature = "windowsml"))]
+    crate::windows_ml::ensure_initialized()?;
 
     let mut builder = Session::builder()?
         .with_intra_threads(1)
