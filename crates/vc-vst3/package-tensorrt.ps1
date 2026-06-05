@@ -43,6 +43,12 @@
 .PARAMETER BundleDir
     Directory containing the built bundles. Default: target\bundled.
 
+.PARAMETER BundleName
+    Name of the .vst3 bundle folder inside BundleDir to populate. Default
+    vc-vst3.vst3 (the raw xtask output). package.ps1 passes the variant-specific
+    staged name (e.g. vc-vst3-tensorrt.vst3) so it can populate the per-variant
+    staging copy instead of the shared target\bundled.
+
 .PARAMETER BuilderExe
     Path to vc-tensorrt-builder.exe. Default: searched under target\release and
     tools\tensorrt_probe\target\release. Ignored with -RuntimeOnly.
@@ -71,6 +77,7 @@ param(
     [string]$TensorRtBin = $(if ($env:TENSORRT_ROOT) { Join-Path $env:TENSORRT_ROOT 'bin' } else { '' }),
     [string]$CudaBin = '',
     [string]$BundleDir,
+    [string]$BundleName = 'vc-vst3.vst3',
     [string]$BuilderExe,
     [string[]]$BuilderSm = @(),
     [switch]$RuntimeOnly
@@ -230,10 +237,10 @@ if ($missing) { throw "Missing source files:`n" + ($missing -join "`n") }
 
 # Destination: the VST3 binary folder.
 $dests = @()
-$vst3Bin = Join-Path $BundleDir 'vc-vst3.vst3\Contents\x86_64-win'
+$vst3Bin = Join-Path $BundleDir "$BundleName\Contents\x86_64-win"
 if (Test-Path $vst3Bin) { $dests += $vst3Bin }
 if (-not $dests) {
-    throw "No bundle found in $BundleDir. Run 'cargo xtask bundle vc-vst3 --release --no-default-features --features tensorrt' first."
+    throw "No bundle '$BundleName' found in $BundleDir. Run 'cargo xtask bundle vc-vst3 --release --no-default-features --features tensorrt' first."
 }
 
 foreach ($dest in $dests) {

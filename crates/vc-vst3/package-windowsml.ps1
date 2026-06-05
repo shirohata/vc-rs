@@ -14,6 +14,12 @@
 .PARAMETER BundleDir
     Directory containing the built bundles. Default: target\bundled.
 
+.PARAMETER BundleName
+    Name of the .vst3 bundle folder inside BundleDir to populate. Default
+    vc-vst3.vst3 (the raw xtask output). package.ps1 passes the variant-specific
+    staged name (e.g. vc-vst3-windowsml.vst3) so it can populate the per-variant
+    staging copy instead of the shared target\bundled.
+
 .PARAMETER FoundationVersion
     Microsoft.WindowsAppSDK.Foundation NuGet version containing the bootstrapper.
 
@@ -23,6 +29,7 @@
 #>
 param(
     [string]$BundleDir,
+    [string]$BundleName = 'vc-vst3.vst3',
     [string]$FoundationVersion = '2.0.21',
     [string]$BootstrapDll
 )
@@ -60,9 +67,9 @@ if (-not (Test-Path $BootstrapDll)) {
 }
 
 $dests = @()
-$vst3Bin = Join-Path $BundleDir 'vc-vst3.vst3\Contents\x86_64-win'
+$vst3Bin = Join-Path $BundleDir "$BundleName\Contents\x86_64-win"
 if (Test-Path $vst3Bin) { $dests += $vst3Bin }
-if (-not $dests) { throw "No bundle found in $BundleDir. Run 'cargo xtask bundle vc-vst3 --release' first." }
+if (-not $dests) { throw "No bundle '$BundleName' found in $BundleDir. Run 'cargo xtask bundle vc-vst3 --release' first." }
 
 foreach ($dest in $dests) {
     Copy-Item $BootstrapDll (Join-Path $dest 'Microsoft.WindowsAppRuntime.Bootstrap.dll') -Force

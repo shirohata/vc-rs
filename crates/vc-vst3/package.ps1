@@ -36,12 +36,14 @@
     bundle. The populate step and archiving still run.
 
 .PARAMETER NoZip
-    Populate the bundle but stop before creating the .zip (useful for inspecting
-    target\bundled).
+    Populate the staged bundle but stop before creating the .zip (useful for
+    inspecting the populated dist\<stem>\ folder).
 
 .PARAMETER Clean
-    Remove any existing target\bundled output before building, so DLLs from a
-    previous variant cannot linger in the bundle.
+    Deprecated / implied. The build now always starts from a clean target\bundled
+    (and populate runs against a fresh per-variant dist\<stem>\ copy), so DLLs
+    from a previous variant can no longer linger. Accepted for back-compat; it has
+    no additional effect and is ignored with -SkipBuild.
 
 .PARAMETER KeepStage
     Keep the staged, install-ready dist\<stem>\ folder beside the .zip. By default
@@ -133,15 +135,17 @@ $bundleFeatureArgs = switch ($Variant) {
 
 Push-Location $repoRoot
 try {
-    # 1. Optionally clear the whole bundle dir so DLLs from a prior variant cannot
-    #    survive into the new package (the populate step drops loose sidecar DLLs
-    #    into target\bundled).
-    if ($Clean -and (Test-Path $bundleDir)) {
-        Remove-Item -Recurse -Force $bundleDir
-    }
-
-    # 2. Build the bundle.
+    # 1. Build the bundle into a CLEAN target\bundled. We wipe it first on every
+    #    build (not just on -Clean): `cargo xtask bundle` always writes to the same
+    #    target\bundled\vc-vst3.vst3 regardless of features and rebuilds only the
+    #    .vst3 DLL, while the populate step drops loose runtime DLLs (Bootstrap /
+    #    nvinfer* / cudart) beside it. Those sidecars are not build outputs, so a
+    #    stale set from a previous variant — or from a prior validate/install that
+    #    populated target\bundled in place — would otherwise survive into the copy
+    #    we stage below. That is exactly how a windowsml package once shipped >1 GB
+    #    of leftover TensorRT DLLs (which crash the windowsml plugin in DAWs).
     if (-not $SkipBuild) {
+        if (Test-Path $bundleDir) { Remove-Item -Recurse -Force $bundleDir }
         Write-Host "==> cargo xtask bundle vc-vst3 --release $($bundleFeatureArgs -join ' ')" -ForegroundColor Cyan
         cargo xtask bundle vc-vst3 --release @bundleFeatureArgs
         if ($LASTEXITCODE -ne 0) { throw "cargo xtask bundle failed (exit $LASTEXITCODE)." }
@@ -183,37 +187,14 @@ Install it to regenerate the notice: cargo install cargo-about --features cli
         }
     }
 
-    # 3. Populate the bundle with the variant's runtime DLLs + licenses by
-    #    forwarding only the parameters the caller actually supplied.
-    $populateScript = Join-Path $PSScriptRoot "package-$Variant.ps1"
-    if (-not (Test-Path $populateScript)) { throw "Populate script not found: $populateScript" }
+    # 3. Locate the raw, DLL-only bundle that `cargo xtask bundle` produced. We do
+    #    NOT populate it in place — instead we copy it into a fresh per-variant
+    #    staging dir and populate that copy, so target\bundled stays the pristine
+    #    build output and variants can never cross-contaminate each other.
+    $rawVst3 = Join-Path $bundleDir 'vc-vst3.vst3'
+    if (-not (Test-Path $rawVst3)) { throw "No vc-vst3.vst3 found in $bundleDir." }
 
-    $forward = @{ BundleDir = $bundleDir }
-    $forwardable = switch ($Variant) {
-        'windowsml' { @('FoundationVersion', 'BootstrapDll') }
-        'tensorrt' { @('TensorRtBin', 'BuilderSm', 'RuntimeOnly', 'BuilderExe') }
-    }
-    foreach ($name in $forwardable) {
-        if ($PSBoundParameters.ContainsKey($name)) { $forward[$name] = $PSBoundParameters[$name] }
-    }
-    # BuilderExe may have been resolved above rather than passed in.
-    if ($Variant -eq 'tensorrt' -and $BuilderExe -and -not $forward.ContainsKey('BuilderExe')) {
-        $forward['BuilderExe'] = $BuilderExe
-    }
-
-    Write-Host "==> $((Split-Path $populateScript -Leaf))" -ForegroundColor Cyan
-    & $populateScript @forward
-
-    # Locate the freshly populated bundle.
-    $vst3 = Join-Path $bundleDir 'vc-vst3.vst3'
-    if (-not (Test-Path $vst3)) { throw "No vc-vst3.vst3 found in $bundleDir." }
-
-    if ($NoZip) {
-        Write-Host "==> -NoZip: bundle ready in $bundleDir (skipping archive)." -ForegroundColor Green
-        return
-    }
-
-    # 4. Stage the artifacts plus license + a short install note.
+    # Resolve version/tag/stem now so the staging dir can be built up front.
     $version = '0.0.0'
     $wsToml = Get-Content (Join-Path $repoRoot 'Cargo.toml') -Raw
     if ($wsToml -match '(?ms)\[workspace\.package\].*?^\s*version\s*=\s*"([^"]+)"') {
@@ -229,18 +210,46 @@ Install it to regenerate the notice: cargo install cargo-about --features cli
     }
     $stem = "vc-vst3-$tag-v$version-win-x64"
 
-    # Stage into dist\<stem>\ so a kept folder sits next to its .zip as a clean,
-    # install-ready layout (separate from the raw target\bundled build output).
+    # Stage into a fresh dist\<stem>\ and copy the raw bundle in under its
+    # variant-specific install name (so Windows ML and TensorRT packages can live
+    # in the same VST3 search path without overwriting each other). The staging
+    # dir is wiped per run, so the copy starts from exactly the xtask output with
+    # no leftover sidecar DLLs.
     New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
     $staging = Join-Path $OutDir $stem
     if (Test-Path $staging) { Remove-Item -Recurse -Force $staging }
     New-Item -ItemType Directory -Force -Path $staging | Out-Null
 
-    # The VST3 bundle is self-contained (its sidecar DLLs live inside
-    # Contents\<arch>\), so staging is just the bundle itself. The staged bundle
-    # name is variant-specific so Windows ML and TensorRT packages can be copied
-    # into the same VST3 search path without overwriting each other.
-    Copy-Item -Path $vst3 -Destination (Join-Path $staging $installBundleName) -Recurse -Force
+    $stagedBundle = Join-Path $staging $installBundleName
+    Copy-Item -Path $rawVst3 -Destination $stagedBundle -Recurse -Force
+
+    # 4. Populate the STAGED bundle with the variant's runtime DLLs + licenses,
+    #    forwarding only the parameters the caller actually supplied. -BundleName
+    #    points the populate script at the variant-named staged bundle instead of
+    #    the default vc-vst3.vst3 in target\bundled.
+    $populateScript = Join-Path $PSScriptRoot "package-$Variant.ps1"
+    if (-not (Test-Path $populateScript)) { throw "Populate script not found: $populateScript" }
+
+    $forward = @{ BundleDir = $staging; BundleName = $installBundleName }
+    $forwardable = switch ($Variant) {
+        'windowsml' { @('FoundationVersion', 'BootstrapDll') }
+        'tensorrt' { @('TensorRtBin', 'BuilderSm', 'RuntimeOnly', 'BuilderExe') }
+    }
+    foreach ($name in $forwardable) {
+        if ($PSBoundParameters.ContainsKey($name)) { $forward[$name] = $PSBoundParameters[$name] }
+    }
+    # BuilderExe may have been resolved above rather than passed in.
+    if ($Variant -eq 'tensorrt' -and $BuilderExe -and -not $forward.ContainsKey('BuilderExe')) {
+        $forward['BuilderExe'] = $BuilderExe
+    }
+
+    Write-Host "==> $((Split-Path $populateScript -Leaf))" -ForegroundColor Cyan
+    & $populateScript @forward
+
+    if ($NoZip) {
+        Write-Host "==> -NoZip: populated bundle ready in $staging (skipping archive)." -ForegroundColor Green
+        return
+    }
 
     $license = Join-Path $repoRoot 'LICENSE'
     if (Test-Path $license) { Copy-Item $license (Join-Path $staging 'LICENSE') -Force }
