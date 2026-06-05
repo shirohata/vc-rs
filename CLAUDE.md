@@ -112,8 +112,9 @@ and [`docs/development_ja.md`](docs/development_ja.md).
 
 `devices` (list audio devices), `inspect --model x.onnx` (ONNX I/O + metadata,
 backend-independent), `windowsml-eps list|install` (Windows + windowsml only),
-`run` (real-time mic→speaker), `wav` (file→file, same pipeline for deterministic
-testing). Key params: `--provider`, `--chunk-ms`, `--extra-convert-ms`,
+`engine-cache info|clear` (size/clear the shared TensorRT + WinML-TensorRT-RTX
+engine cache at `%LOCALAPPDATA%\vc-rs\tensorrt-cache`), `run` (real-time
+mic→speaker), `wav` (file→file, same pipeline for deterministic testing). Key params: `--provider`, `--chunk-ms`, `--extra-convert-ms`,
 `--speaker-id`, `--pitch-shift`, `--input/output-gain`, `--rms-mix-rate`.
 Full usage is in [`README.md`](README.md).
 

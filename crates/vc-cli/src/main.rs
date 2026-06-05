@@ -1,6 +1,7 @@
 mod audio;
 mod cli;
 mod engine;
+mod engine_cache;
 #[cfg(all(windows, feature = "windowsml"))]
 mod windows_ml_eps;
 
@@ -28,6 +29,7 @@ fn main() -> Result<()> {
         Command::Inspect(args) => model_rvc::inspect_model(&args.model),
         #[cfg(all(windows, feature = "windowsml"))]
         Command::WindowsMlEps(args) => windows_ml_eps::run(args),
+        Command::EngineCache(args) => engine_cache::run(args),
         Command::Run(args) => run_model_command(move || engine::run_realtime(args)),
         Command::Wav(args) => run_model_command(move || engine::run_wav(args)),
     }

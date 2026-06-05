@@ -63,10 +63,37 @@ pub enum Command {
     #[cfg(all(windows, feature = "windowsml"))]
     #[command(name = "windowsml-eps", alias = "windows-ml-eps", alias = "winml-eps")]
     WindowsMlEps(WindowsMlEpsArgs),
+    /// Inspect or clear the on-disk GPU engine cache (TensorRT / Windows ML
+    /// TensorRT-RTX).
+    #[command(name = "engine-cache", alias = "cache", alias = "trt-cache")]
+    EngineCache(EngineCacheArgs),
     /// Run realtime microphone-to-speaker conversion.
     Run(RunArgs),
     /// Run conversion against a wav file for model/DSP verification.
     Wav(WavArgs),
+}
+
+#[derive(Debug, Parser)]
+pub struct EngineCacheArgs {
+    #[command(subcommand)]
+    pub command: EngineCacheCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum EngineCacheCommand {
+    /// Show the cache location and size (per-model breakdown).
+    #[command(alias = "show", alias = "list")]
+    Info,
+    /// Delete all cached engines (they rebuild on the next model load).
+    #[command(alias = "clean")]
+    Clear(EngineCacheClearArgs),
+}
+
+#[derive(Debug, Parser)]
+pub struct EngineCacheClearArgs {
+    /// Skip the confirmation prompt before deleting.
+    #[arg(long)]
+    pub yes: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -909,6 +936,35 @@ mod tests {
             args.validate_audio_options().unwrap_err(),
             "--wasapi-exclusive* options require --audio-backend wasapi"
         );
+    }
+
+    #[test]
+    fn parses_engine_cache_commands() {
+        let cli = Cli::try_parse_from(["vc-rs", "engine-cache", "info"]).unwrap();
+        let Command::EngineCache(args) = cli.command else {
+            panic!("expected engine-cache command");
+        };
+        assert!(matches!(args.command, EngineCacheCommand::Info));
+
+        // `cache` alias and the `clear --yes` form.
+        let cli = Cli::try_parse_from(["vc-rs", "cache", "clear", "--yes"]).unwrap();
+        let Command::EngineCache(args) = cli.command else {
+            panic!("expected engine-cache command");
+        };
+        let EngineCacheCommand::Clear(args) = args.command else {
+            panic!("expected clear command");
+        };
+        assert!(args.yes);
+
+        // `show` alias for info defaults `--yes` off on clear.
+        let cli = Cli::try_parse_from(["vc-rs", "engine-cache", "clear"]).unwrap();
+        let Command::EngineCache(args) = cli.command else {
+            panic!("expected engine-cache command");
+        };
+        let EngineCacheCommand::Clear(args) = args.command else {
+            panic!("expected clear command");
+        };
+        assert!(!args.yes);
     }
 
     #[test]

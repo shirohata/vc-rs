@@ -200,6 +200,22 @@ TensorRT の詳しい性能特性は
 [`docs/tensorrt_performance_ja.md`](docs/tensorrt_performance_ja.md) を参照して
 ください。
 
+## エンジンキャッシュの管理
+
+TensorRT（tensorrt 版）と Windows ML の TensorRT-RTX（`windowsml-nvtrtx`）が
+生成したエンジンは `%LOCALAPPDATA%\vc-rs\tensorrt-cache` に保存され、両バック
+エンドで共有されます（`VC_RS_TENSORRT_CACHE_DIR` で場所を変更可）。場所・サイズ
+の確認とキャッシュ消去は CLI から行えます。
+
+```powershell
+.\vc-rs.exe engine-cache info          # 場所・合計サイズ・モデル別の内訳を表示
+.\vc-rs.exe engine-cache clear         # 確認のうえ全削除
+.\vc-rs.exe engine-cache clear --yes   # 確認なしで全削除
+```
+
+キャッシュは再生成可能な派生データなので、削除しても次回のモデル読み込み時に
+作り直されるだけです（その回だけ起動が長くなります）。
+
 ## トラブルシューティング / FAQ
 
 **Q. windowsml 版が起動しない / モデル読み込みに失敗する**
