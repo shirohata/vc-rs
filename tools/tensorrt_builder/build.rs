@@ -4,13 +4,13 @@ fn main() {
     println!("cargo:rerun-if-env-changed=TENSORRT_ROOT");
     println!("cargo:rerun-if-env-changed=CUDA_PATH");
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
-    println!("cargo:rerun-if-changed=src/trt_probe_shim.cpp");
+    println!("cargo:rerun-if-changed=src/trt_builder_shim.cpp");
 
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
     let repo_root = manifest_dir
         .parent()
         .and_then(|p| p.parent())
-        .expect("tools/tensorrt_probe must live two levels below the repository root")
+        .expect("tools/tensorrt_builder must live two levels below the repository root")
         .to_path_buf();
 
     let tensorrt_root = env::var_os("TENSORRT_ROOT")
@@ -37,7 +37,7 @@ fn main() {
     }
 
     println!(
-        "cargo:warning=tensorrt_probe using TensorRT {} ({}), CUDA ({})",
+        "cargo:warning=tensorrt_builder using TensorRT {} ({}), CUDA ({})",
         trt_major,
         tensorrt_root.display(),
         cuda_root.display()
@@ -48,8 +48,8 @@ fn main() {
         .std("c++17")
         .include(&tensorrt_include)
         .include(&cuda_include)
-        .file("src/trt_probe_shim.cpp")
-        .compile("trt_probe_shim");
+        .file("src/trt_builder_shim.cpp")
+        .compile("trt_builder_shim");
 
     println!("cargo:rustc-link-search=native={}", tensorrt_lib.display());
     println!("cargo:rustc-link-search=native={}", cuda_lib.display());

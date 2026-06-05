@@ -120,7 +120,7 @@ impl NativeTensorRtPaths {
     }
 }
 
-// --- TensorRT / CUDA discovery shared with tools/tensorrt_probe/build.rs ---
+// --- TensorRT / CUDA discovery shared with tools/tensorrt_builder/build.rs ---
 
 /// Find the newest TensorRT install under `workspace_root`. Entries whose name
 /// contains "TensorRT" are inspected; the real root is the entry itself when it

@@ -58,6 +58,11 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
+
+# Scrub absolute build-machine paths (user name etc.) from the bundled plugin and
+# share one build cache with the other recipes (same CARGO_ENCODED_RUSTFLAGS).
+. (Join-Path $PSScriptRoot 'rustflags.ps1')
+
 if (-not $ValidatorPath) {
     $ValidatorPath = Join-Path $repoRoot "tools\vst3sdk-build\bin\$ValidatorConfig\validator.exe"
 }

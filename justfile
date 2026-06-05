@@ -26,23 +26,23 @@ models:
 
 # Fast workspace tests, no GPU stack (TensorRT shim disabled).
 test-cpu:
-    $env:VC_RS_ENABLE_NATIVE_TENSORRT = "0"; cargo test --workspace
+    . ./scripts/rustflags.ps1; $env:VC_RS_ENABLE_NATIVE_TENSORRT = "0"; cargo test --workspace
 
 # Full workspace tests with the native TensorRT shim (activates the GPU stack).
 test:
-    . ./scripts/activate.ps1; cargo test --workspace
+    . ./scripts/activate.ps1; . ./scripts/rustflags.ps1; cargo test --workspace
 
 # Dev CLI build — both backends in one vc-rs.exe (activates the GPU stack).
 build:
-    . ./scripts/activate.ps1; cargo build --release
+    . ./scripts/activate.ps1; . ./scripts/rustflags.ps1; cargo build --release
 
 # Single-provider CLI build: `just build-cli windowsml` (GPU-free) or `tensorrt`.
 build-cli variant="windowsml":
-    . ./scripts/activate.ps1; cargo build --release -p vc-cli --no-default-features --features {{variant}}
+    . ./scripts/activate.ps1; . ./scripts/rustflags.ps1; cargo build --release -p vc-cli --no-default-features --features {{variant}}
 
 # Bundle the VST3 plugin into target/bundled: `just bundle [windowsml|tensorrt]`.
 bundle variant="windowsml":
-    . ./scripts/activate.ps1; if ('{{variant}}' -eq 'tensorrt') { cargo xtask bundle vc-vst3 --release --no-default-features --features tensorrt } else { cargo xtask bundle vc-vst3 --release }
+    . ./scripts/activate.ps1; . ./scripts/rustflags.ps1; if ('{{variant}}' -eq 'tensorrt') { cargo xtask bundle vc-vst3 --release --no-default-features --features tensorrt } else { cargo xtask bundle vc-vst3 --release }
 
 # Build the VST3 plugin and run Steinberg's validator: `just validate-vst3 [windowsml|tensorrt]`.
 validate-vst3 variant="windowsml":
@@ -66,7 +66,7 @@ fmt:
 
 # Clippy across the workspace (activates the GPU stack).
 lint:
-    . ./scripts/activate.ps1; cargo clippy --workspace --all-targets
+    . ./scripts/activate.ps1; . ./scripts/rustflags.ps1; cargo clippy --workspace --all-targets
 
 # Remove build artifacts.
 clean:

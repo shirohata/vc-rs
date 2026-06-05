@@ -536,7 +536,6 @@ fn tensor_rt_builder_candidates() -> Result<Vec<PathBuf>> {
     // makes a packaged TensorRT plugin self-contained without an env override.
     if let Some(module_dir) = current_module_dir() {
         candidates.push(module_dir.join("vc-tensorrt-builder.exe"));
-        candidates.push(module_dir.join("tensorrt-probe.exe"));
     }
     // For the CLI the module dir equals the exe dir, but keep this fallback for
     // any front-end where `current_exe()` is the binary that links vc-core.
@@ -545,7 +544,6 @@ fn tensor_rt_builder_candidates() -> Result<Vec<PathBuf>> {
         .and_then(|path| path.parent().map(Path::to_path_buf))
     {
         candidates.push(exe_dir.join("vc-tensorrt-builder.exe"));
-        candidates.push(exe_dir.join("tensorrt-probe.exe"));
     }
     if let Some(root) = tensor_rt_workspace_root() {
         candidates.push(
@@ -557,12 +555,6 @@ fn tensor_rt_builder_candidates() -> Result<Vec<PathBuf>> {
             root.join("target")
                 .join("release")
                 .join("vc-tensorrt-builder.exe"),
-        );
-        candidates.push(root.join("target").join("debug").join("tensorrt-probe.exe"));
-        candidates.push(
-            root.join("target")
-                .join("release")
-                .join("tensorrt-probe.exe"),
         );
     }
     Ok(candidates)
@@ -633,15 +625,26 @@ fn current_module_dir() -> Option<PathBuf> {
 fn tensor_rt_builder_manifest() -> Option<PathBuf> {
     let manifest = tensor_rt_workspace_root()?
         .join("tools")
-        .join("tensorrt_probe")
+        .join("tensorrt_builder")
         .join("Cargo.toml");
     manifest.is_file().then_some(manifest)
 }
 
-#[cfg(native_tensorrt)]
+// Dev-only fallback to the build-machine workspace path. Gated to debug builds:
+// release (= distributed) binaries must NOT embed env!("CARGO_MANIFEST_DIR"),
+// which is an absolute path containing the developer's user name. trim-paths does
+// not cover env! values, so this must be cfg-gated (a runtime `if` would still
+// bake the string literal in). A packaged build finds the bundled helper via
+// current_module_dir() first, so this fallback is never needed in distribution.
+#[cfg(all(native_tensorrt, debug_assertions))]
 fn tensor_rt_workspace_root() -> Option<PathBuf> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest_dir.parent()?.parent().map(Path::to_path_buf)
+}
+
+#[cfg(all(native_tensorrt, not(debug_assertions)))]
+fn tensor_rt_workspace_root() -> Option<PathBuf> {
+    None
 }
 
 #[cfg(not(native_tensorrt))]

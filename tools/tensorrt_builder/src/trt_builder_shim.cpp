@@ -270,7 +270,7 @@ bool upload_dummy_input(
 
 } // namespace
 
-extern "C" int trt_probe_build(
+extern "C" int trt_build_engine(
     char const* onnx_path,
     char const* engine_path,
     char const* profile_shapes,
@@ -441,7 +441,7 @@ extern "C" int trt_probe_build(
     return 0;
 }
 
-extern "C" int trt_probe_engine(
+extern "C" int trt_run_engine(
     char const* engine_path,
     int32_t frames,
     int32_t channels,

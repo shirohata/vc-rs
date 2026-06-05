@@ -42,7 +42,7 @@
 
 .PARAMETER BuilderExe
     Path to vc-tensorrt-builder.exe. Default: searched under target\release and
-    tools\tensorrt_probe\target\release. Ignored with -RuntimeOnly.
+    tools\tensorrt_builder\target\release. Ignored with -RuntimeOnly.
 
 .PARAMETER BuilderSm
     Which GPU builder-resource DLLs to bundle, by SM tag (e.g. sm89 for RTX 40xx,
@@ -183,13 +183,13 @@ if (-not $RuntimeOnly) {
     if (-not $BuilderExe) {
         $candidates = @(
             (Join-Path $repoRoot 'target\release\vc-tensorrt-builder.exe'),
-            (Join-Path $repoRoot 'tools\tensorrt_probe\target\release\vc-tensorrt-builder.exe')
+            (Join-Path $repoRoot 'tools\tensorrt_builder\target\release\vc-tensorrt-builder.exe')
         )
         $BuilderExe = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
         if (-not $BuilderExe) {
             throw @"
 vc-tensorrt-builder.exe not found. Build it first, e.g.:
-    cargo build --release --manifest-path tools\tensorrt_probe\Cargo.toml
+    cargo build --release --manifest-path tools\tensorrt_builder\Cargo.toml
 or pass -BuilderExe <path>, or use -RuntimeOnly to skip the engine builder.
 Searched:
 $($candidates -join "`n")

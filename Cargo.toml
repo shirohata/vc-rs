@@ -1,12 +1,21 @@
 [workspace]
 resolver = "2"
 members = ["crates/vc-core", "crates/vc-cli", "crates/vc-vst3", "xtask"]
-exclude = ["tools/tensorrt_probe"]
+exclude = ["tools/tensorrt_builder"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
+
+# Drop symbols/debug info from shipped binaries. Absolute build-machine paths
+# (which include the developer's user name, via panic-location / dep + std source
+# strings in .rdata) are scrubbed separately with rustc --remap-path-prefix,
+# applied via scripts/rustflags.ps1 (cargo's `trim-paths` profile option is still
+# unstable on this toolchain). The env!("CARGO_MANIFEST_DIR") path is gated out in
+# native_tensorrt.rs — remap-path-prefix does not cover env! values.
+[profile.release]
+strip = true
 
 [workspace.dependencies]
 anyhow = "1.0"

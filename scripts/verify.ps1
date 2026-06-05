@@ -39,6 +39,11 @@ param(
 $ErrorActionPreference = "Stop"
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 
+# Keep absolute build-machine paths (user name etc.) out of every binary this
+# builds, and keep CARGO_ENCODED_RUSTFLAGS identical to the build/test recipes so
+# they share one build cache instead of rebuilding on each switch.
+. (Join-Path $PSScriptRoot 'rustflags.ps1')
+
 function Invoke-Step {
     param([string]$Label, [scriptblock]$Action)
     Write-Host ""

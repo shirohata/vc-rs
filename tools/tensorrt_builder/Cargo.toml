@@ -1,0 +1,15 @@
+[package]
+name = "vc-tensorrt-builder"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[build-dependencies]
+cc = "1"
+
+# Excluded from the workspace, so it does not inherit the root profile. Keep its
+# release builds stripped for the same reason as the workspace —
+# vc-tensorrt-builder.exe is shipped in TensorRT packages. Absolute build paths
+# are scrubbed via scripts/rustflags.ps1 (--remap-path-prefix).
+[profile.release]
+strip = true

@@ -62,7 +62,7 @@
 
 .PARAMETER BuilderExe
     (tensorrt) Path to vc-tensorrt-builder.exe. When omitted (and not
-    -RuntimeOnly) it is built from tools\tensorrt_probe. Forwarded to
+    -RuntimeOnly) it is built from tools\tensorrt_builder. Forwarded to
     package-tensorrt.ps1.
 
 .PARAMETER FoundationVersion
@@ -115,6 +115,11 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $releaseDir = Join-Path $repoRoot 'target\release'
 if (-not $OutDir) { $OutDir = Join-Path $repoRoot 'dist' }
 
+# Strip absolute build-machine paths (user name etc.) from the shipped binaries.
+# Sets CARGO_ENCODED_RUSTFLAGS, inherited by the cargo build below and the
+# tensorrt builder-helper build.
+. (Join-Path $repoRoot 'scripts\rustflags.ps1')
+
 # Single-provider feature set per variant. `--no-default-features` drops the
 # other backend so the binary stays lean (a tensorrt build sheds ONNX Runtime).
 $buildFeatureArgs = switch ($Variant) {
@@ -133,9 +138,9 @@ try {
         # The TensorRT engine-builder helper is a separate ORT-free binary. Build
         # it here (unless skipped) so package-tensorrt.ps1 can bundle it.
         if ($Variant -eq 'tensorrt' -and -not $RuntimeOnly -and -not $BuilderExe) {
-            $helper = Join-Path $repoRoot 'tools\tensorrt_probe\target\release\vc-tensorrt-builder.exe'
+            $helper = Join-Path $repoRoot 'tools\tensorrt_builder\target\release\vc-tensorrt-builder.exe'
             Write-Host "==> cargo build --release (vc-tensorrt-builder helper)" -ForegroundColor Cyan
-            cargo build --release --manifest-path (Join-Path $repoRoot 'tools\tensorrt_probe\Cargo.toml')
+            cargo build --release --manifest-path (Join-Path $repoRoot 'tools\tensorrt_builder\Cargo.toml')
             if ($LASTEXITCODE -ne 0) { throw "building vc-tensorrt-builder failed (exit $LASTEXITCODE)." }
             if (Test-Path $helper) { $BuilderExe = $helper }
         }

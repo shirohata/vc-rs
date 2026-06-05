@@ -72,7 +72,7 @@
 
 .PARAMETER BuilderExe
     (tensorrt) Path to vc-tensorrt-builder.exe. When omitted (and not
-    -RuntimeOnly) it is built from tools\tensorrt_probe. Forwarded to
+    -RuntimeOnly) it is built from tools\tensorrt_builder. Forwarded to
     package-tensorrt.ps1.
 
 .PARAMETER FoundationVersion
@@ -124,6 +124,11 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $bundleDir = Join-Path $repoRoot 'target\bundled'
 if (-not $OutDir) { $OutDir = Join-Path $repoRoot 'dist' }
+
+# Strip absolute build-machine paths (user name etc.) from the shipped plugin DLL.
+# Sets CARGO_ENCODED_RUSTFLAGS, inherited by the cargo xtask bundle subprocess
+# below and the tensorrt builder-helper build.
+. (Join-Path $repoRoot 'scripts\rustflags.ps1')
 $installBundleName = "vc-vst3-$Variant.vst3"
 
 # Feature flags per variant for `cargo xtask bundle`. windowsml is the default
@@ -153,9 +158,9 @@ try {
         # The TensorRT engine-builder helper is a separate ORT-free binary. Build
         # it here (unless skipped) so package-tensorrt.ps1 can bundle it.
         if ($Variant -eq 'tensorrt' -and -not $RuntimeOnly -and -not $BuilderExe) {
-            $helper = Join-Path $repoRoot 'tools\tensorrt_probe\target\release\vc-tensorrt-builder.exe'
+            $helper = Join-Path $repoRoot 'tools\tensorrt_builder\target\release\vc-tensorrt-builder.exe'
             Write-Host "==> cargo build --release (vc-tensorrt-builder helper)" -ForegroundColor Cyan
-            cargo build --release --manifest-path (Join-Path $repoRoot 'tools\tensorrt_probe\Cargo.toml')
+            cargo build --release --manifest-path (Join-Path $repoRoot 'tools\tensorrt_builder\Cargo.toml')
             if ($LASTEXITCODE -ne 0) { throw "building vc-tensorrt-builder failed (exit $LASTEXITCODE)." }
             if (Test-Path $helper) { $BuilderExe = $helper }
         }

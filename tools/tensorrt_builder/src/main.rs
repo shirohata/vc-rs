@@ -6,7 +6,7 @@ use std::{
 };
 
 unsafe extern "C" {
-    fn trt_probe_build(
+    fn trt_build_engine(
         onnx_path: *const c_char,
         engine_path: *const c_char,
         profile_shapes: *const c_char,
@@ -14,7 +14,7 @@ unsafe extern "C" {
         message: *mut c_char,
         message_len: usize,
     ) -> c_int;
-    fn trt_probe_engine(
+    fn trt_run_engine(
         engine_path: *const c_char,
         frames: c_int,
         channels: c_int,
@@ -98,7 +98,7 @@ fn main() {
                 .as_ref()
                 .map_or(std::ptr::null(), |value| value.as_ptr());
             unsafe {
-                trt_probe_build(
+                trt_build_engine(
                     onnx.as_ptr(),
                     save_engine.as_ptr(),
                     profile.as_ptr(),
@@ -115,7 +115,7 @@ fn main() {
         } => {
             let engine = cstring_path(&engine, "engine path");
             unsafe {
-                trt_probe_engine(
+                trt_run_engine(
                     engine.as_ptr(),
                     frames,
                     channels,

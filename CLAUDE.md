@@ -20,7 +20,7 @@ DirectML) and **native TensorRT** (NVIDIA-only, self-contained runtime). A
 
 ## Workspace layout
 
-Cargo workspace (`resolver = "2"`); `tools/tensorrt_probe` is excluded.
+Cargo workspace (`resolver = "2"`); `tools/tensorrt_builder` is excluded.
 
 | Crate | Path | Role |
 | --- | --- | --- |

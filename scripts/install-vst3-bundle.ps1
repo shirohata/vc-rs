@@ -57,6 +57,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
+
+# Scrub absolute build-machine paths (user name etc.) from the installed plugin,
+# matching the other recipes' CARGO_ENCODED_RUSTFLAGS (shared build cache).
+. (Join-Path $PSScriptRoot 'rustflags.ps1')
 $bundle = Join-Path $repoRoot 'target\bundled\vc-vst3.vst3'
 $destinationName = "vc-vst3-$Variant.vst3"
 if (-not $DestinationRoot) {
