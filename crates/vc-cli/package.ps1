@@ -38,13 +38,13 @@
     populated, ready-to-run dist\<stem>\ folder is left in place.
 
 .PARAMETER KeepStage
-    Keep the populated dist\<stem>\ folder beside the .zip. By default it is kept
-    for windowsml and removed for tensorrt (which can be multiple GB). Use this to
-    keep a tensorrt folder too.
+    Keep the populated dist\<stem>\ folder beside the .zip. This is the default for
+    every variant, so the flag is only useful to be explicit; -CleanStage is the
+    opposite.
 
 .PARAMETER CleanStage
-    Remove the populated dist\<stem>\ folder after zipping, overriding the
-    default-keep for windowsml.
+    Remove the populated dist\<stem>\ folder after zipping. Use this to drop the
+    tensorrt folder (which can be multiple GB) when you only want the .zip.
 
 .PARAMETER TensorRtBin
     (tensorrt) TensorRT bin directory. Forwarded to package-tensorrt.ps1.
@@ -92,9 +92,9 @@ param(
     [string]$OutDir,
     [switch]$SkipBuild,
     [switch]$NoZip,
-    # Keep the populated, ready-to-run dist\<stem>\ folder beside the .zip. By
-    # default it is kept for windowsml (small, handy for testing) and removed for
-    # tensorrt (can be multi-GB). -KeepStage forces keep; -CleanStage forces removal.
+    # Keep the populated, ready-to-run dist\<stem>\ folder beside the .zip. Kept by
+    # default for every variant (handy for testing the unpacked package). -CleanStage
+    # drops it after zipping (useful for the multi-GB tensorrt folder).
     [switch]$KeepStage,
     [switch]$CleanStage,
 
@@ -249,10 +249,11 @@ See licenses\ for third-party license texts.
     if (Test-Path $zip) { Remove-Item -Force $zip }
     Compress-Archive -Path (Join-Path $staging '*') -DestinationPath $zip -CompressionLevel Optimal
 
-    # 6. Keep or remove the ready-to-run dir. Default: keep windowsml (small,
-    #    handy for testing), drop tensorrt (can be multi-GB). Flags override.
+    # 6. Keep or remove the ready-to-run dir. Default: keep it for every variant
+    #    (handy for testing the unpacked package). The tensorrt dir can be multi-GB,
+    #    so pass -CleanStage to drop it after zipping. Flags override the default.
     if ($KeepStage -and $CleanStage) { throw "Pass only one of -KeepStage / -CleanStage." }
-    $keepDir = if ($KeepStage) { $true } elseif ($CleanStage) { $false } else { $Variant -eq 'windowsml' }
+    $keepDir = if ($KeepStage) { $true } elseif ($CleanStage) { $false } else { $true }
     if ($keepDir) {
         Write-Host "==> Kept ready-to-run dir: $staging" -ForegroundColor Green
     }

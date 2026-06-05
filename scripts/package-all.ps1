@@ -70,7 +70,8 @@ param(
     [string]$TensorRtBin,
 
     # Forwarded to every package.ps1: keep/remove the ready-to-run dist\<stem>\
-    # folders. Default per-variant (keep windowsml, drop tensorrt).
+    # folders. Each package.ps1 keeps its folder by default (vst3-tensorrt still
+    # drops its multi-GB folder unless -KeepStage). -CleanStage drops them all.
     [switch]$KeepStage,
     [switch]$CleanStage,
 
