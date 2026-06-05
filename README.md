@@ -126,7 +126,8 @@ tensorrt 版では `--provider tensorrt` を指定してください。
 
 ## 使い方（VST3 プラグイン版）
 
-1. zip を展開し、`vc-vst3.vst3` を VST3 の標準フォルダにコピーします。
+1. zip を展開し、`vc-vst3-windowsml.vst3` または
+   `vc-vst3-tensorrt.vst3` を VST3 の標準フォルダにコピーします。
    - Windows: `%CommonProgramFiles%\VST3\`（例: `C:\Program Files\Common Files\VST3`）
 2. 展開したフォルダで `pwsh .\download-models.ps1` を実行し、埋め込み・F0
    モデルを `.\assets\` に取得します（**インストール先ではなく、展開した

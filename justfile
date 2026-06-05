@@ -48,6 +48,10 @@ bundle variant="windowsml":
 validate-vst3 variant="windowsml":
     ./scripts/validate-vst3.ps1 -Variant {{variant}}
 
+# Build, validate, and copy the VST3 plugin into the per-user VST3 directory.
+install-vst3 variant="windowsml":
+    ./scripts/install-vst3-bundle.ps1 -Variant {{variant}} -BuildFirst -ValidateFirst
+
 # End-to-end check (tests + bundle); forwards flags, e.g. `just verify -Variant tensorrt`.
 verify *args:
     ./scripts/verify.ps1 {{args}}

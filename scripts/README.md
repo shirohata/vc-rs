@@ -77,6 +77,37 @@ Useful flags:
 For the validator install script itself, pass `-Update` to pull an existing SDK
 checkout, or `-CleanBuild` to recreate the CMake build directory.
 
+## Install local VST3 bundle
+
+Copy the local bundle into the per-user Windows VST3 directory
+(`%LocalAppData%\Programs\Common\VST3`):
+
+```powershell
+pwsh -File scripts/install-vst3-bundle.ps1
+```
+
+The install name is variant-specific (`vc-vst3-windowsml.vst3` or
+`vc-vst3-tensorrt.vst3`) so both builds can be installed side by side. The VST3
+class IDs and display names are also variant-specific.
+
+For the usual development loop, build, validate, then install in one command:
+
+```powershell
+pwsh -File scripts/install-vst3-bundle.ps1 -BuildFirst -ValidateFirst
+# or
+just install-vst3
+```
+
+For the machine-wide VST3 directory (`%CommonProgramFiles%\VST3`, usually
+`C:\Program Files\Common Files\VST3`), pass `-System`; that may require an
+elevated PowerShell session.
+
+For a dry run or alternate test copy, use:
+
+```powershell
+pwsh -File scripts/install-vst3-bundle.ps1 -DestinationRoot C:\tmp\VST3 -WhatIf
+```
+
 ## Package the distributables
 
 The shipped Windows distributions are four packages: `cli-windowsml`,

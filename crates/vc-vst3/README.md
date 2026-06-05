@@ -79,7 +79,8 @@ longer a packaged distribution; see git history for the old `package-cuda.ps1`.)
 
 [`package.ps1`](package.ps1) runs the whole distribution pipeline for a chosen
 variant: `cargo xtask bundle` → (TensorRT) build the engine-builder helper →
-the matching `package-<variant>.ps1` populate step → stage `vc-vst3.vst3` +
+the matching `package-<variant>.ps1` populate step → stage a variant-named VST3
+bundle (`vc-vst3-windowsml.vst3` or `vc-vst3-tensorrt.vst3`) +
 `LICENSE` + a generated `INSTALL.txt` → a versioned
 `dist\vc-vst3-<variant>-v<version>-win-x64.zip`.
 
@@ -196,15 +197,17 @@ pwsh crates\vc-vst3\package-tensorrt.ps1 -RuntimeOnly
 
 The builder resource DLLs are GPU-architecture specific and large (~160–640 MB
 each); with no `-BuilderSm` the script bundles them all (~2.5 GB) and warns.
-Because a VST3 host's process is the DAW (not the plugin), the plugin finds
-the bundled helper via the `VC_RS_TENSORRT_BUILDER_HELPER` env var — set it to
-the helper's path in the installed plugin folder (the script prints the exact
-command). With engines prebuilt and cached, only the runtime layer is needed at
-play time. End users otherwise need just an up-to-date NVIDIA GPU **driver**.
+The plugin finds the bundled helper automatically: it resolves it relative to
+its own module directory (the plugin DLL), not the DAW exe, so co-locating the
+helper in the bundle is enough — no `VC_RS_TENSORRT_BUILDER_HELPER` env var or
+PATH setup is required (the var only overrides the path if you relocate it).
+With engines prebuilt and cached, only the runtime layer is needed at play time.
+End users otherwise need just an up-to-date NVIDIA GPU **driver**.
 
 ## Install
 
-Copy the `vc-vst3.vst3` bundle into a standard VST3 search path for your OS:
+Copy the packaged `vc-vst3-windowsml.vst3` or `vc-vst3-tensorrt.vst3` bundle
+into a standard VST3 search path for your OS:
 
 - Windows: `%CommonProgramFiles%\VST3\`; macOS:
   `~/Library/Audio/Plug-Ins/VST3/`; Linux: `~/.vst3/`

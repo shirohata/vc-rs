@@ -128,7 +128,8 @@ metadata.
 
 ## Usage (VST3 plugin)
 
-1. Extract the zip and copy `vc-vst3.vst3` into the standard VST3 folder:
+1. Extract the zip and copy `vc-vst3-windowsml.vst3` or
+   `vc-vst3-tensorrt.vst3` into the standard VST3 folder:
    - Windows: `%CommonProgramFiles%\VST3\` (e.g.
      `C:\Program Files\Common Files\VST3`)
 2. In the extracted folder, run `pwsh .\download-models.ps1` to fetch the

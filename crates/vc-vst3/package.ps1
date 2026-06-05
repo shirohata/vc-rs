@@ -12,7 +12,7 @@
             the bundled Rust-crate notice matches this variant's dependencies
         3. the matching populate script (package-windowsml|tensorrt.ps1),
            which copies the runtime DLLs + licenses into the bundle
-        4. stage vc-vst3.vst3 + LICENSE + a generated INSTALL.txt
+        4. stage vc-vst3-<variant>.vst3 + LICENSE + a generated INSTALL.txt
         5. Compress-Archive into dist\vc-vst3-<variant>-v<version>-win-x64.zip
 
     The populate scripts are reused as-is; this only orchestrates them and adds
@@ -122,6 +122,7 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $bundleDir = Join-Path $repoRoot 'target\bundled'
 if (-not $OutDir) { $OutDir = Join-Path $repoRoot 'dist' }
+$installBundleName = "vc-vst3-$Variant.vst3"
 
 # Feature flags per variant for `cargo xtask bundle`. windowsml is the default
 # feature set, so it needs no extra flags.
@@ -236,8 +237,10 @@ Install it to regenerate the notice: cargo install cargo-about --features cli
     New-Item -ItemType Directory -Force -Path $staging | Out-Null
 
     # The VST3 bundle is self-contained (its sidecar DLLs live inside
-    # Contents\<arch>\), so staging is just the bundle itself.
-    Copy-Item -Path $vst3 -Destination $staging -Recurse -Force
+    # Contents\<arch>\), so staging is just the bundle itself. The staged bundle
+    # name is variant-specific so Windows ML and TensorRT packages can be copied
+    # into the same VST3 search path without overwriting each other.
+    Copy-Item -Path $vst3 -Destination (Join-Path $staging $installBundleName) -Recurse -Force
 
     $license = Join-Path $repoRoot 'LICENSE'
     if (Test-Path $license) { Copy-Item $license (Join-Path $staging 'LICENSE') -Force }
@@ -252,9 +255,10 @@ Install it to regenerate the notice: cargo install cargo-about --features cli
     $trtNote = if ($Variant -eq 'tensorrt' -and -not $RuntimeOnly) {
         @"
 
-First-run TensorRT engine builds use the bundled vc-tensorrt-builder.exe. Because
-a VST3 host's process is the DAW, point the plugin at it after installing:
-    setx VC_RS_TENSORRT_BUILDER_HELPER "<install-dir>\vc-tensorrt-builder.exe"
+First-run TensorRT engine builds use the bundled vc-tensorrt-builder.exe, which
+sits next to the plugin DLL. The plugin finds it automatically (resolved against
+its own module directory, not the DAW exe), so no env var or PATH setup is
+needed. To override the path: setx VC_RS_TENSORRT_BUILDER_HELPER "<path>\vc-tensorrt-builder.exe"
 "@
     }
     else { '' }
@@ -262,7 +266,7 @@ a VST3 host's process is the DAW, point the plugin at it after installing:
     $install = @"
 vc-vst3 — RVC voice conversion plugin ($Variant build, v$version)
 
-Install — copy the vc-vst3.vst3 bundle into a standard VST3 search path:
+Install — copy the $installBundleName bundle into a standard VST3 search path:
   %CommonProgramFiles%\VST3\   (e.g. C:\Program Files\Common Files\VST3)
 
 Models — get the shared embedder + F0 models (optional helper):
@@ -301,7 +305,7 @@ See licenses\ inside each bundle for third-party license texts.
 
     $size = (Get-Item $zip).Length
     Write-Host ("==> Done: {0} ({1:N1} MB)" -f $zip, ($size / 1MB)) -ForegroundColor Green
-    Write-Host "    Contents: vc-vst3.vst3"
+    Write-Host "    Contents: $installBundleName"
 }
 finally {
     Pop-Location

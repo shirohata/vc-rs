@@ -16,6 +16,7 @@ use nice_plug::prelude::{Editor, ParamSetter};
 use nice_plug_egui::{create_egui_editor, resizable_window::ResizableWindow, widgets};
 
 use crate::params::VcRvcParams;
+use crate::plugin_identity;
 use crate::runtime::{MAX_CHUNK_MS, MIN_CHUNK_MS};
 
 /// Granularity for the millisecond sliders.
@@ -92,7 +93,7 @@ fn draw(ui: &mut egui::Ui, setter: &ParamSetter, state: &mut EditorState) {
 }
 
 fn draw_contents(ui: &mut egui::Ui, setter: &ParamSetter, state: &mut EditorState) {
-    ui.heading("VC-RS RVC");
+    ui.heading(plugin_identity::NAME);
 
     // Status line (updated by the worker thread).
     let status = state.status.lock().map(|s| s.clone()).unwrap_or_default();

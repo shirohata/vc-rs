@@ -21,6 +21,36 @@ use config::PluginConfig;
 use params::VcRvcParams;
 use runtime::PluginRuntime;
 
+pub(crate) mod plugin_identity {
+    #[cfg(feature = "tensorrt")]
+    pub const NAME: &str = "VC-RS RVC (TensorRT)";
+    #[cfg(feature = "tensorrt")]
+    pub const VST3_CLASS_ID: [u8; 16] = *b"VcRsRvcTensorTRT";
+
+    #[cfg(all(not(feature = "tensorrt"), feature = "windowsml"))]
+    pub const NAME: &str = "VC-RS RVC (Windows ML)";
+    #[cfg(all(not(feature = "tensorrt"), feature = "windowsml"))]
+    pub const VST3_CLASS_ID: [u8; 16] = *b"VcRsRvcWinMLPlug";
+
+    #[cfg(all(
+        not(feature = "tensorrt"),
+        not(feature = "windowsml"),
+        feature = "cuda"
+    ))]
+    pub const NAME: &str = "VC-RS RVC (CUDA)";
+    #[cfg(all(
+        not(feature = "tensorrt"),
+        not(feature = "windowsml"),
+        feature = "cuda"
+    ))]
+    pub const VST3_CLASS_ID: [u8; 16] = *b"VcRsRvcCudaDev01";
+
+    #[cfg(not(any(feature = "tensorrt", feature = "windowsml", feature = "cuda")))]
+    pub const NAME: &str = "VC-RS RVC";
+    #[cfg(not(any(feature = "tensorrt", feature = "windowsml", feature = "cuda")))]
+    pub const VST3_CLASS_ID: [u8; 16] = *b"VcRsRvcVoiceConv";
+}
+
 pub struct VcRvcPlugin {
     params: Arc<VcRvcParams>,
     runtime: Option<PluginRuntime>,
@@ -45,7 +75,7 @@ impl Default for VcRvcPlugin {
 }
 
 impl Plugin for VcRvcPlugin {
-    const NAME: &'static str = "VC-RS RVC";
+    const NAME: &'static str = plugin_identity::NAME;
     const VENDOR: &'static str = "vc-rs";
     const URL: &'static str = "https://github.com/wok-rvc/vc-rs";
     const EMAIL: &'static str = "noreply@vc-rs.invalid";
@@ -157,7 +187,7 @@ impl Plugin for VcRvcPlugin {
 }
 
 impl Vst3Plugin for VcRvcPlugin {
-    const VST3_CLASS_ID: [u8; 16] = *b"VcRsRvcVoiceConv";
+    const VST3_CLASS_ID: [u8; 16] = plugin_identity::VST3_CLASS_ID;
     const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] = &[Vst3SubCategory::Fx];
 }
 
