@@ -33,7 +33,7 @@
 
 .PARAMETER TensorRtBin
     TensorRT `bin` directory holding nvinfer_<N>.dll etc. Default:
-    %TENSORRT_ROOT%\bin, else the newest TensorRT folder under the repo root.
+    %TENSORRT_ROOT%\bin, else the newest TensorRT folder under external\nvidia.
 
 .PARAMETER CudaBin
     CUDA Toolkit bin directory (for cudart64_<M>.dll). Default: %CUDA_PATH%\bin
@@ -104,19 +104,28 @@ function Get-NvinferMajor([string]$binDir) {
     return [int]($dll.Name -replace '^nvinfer_(\d+)\.dll$', '$1')
 }
 
-# Newest TensorRT bin (highest nvinfer_<N>.dll) under the repo root. A TensorRT
-# folder is either the install root itself or wraps a single TensorRT-* subdir.
+# Newest TensorRT bin (highest nvinfer_<N>.dll) under external\nvidia. A
+# TensorRT folder is either the install root itself or wraps a single
+# TensorRT-* subdir. The repo root remains as a fallback for older local trees.
 function Find-NewestTensorRtBin([string]$root) {
     $best = $null; $bestMajor = -1
-    foreach ($dir in (Get-ChildItem -Path $root -Directory -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -match 'TensorRT' })) {
-        $candidates = @($dir.FullName)
-        $candidates += (Get-ChildItem -Path $dir.FullName -Directory -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -like 'TensorRT-*' } | ForEach-Object { $_.FullName })
-        foreach ($c in $candidates) {
-            $major = Get-NvinferMajor (Join-Path $c 'bin')
-            if ($null -ne $major -and $major -gt $bestMajor) {
-                $bestMajor = $major; $best = (Join-Path $c 'bin')
+    $searchRoots = @(
+        (Join-Path $root 'external\nvidia'),
+        (Join-Path $root 'external'),
+        $root
+    ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -Unique
+
+    foreach ($searchRoot in $searchRoots) {
+        foreach ($dir in (Get-ChildItem -Path $searchRoot -Directory -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -match 'TensorRT' })) {
+            $candidates = @($dir.FullName)
+            $candidates += (Get-ChildItem -Path $dir.FullName -Directory -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -like 'TensorRT-*' } | ForEach-Object { $_.FullName })
+            foreach ($c in $candidates) {
+                $major = Get-NvinferMajor (Join-Path $c 'bin')
+                if ($null -ne $major -and $major -gt $bestMajor) {
+                    $bestMajor = $major; $best = (Join-Path $c 'bin')
+                }
             }
         }
     }
@@ -147,7 +156,7 @@ function Find-CudaBin([int]$cudaMajor) {
 if (-not $TensorRtBin) {
     $TensorRtBin = Find-NewestTensorRtBin $repoRoot
     if (-not $TensorRtBin) {
-        throw "No TensorRT install found under $repoRoot. Set TENSORRT_ROOT or pass -TensorRtBin."
+        throw "No TensorRT install found under $repoRoot\external\nvidia. Set TENSORRT_ROOT or pass -TensorRtBin."
     }
 }
 if (-not $BundleDir) { $BundleDir = Join-Path $repoRoot 'target\bundled' }

@@ -17,7 +17,7 @@ root with `pwsh`.
      (older builds: https://developer.nvidia.com/cudnn-archive)
    - TensorRT **11** — https://developer.nvidia.com/tensorrt
      (downloads: https://developer.nvidia.com/tensorrt-download). Extract under
-     the repo root; `crates/vc-core/build.rs` auto-discovers the newest
+     `external\nvidia\`; `crates/vc-core/build.rs` auto-discovers the newest
      `TensorRT-*` folder there.
 
 ## Per shell session
@@ -51,11 +51,11 @@ repository:
 pwsh -File scripts/install-vst3-validator.ps1
 ```
 
-This clones the VST3 SDK into `tools\vst3sdk\`, builds it in
-`tools\vst3sdk-build\`, and leaves the validator at:
+This clones the VST3 SDK into `external\steinberg\vst3sdk\`, builds it in
+`external\steinberg\vst3sdk-build\`, and leaves the validator at:
 
 ```powershell
-tools\vst3sdk-build\bin\Release\validator.exe
+external\steinberg\vst3sdk-build\bin\Release\validator.exe
 ```
 
 Use it against the local bundle:

@@ -130,7 +130,7 @@ Write-Host ""
 Write-Host "Still required (login-gated, not handled here):" -ForegroundColor Magenta
 Write-Host "  - CUDA Toolkit  (v12.9 for TensorRT 10 / v13.2 for TensorRT 11)"
 Write-Host "  - cuDNN v9.x"
-Write-Host "  - TensorRT      (extract under the workspace root; build.rs auto-discovers it)"
+Write-Host "  - TensorRT      (extract under external\nvidia; build.rs auto-discovers it)"
 Write-Host ""
 Write-Host "Then, per shell session:" -ForegroundColor Magenta
 Write-Host "  . .\tmp\env.ps1          # put CUDA/cuDNN/TensorRT bin on PATH"

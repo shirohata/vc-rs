@@ -3,12 +3,13 @@
     Build Steinberg's VST3 validator into this repository for local plugin tests.
 
 .DESCRIPTION
-    Clones the official VST3 SDK under tools\vst3sdk, configures a local CMake
-    build under tools\vst3sdk-build, and builds the command-line validator.
+    Clones the official VST3 SDK under external\steinberg\vst3sdk, configures a
+    local CMake build under external\steinberg\vst3sdk-build, and builds the
+    command-line validator.
 
-    The SDK checkout and build tree are intentionally kept under tools\ so the
-    validator path is stable for local scripts while the downloaded third-party
-    source and generated binaries remain outside version control.
+    The SDK checkout and build tree are intentionally kept under external\ so
+    downloaded third-party source and generated binaries remain separate from
+    repository-owned tools.
 
 .PARAMETER Update
     If the SDK checkout already exists, pull it and update submodules before
@@ -45,8 +46,9 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
-$sdkDir = Join-Path $repoRoot 'tools\vst3sdk'
-$buildDir = Join-Path $repoRoot 'tools\vst3sdk-build'
+$steinbergRoot = Join-Path $repoRoot 'external\steinberg'
+$sdkDir = Join-Path $steinbergRoot 'vst3sdk'
+$buildDir = Join-Path $steinbergRoot 'vst3sdk-build'
 
 function Test-CommandPresent([string]$Name) {
     [bool](Get-Command $Name -ErrorAction SilentlyContinue)
@@ -125,6 +127,7 @@ if (-not $cmake) {
     throw "cmake is required to build the VST3 SDK validator."
 }
 $cmakeGenerator = Resolve-CmakeGenerator $cmake $Generator
+New-Item -ItemType Directory -Force -Path $steinbergRoot | Out-Null
 
 Write-Host "== VST3 validator local install ==" -ForegroundColor Cyan
 Write-Host "SDK:   $sdkDir"

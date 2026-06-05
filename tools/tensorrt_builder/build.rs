@@ -61,38 +61,52 @@ fn main() {
 
 // --- TensorRT / CUDA discovery shared with crates/vc-core/build.rs ---
 
-/// Find the newest TensorRT install under `workspace_root`. Entries whose name
-/// contains "TensorRT" are inspected; the real root is the entry itself when it
-/// holds an `include/`, otherwise its single nested `TensorRT-*` subdir. The
-/// candidate with the highest `nvinfer_<major>.lib` wins.
+/// Find the newest TensorRT install under the workspace's external SDK area.
+/// Entries whose name contains "TensorRT" are inspected; the real root is the
+/// entry itself when it holds an `include/`, otherwise its single nested
+/// `TensorRT-*` subdir. The candidate with the highest `nvinfer_<major>.lib`
+/// wins. The workspace root remains as a fallback for older local checkouts.
 fn discover_newest_tensorrt(workspace_root: &std::path::Path) -> Option<PathBuf> {
     let mut best: Option<(u32, PathBuf)> = None;
-    for entry in fs::read_dir(workspace_root).ok()?.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        if !entry
-            .file_name()
-            .to_string_lossy()
-            .to_lowercase()
-            .contains("tensorrt")
-        {
-            continue;
-        }
-        for root in tensorrt_root_candidates(&path) {
-            if let Some(major) = detect_nvinfer_major(&root.join("lib")) {
-                if root.join("include").is_dir()
-                    && best
-                        .as_ref()
-                        .is_none_or(|(best_major, _)| major > *best_major)
-                {
-                    best = Some((major, root));
+    for search_root in tensorrt_search_roots(workspace_root) {
+        for entry in fs::read_dir(search_root).ok()?.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            if !entry
+                .file_name()
+                .to_string_lossy()
+                .to_lowercase()
+                .contains("tensorrt")
+            {
+                continue;
+            }
+            for root in tensorrt_root_candidates(&path) {
+                if let Some(major) = detect_nvinfer_major(&root.join("lib")) {
+                    if root.join("include").is_dir()
+                        && best
+                            .as_ref()
+                            .is_none_or(|(best_major, _)| major > *best_major)
+                    {
+                        best = Some((major, root));
+                    }
                 }
             }
         }
     }
     best.map(|(_, path)| path)
+}
+
+fn tensorrt_search_roots(workspace_root: &std::path::Path) -> Vec<PathBuf> {
+    [
+        workspace_root.join("external").join("nvidia"),
+        workspace_root.join("external"),
+        workspace_root.to_path_buf(),
+    ]
+    .into_iter()
+    .filter(|path| path.is_dir())
+    .collect()
 }
 
 /// A TensorRT folder may be the install root itself or wrap a single

@@ -183,8 +183,8 @@ copies the TensorRT DLLs into the bundle. There are two dependency layers:
   the user's GPU. Copied unless `-RuntimeOnly`.
 
 The TensorRT major `<N>` is read from the chosen install (the newest TensorRT
-folder under the repo root, or `%TENSORRT_ROOT%`), and the CUDA major `<M>` is
-paired automatically (TRT10 → CUDA 12, TRT11 → CUDA 13).
+folder under `external\nvidia\`, or `%TENSORRT_ROOT%`), and the CUDA major `<M>`
+is paired automatically (TRT10 → CUDA 12, TRT11 → CUDA 13).
 
 ```powershell
 # Self-contained for the target GPU's SM (e.g. sm86 = RTX 30xx, sm89 = RTX 40xx;

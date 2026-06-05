@@ -58,8 +58,8 @@ TensorRT を `PATH` 先頭へ追加し、`CUDA_PATH` / `TENSORRT_ROOT` / `ORT_CU
 | TensorRT | 11.x（CUDA 13.x 対応。開発環境では 11.0.0.114） | [TensorRT SDK](https://developer.nvidia.com/tensorrt) |
 
 `--provider cuda` を使う場合は CUDA Toolkit と cuDNN を、`--provider tensorrt` を
-使う場合はさらに TensorRT を配置します。ビルドはワークスペース直下にある最も新しい
-TensorRT を自動検出し、対応する CUDA Toolkit を選択します（`TENSORRT_ROOT` /
+使う場合はさらに TensorRT を `external\nvidia\` 配下に配置します。ビルドは
+`external\nvidia\` にある最も新しい TensorRT を自動検出し、対応する CUDA Toolkit を選択します（`TENSORRT_ROOT` /
 `CUDA_PATH` で上書き可能）。
 
 TensorRT は初回実行時やモデル・入力形状が変わったタイミングでエンジンを生成する

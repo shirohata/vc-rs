@@ -3,6 +3,7 @@
 /tools/vst3sdk/
 /tools/vst3sdk-build/
 /dist/
+/external/
 
 *.wav
 *.engine

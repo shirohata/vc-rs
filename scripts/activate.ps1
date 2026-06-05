@@ -73,10 +73,18 @@ function Find-CuDnnBin([string]$CudaToolkit) {
 # the install may be the dir itself or a nested TensorRT-* subdir.
 function Find-TensorRtRoot([int]$Major) {
     $candidates = @()
-    foreach ($dir in (Get-ChildItem $repoRoot -Directory | Where-Object { $_.Name -match '(?i)tensorrt' })) {
-        $candidates += $dir.FullName
-        $candidates += (Get-ChildItem $dir.FullName -Directory -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -match '(?i)^tensorrt-' } | Select-Object -ExpandProperty FullName)
+    $searchRoots = @(
+        (Join-Path $repoRoot 'external\nvidia'),
+        (Join-Path $repoRoot 'external'),
+        $repoRoot
+    ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -Unique
+
+    foreach ($searchRoot in $searchRoots) {
+        foreach ($dir in (Get-ChildItem $searchRoot -Directory | Where-Object { $_.Name -match '(?i)tensorrt' })) {
+            $candidates += $dir.FullName
+            $candidates += (Get-ChildItem $dir.FullName -Directory -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -match '(?i)^tensorrt-' } | Select-Object -ExpandProperty FullName)
+        }
     }
     foreach ($root in $candidates) {
         if ((Test-Path (Join-Path $root "include")) -and
@@ -121,7 +129,7 @@ if ($TensorRtRoot) {
     Add-PathFirst (Join-Path $TensorRtRoot "lib")
     Write-Host "[tensorrt] $TensorRtRoot" -ForegroundColor Green
 } else {
-    Write-Warning "TensorRT $trtMajor root not found under $repoRoot."
+    Write-Warning "TensorRT $trtMajor root not found under $repoRoot\external\nvidia."
 }
 
 Write-Host "Done. (CUDA_PATH / TENSORRT_ROOT / ORT_CUDA_VERSION set; PATH updated)" -ForegroundColor Cyan

@@ -64,7 +64,7 @@ $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 . (Join-Path $PSScriptRoot 'rustflags.ps1')
 
 if (-not $ValidatorPath) {
-    $ValidatorPath = Join-Path $repoRoot "tools\vst3sdk-build\bin\$ValidatorConfig\validator.exe"
+    $ValidatorPath = Join-Path $repoRoot "external\steinberg\vst3sdk-build\bin\$ValidatorConfig\validator.exe"
 }
 $bundle = Join-Path $repoRoot 'target\bundled\vc-vst3.vst3'
 
