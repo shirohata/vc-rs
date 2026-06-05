@@ -77,7 +77,7 @@ impl Default for VcRvcPlugin {
 impl Plugin for VcRvcPlugin {
     const NAME: &'static str = plugin_identity::NAME;
     const VENDOR: &'static str = "vc-rs";
-    const URL: &'static str = "https://github.com/wok-rvc/vc-rs";
+    const URL: &'static str = "https://github.com/shirohata/vc-rs";
     const EMAIL: &'static str = "noreply@vc-rs.invalid";
     const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 
