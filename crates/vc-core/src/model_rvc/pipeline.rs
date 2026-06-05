@@ -144,13 +144,15 @@ impl RvcPipeline {
     }
 
     fn load_fixed_shape(config: RvcPipelineConfig<'_>) -> Result<Self> {
-        let tensor_rt_run_mode = if config.provider.is_tensorrt()
-            || config.provider == Provider::WindowsMlNvTensorRtRtx
-        {
-            TensorRtRunMode::PinnedCpu
-        } else {
-            TensorRtRunMode::cuda_from_env()
-        };
+        // NvTensorRtRtx (explicit, or auto-selected by `Provider::WindowsMl`) uses
+        // the pinned-CPU run mode: it has no CUDA IoBinding/CUDA-graph path, so the
+        // CUDA device-I/O modes from the env must not be applied to it.
+        let tensor_rt_run_mode =
+            if config.provider.is_tensorrt() || provider_drives_nvtrtx(config.provider) {
+                TensorRtRunMode::PinnedCpu
+            } else {
+                TensorRtRunMode::cuda_from_env()
+            };
         info!(
             "{} run mode selected mode={} cuda_graph={} device_io={} env_var={}",
             config.provider.label(),
@@ -742,7 +744,35 @@ impl VoiceModel for RvcPipeline {
 }
 
 fn provider_needs_fixed_shape_profile(provider: Provider) -> bool {
-    provider_uses_fixed_shape(provider) || provider == Provider::WindowsMlNvTensorRtRtx
+    provider_uses_fixed_shape(provider) || provider_drives_nvtrtx(provider)
+}
+
+/// True when sessions for this provider run through the NvTensorRtRtx
+/// (TensorRT-RTX) Windows ML catalog EP — either because it was requested
+/// explicitly, or because the "Auto" Windows ML provider (`Provider::WindowsMl`)
+/// resolves to it as the best available catalog EP on this machine.
+///
+/// That EP rejects dynamic shapes, so it needs the same fixed-shape profile and
+/// pinned-CPU run mode as the explicit provider. Without this, `Provider::WindowsMl`
+/// on a machine with TensorRT-RTX installed takes the dynamic-shape `load` path,
+/// passes no profile, and the session build fails with
+/// "Windows ML NvTensorRtRtx requires a fixed-shape profile". The catalog lookup
+/// is cached (OnceLock) and matches what `load_session` selects later, so the
+/// load-time routing decision and the session build stay in agreement.
+fn provider_drives_nvtrtx(provider: Provider) -> bool {
+    if provider == Provider::WindowsMlNvTensorRtRtx {
+        return true;
+    }
+    #[cfg(all(windows, feature = "windowsml"))]
+    if provider == Provider::WindowsMl {
+        return matches!(
+            crate::windows_ml::try_register_best_catalog_ep(),
+            Ok(Some(
+                crate::windows_ml::CatalogExecutionProvider::NvTensorRtRtx
+            ))
+        );
+    }
+    false
 }
 
 impl RvcPipeline {

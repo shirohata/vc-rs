@@ -1487,9 +1487,22 @@ pub(super) fn load_session(
                 // instead of silently changing the requested accelerator.
                 match crate::windows_ml::try_register_best_catalog_ep()? {
                     Some(catalog_ep) => {
+                        // The NvTensorRtRtx (TensorRT-RTX) EP cannot be combined
+                        // with the DirectML EP in one session — ORT rejects it with
+                        // "DML EP can only be used with CPU EPs". With its
+                        // fixed-shape profile it covers the whole graph on its own,
+                        // so skip the DirectML fallback for it. Other catalog EPs
+                        // keep DirectML for ops they do not implement.
+                        let with_directml_fallback = catalog_ep
+                            != crate::windows_ml::CatalogExecutionProvider::NvTensorRtRtx;
                         info!(
-                            "using Windows ML catalog EP {} with DirectML/CPU fallback for {}",
+                            "using Windows ML catalog EP {} ({}) for {}",
                             catalog_ep.label(),
+                            if with_directml_fallback {
+                                "with DirectML/CPU fallback"
+                            } else {
+                                "no DirectML fallback; TensorRT-RTX covers the full graph"
+                            },
                             path.display()
                         );
                         builder = with_windows_ml_catalog_ep(
@@ -1498,13 +1511,15 @@ pub(super) fn load_session(
                             path,
                             tensor_rt_profile,
                         )?;
-                        builder = builder
-                            .with_execution_providers([ep::DirectML::default().build()])
-                            .map_err(|err| {
-                                anyhow!(
-                                    "failed to configure Windows ML DirectML fallback EP: {err}"
-                                )
-                            })?;
+                        if with_directml_fallback {
+                            builder = builder
+                                .with_execution_providers([ep::DirectML::default().build()])
+                                .map_err(|err| {
+                                    anyhow!(
+                                        "failed to configure Windows ML DirectML fallback EP: {err}"
+                                    )
+                                })?;
+                        }
                     }
                     None => {
                         info!(
