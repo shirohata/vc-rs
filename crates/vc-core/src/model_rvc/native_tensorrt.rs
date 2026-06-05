@@ -489,7 +489,9 @@ fn tensor_rt_builder_command(
     }
 
     bail!(
-        "native TensorRT engine cache miss requires an ORT-free builder helper. Set VC_RS_TENSORRT_BUILDER_HELPER to vc-tensorrt-builder.exe or place it next to the main executable"
+        "native TensorRT engine cache miss requires an ORT-free builder helper. \
+         Bundle vc-tensorrt-builder.exe next to the plugin/executable (package-tensorrt.ps1 \
+         does this automatically), or set VC_RS_TENSORRT_BUILDER_HELPER to override its path"
     )
 }
 
@@ -510,11 +512,34 @@ fn add_builder_args(
         .arg(profile_shapes)
         .arg("--timing-cache")
         .arg(timing_cache);
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NO_WINDOW: the helper is a console-subsystem exe; without this a
+        // console window flashes each time the plugin (a GUI DLL with no console
+        // in the DAW process) spawns it for a first-run engine build. stdout/stderr
+        // are still captured via Command::output(), so logs/errors are unaffected.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
 }
 
 #[cfg(native_tensorrt)]
 fn tensor_rt_builder_candidates() -> Result<Vec<PathBuf>> {
     let mut candidates = Vec::new();
+    // Highest priority: the directory holding *this* module's binary. For a VST3
+    // plugin the host process is the DAW, so `current_exe()` is the DAW exe, not
+    // the plugin — only the module directory points at the bundled helper that
+    // `package-tensorrt.ps1` copies next to the plugin DLL (alongside the
+    // nvonnxparser / builder-resource DLLs it loads at startup). This is what
+    // makes a packaged TensorRT plugin self-contained without an env override.
+    if let Some(module_dir) = current_module_dir() {
+        candidates.push(module_dir.join("vc-tensorrt-builder.exe"));
+        candidates.push(module_dir.join("tensorrt-probe.exe"));
+    }
+    // For the CLI the module dir equals the exe dir, but keep this fallback for
+    // any front-end where `current_exe()` is the binary that links vc-core.
     if let Some(exe_dir) = std::env::current_exe()
         .ok()
         .and_then(|path| path.parent().map(Path::to_path_buf))
@@ -541,6 +566,67 @@ fn tensor_rt_builder_candidates() -> Result<Vec<PathBuf>> {
         );
     }
     Ok(candidates)
+}
+
+// Directory of the binary that contains this code (the plugin DLL inside a DAW,
+// or the CLI exe), found from the address of a function in this module rather
+// than from `current_exe()` — the two differ for a DLL loaded into a host.
+#[cfg(all(native_tensorrt, windows))]
+fn current_module_dir() -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+
+    // GetModuleHandleExW with FROM_ADDRESS treats `lpModuleName` as an address
+    // and returns the module containing it; UNCHANGED_REFCOUNT avoids leaking a
+    // reference (we don't own/free the handle). 0x4 | 0x2 per Win32 headers.
+    const GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS: u32 = 0x0000_0004;
+    const GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT: u32 = 0x0000_0002;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetModuleHandleExW(
+            dwFlags: u32,
+            lpModuleName: *const u16,
+            phModule: *mut *mut c_void,
+        ) -> i32;
+        fn GetModuleFileNameW(hModule: *mut c_void, lpFilename: *mut u16, nSize: u32) -> u32;
+    }
+
+    let mut module: *mut c_void = std::ptr::null_mut();
+    // Address of a local function: guaranteed to live in this module's image.
+    let anchor = current_module_dir as *const c_void as *const u16;
+    let ok = unsafe {
+        GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            anchor,
+            &mut module,
+        )
+    };
+    if ok == 0 {
+        return None;
+    }
+
+    // Grow the buffer until the path fits (return value == capacity means the
+    // name was truncated, per GetModuleFileNameW's contract).
+    let mut buf = vec![0u16; 260];
+    loop {
+        let len = unsafe { GetModuleFileNameW(module, buf.as_mut_ptr(), buf.len() as u32) };
+        if len == 0 {
+            return None;
+        }
+        if (len as usize) < buf.len() {
+            buf.truncate(len as usize);
+            break;
+        }
+        buf.resize(buf.len() * 2, 0);
+    }
+
+    let path = PathBuf::from(std::ffi::OsString::from_wide(&buf));
+    path.parent().map(Path::to_path_buf)
+}
+
+#[cfg(all(native_tensorrt, not(windows)))]
+fn current_module_dir() -> Option<PathBuf> {
+    None
 }
 
 #[cfg(native_tensorrt)]
@@ -757,5 +843,37 @@ impl MessageBuffer {
             .map(|&b| b as u8)
             .collect::<Vec<_>>();
         String::from_utf8_lossy(&bytes).into_owned()
+    }
+}
+
+#[cfg(all(test, native_tensorrt, windows))]
+mod tests {
+    use super::*;
+
+    // The test binary statically links vc-core, so the module containing this
+    // code IS the test exe — its module dir must equal the exe dir. This proves
+    // the GetModuleHandleExW/GetModuleFileNameW FFI returns a real, correct path
+    // (the property the packaged-plugin discovery relies on).
+    #[test]
+    fn module_dir_matches_exe_dir_for_static_binary() {
+        let module_dir = current_module_dir().expect("module dir should resolve");
+        let exe_dir = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        assert_eq!(module_dir, exe_dir);
+    }
+
+    // The bundled helper must be the first candidate so a packaged plugin finds
+    // its co-located builder before any workspace/dev fallback.
+    #[test]
+    fn builder_candidates_lead_with_module_dir() {
+        let candidates = tensor_rt_builder_candidates().unwrap();
+        let module_dir = current_module_dir().expect("module dir should resolve");
+        assert_eq!(
+            candidates.first(),
+            Some(&module_dir.join("vc-tensorrt-builder.exe"))
+        );
     }
 }

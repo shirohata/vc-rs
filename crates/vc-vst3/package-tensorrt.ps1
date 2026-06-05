@@ -26,8 +26,10 @@
         `vc-tensorrt-builder.exe` builds engines from the ONNX models via the
         TensorRT builder, which needs nvonnxparser_<N> and the
         `nvinfer_builder_resource_sm*_<N>.dll` matching the user's GPU. Copied
-        unless -RuntimeOnly. The plugin's process is the DAW, so point it at the
-        bundled helper with VC_RS_TENSORRT_BUILDER_HELPER (printed at the end).
+        unless -RuntimeOnly. The plugin finds the helper automatically because it
+        is co-located with the plugin DLL (the plugin resolves it relative to its
+        own module directory, not the DAW exe). VC_RS_TENSORRT_BUILDER_HELPER is
+        only needed to override that path.
 
 .PARAMETER TensorRtBin
     TensorRT `bin` directory holding nvinfer_<N>.dll etc. Default:
@@ -260,8 +262,8 @@ Write-Host ("Done: bundled {0} file(s) ({1:N1} GB) + licenses into {2} location(
 if (-not $RuntimeOnly -and $resolvedBuilderExe) {
     $helperName = Split-Path $resolvedBuilderExe -Leaf
     Write-Host ""
-    Write-Host "First-run engine builds use the bundled helper. Because a VST3 host's" -ForegroundColor Cyan
-    Write-Host "process is the DAW (not the plugin), point the plugin at it via env var:" -ForegroundColor Cyan
-    Write-Host "    setx VC_RS_TENSORRT_BUILDER_HELPER `"<install-dir>\$helperName`"" -ForegroundColor Cyan
-    Write-Host "(set it to the helper's path inside the installed plugin folder)." -ForegroundColor Cyan
+    Write-Host "First-run engine builds use the bundled helper ($helperName). The plugin" -ForegroundColor Cyan
+    Write-Host "discovers it automatically because it sits next to the plugin DLL, so no" -ForegroundColor Cyan
+    Write-Host "env var or PATH setup is required. Override only if you relocate the helper:" -ForegroundColor Cyan
+    Write-Host "    setx VC_RS_TENSORRT_BUILDER_HELPER `"<path>\$helperName`"" -ForegroundColor Cyan
 }
