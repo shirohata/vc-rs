@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/vc-core", "crates/vc-cli", "crates/vc-vst3", "xtask"]
+members = ["crates/vc-core", "crates/vc-app", "crates/vc-cli", "crates/vc-gui", "crates/vc-vst3", "xtask"]
 exclude = ["tools/tensorrt_builder"]
 
 [workspace.package]

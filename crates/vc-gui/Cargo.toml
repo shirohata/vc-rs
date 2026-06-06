@@ -1,0 +1,22 @@
+[package]
+name = "vc-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Standalone GUI for vc-rs"
+
+[features]
+default = ["windowsml", "tensorrt"]
+windowsml = ["vc-app/windowsml", "vc-core/windowsml"]
+tensorrt = ["vc-app/tensorrt", "vc-core/tensorrt"]
+cuda = ["vc-app/cuda", "vc-core/cuda"]
+
+[dependencies]
+vc-app = { path = "../vc-app", default-features = false }
+vc-core = { path = "../vc-core" }
+eframe = "0.34.1"
+egui = "0.34.1"
+rfd = "0.15"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

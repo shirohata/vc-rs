@@ -1,7 +1,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
-use crate::cli::{AudioBackend, DeviceAudioBackend};
+use crate::AudioBackend;
 use vc_core::dsp;
 
 const CPAL_SCRATCH_FALLBACK_SAMPLES: usize = 65_536;
@@ -9,21 +9,9 @@ const CPAL_MAX_SCRATCH_SAMPLES: usize = 65_536;
 
 #[cfg(windows)]
 #[path = "wasapi_audio.rs"]
-mod wasapi_audio;
+pub(crate) mod wasapi_audio;
 
-pub fn print_devices(backend: DeviceAudioBackend) -> Result<()> {
-    match backend {
-        DeviceAudioBackend::All => {
-            print_cpal_devices()?;
-            println!();
-            print_wasapi_devices()
-        }
-        DeviceAudioBackend::Cpal => print_cpal_devices(),
-        DeviceAudioBackend::Wasapi => print_wasapi_devices(),
-    }
-}
-
-fn print_cpal_devices() -> Result<()> {
+pub fn print_cpal_devices() -> Result<()> {
     let host = cpal::default_host();
 
     println!("CPAL input devices:");
@@ -41,12 +29,12 @@ fn print_cpal_devices() -> Result<()> {
 }
 
 #[cfg(windows)]
-fn print_wasapi_devices() -> Result<()> {
+pub fn print_wasapi_devices() -> Result<()> {
     wasapi_audio::print_devices()
 }
 
 #[cfg(not(windows))]
-fn print_wasapi_devices() -> Result<()> {
+pub fn print_wasapi_devices() -> Result<()> {
     bail!("WASAPI audio backend is only available on Windows")
 }
 
@@ -267,6 +255,13 @@ pub fn output_device(name: Option<&str>) -> Result<cpal::Device> {
     find_device(host.output_devices()?, name)
         .or_else(|| host.default_output_device())
         .ok_or_else(|| anyhow!("output device not found"))
+}
+
+pub fn cpal_device_names() -> Result<(Vec<String>, Vec<String>)> {
+    let host = cpal::default_host();
+    let inputs = host.input_devices()?.map(|d| device_name(&d)).collect();
+    let outputs = host.output_devices()?.map(|d| device_name(&d)).collect();
+    Ok((inputs, outputs))
 }
 
 fn find_device<I>(devices: I, name: Option<&str>) -> Option<cpal::Device>

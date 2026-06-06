@@ -110,6 +110,24 @@ pub enum AudioBackend {
     Wasapi,
 }
 
+impl From<AudioBackend> for vc_app::AudioBackend {
+    fn from(value: AudioBackend) -> Self {
+        match value {
+            AudioBackend::Cpal => Self::Cpal,
+            AudioBackend::Wasapi => Self::Wasapi,
+        }
+    }
+}
+
+impl From<Smoother> for vc_app::Smoother {
+    fn from(value: Smoother) -> Self {
+        match value {
+            Smoother::Sola => Self::Sola,
+            Smoother::Psola => Self::Psola,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum DeviceAudioBackend {
     All,

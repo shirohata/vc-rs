@@ -1,0 +1,27 @@
+[package]
+name = "vc-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared realtime application runtime for vc-rs frontends"
+
+[features]
+default = ["windowsml", "tensorrt"]
+windowsml = ["vc-core/windowsml"]
+tensorrt = ["vc-core/tensorrt"]
+cuda = ["vc-core/cuda"]
+
+[dependencies]
+vc-core = { path = "../vc-core" }
+anyhow.workspace = true
+tracing.workspace = true
+cpal = "0.17"
+hound = "3.5"
+rtrb = "0.3"
+thread-priority = "3.0.0"
+
+[target.'cfg(windows)'.dependencies]
+wasapi = "0.23"
+
+[dev-dependencies]
+approx = "0.5"

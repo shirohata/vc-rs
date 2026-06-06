@@ -16,26 +16,22 @@ path = "src/main.rs"
 # packages (package.ps1) build single-provider variants explicitly with
 # `--no-default-features --features windowsml|tensorrt|cuda`, mirroring vc-vst3.
 default = ["windowsml", "tensorrt"]
-windowsml = ["vc-core/windowsml"]
-tensorrt = ["vc-core/tensorrt"]
-cuda = ["vc-core/cuda"]
+windowsml = ["vc-core/windowsml", "vc-app/windowsml"]
+tensorrt = ["vc-core/tensorrt", "vc-app/tensorrt"]
+cuda = ["vc-core/cuda", "vc-app/cuda"]
 
 [dependencies]
 # `clap` is always on (the CLI derives `value_enum` from vc-core's `Provider`);
 # the inference backends are selected through this crate's features above.
 vc-core = { path = "../vc-core", features = ["clap"] }
+vc-app = { path = "../vc-app", default-features = false }
 anyhow.workspace = true
 tracing.workspace = true
 clap = { version = "4.5", features = ["derive"] }
 cpal = "0.17"
 ctrlc = "3.4"
 hound = "3.5"
-rtrb = "0.3"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-thread-priority = "3.0.0"
-
-[target.'cfg(windows)'.dependencies]
-wasapi = "0.23"
 
 [dev-dependencies]
 approx = "0.5"

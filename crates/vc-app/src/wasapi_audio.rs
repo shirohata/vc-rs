@@ -100,6 +100,30 @@ pub fn print_devices() -> Result<()> {
     Ok(())
 }
 
+pub fn device_names() -> Result<(Vec<String>, Vec<String>)> {
+    let _com = ComGuard::initialize()?;
+    let enumerator =
+        DeviceEnumerator::new().context("failed to create WASAPI device enumerator")?;
+    Ok((
+        device_names_for_direction(&enumerator, Direction::Capture)?,
+        device_names_for_direction(&enumerator, Direction::Render)?,
+    ))
+}
+
+fn device_names_for_direction(
+    enumerator: &DeviceEnumerator,
+    direction: Direction,
+) -> Result<Vec<String>> {
+    let devices = enumerator
+        .get_device_collection(&direction)
+        .with_context(|| format!("failed to enumerate WASAPI {direction} devices"))?;
+    let mut names = Vec::with_capacity(devices.get_nbr_devices()? as usize);
+    for index in 0..devices.get_nbr_devices()? {
+        names.push(summarize_device(&devices.get_device_at_index(index)?)?.friendly_name);
+    }
+    Ok(names)
+}
+
 pub fn open_realtime(
     input_name: Option<&str>,
     output_name: Option<&str>,

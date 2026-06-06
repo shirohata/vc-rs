@@ -1,4 +1,3 @@
-mod audio;
 mod cli;
 mod doctor;
 mod engine;
@@ -27,7 +26,15 @@ fn main() -> Result<()> {
     let cli = Cli::parse_args();
     match cli.command {
         Command::Doctor => doctor::run(),
-        Command::Devices(args) => audio::print_devices(args.audio_backend),
+        Command::Devices(args) => match args.audio_backend {
+            cli::DeviceAudioBackend::All => {
+                vc_app::audio::print_cpal_devices()?;
+                println!();
+                vc_app::audio::print_wasapi_devices()
+            }
+            cli::DeviceAudioBackend::Cpal => vc_app::audio::print_cpal_devices(),
+            cli::DeviceAudioBackend::Wasapi => vc_app::audio::print_wasapi_devices(),
+        },
         Command::Inspect(args) => model_rvc::inspect_model(&args.model),
         #[cfg(all(windows, feature = "windowsml"))]
         Command::WindowsMlEps(args) => windows_ml_eps::run(args),
