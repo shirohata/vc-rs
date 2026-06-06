@@ -1,5 +1,6 @@
 mod audio;
 mod cli;
+mod doctor;
 mod engine;
 mod engine_cache;
 #[cfg(all(windows, feature = "windowsml"))]
@@ -25,6 +26,7 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse_args();
     match cli.command {
+        Command::Doctor => doctor::run(),
         Command::Devices(args) => audio::print_devices(args.audio_backend),
         Command::Inspect(args) => model_rvc::inspect_model(&args.model),
         #[cfg(all(windows, feature = "windowsml"))]

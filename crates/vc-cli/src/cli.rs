@@ -55,6 +55,8 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Diagnose runtime dependencies and local device visibility.
+    Doctor,
     /// List audio input and output devices.
     Devices(DevicesArgs),
     /// Inspect ONNX model inputs, outputs, and metadata.
@@ -965,6 +967,12 @@ mod tests {
             panic!("expected clear command");
         };
         assert!(!args.yes);
+    }
+
+    #[test]
+    fn doctor() {
+        let cli = Cli::try_parse_from(["vc-rs", "doctor"]).unwrap();
+        assert!(matches!(cli.command, Command::Doctor));
     }
 
     #[test]
