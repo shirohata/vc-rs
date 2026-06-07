@@ -616,6 +616,7 @@ impl RealtimeSession {
                         worker_telemetry
                             .output_rms_bits
                             .store(out.output_rms.to_bits(), Ordering::Relaxed);
+                        let output_silent = out.silent;
                         prepared.clear();
                         if smoothing_enabled {
                             if smoother.as_ref().map(|(rate, _)| *rate) != Some(out.sample_rate) {
@@ -654,10 +655,17 @@ impl RealtimeSession {
                                 samples.extend_from_slice(&prepared);
                             }
                         }
-                        let (_, remainder) = output_producer.push_partial_slice(&prepared);
-                        worker_telemetry
-                            .output_dropped_samples
-                            .fetch_add(remainder.len() as u64, Ordering::Relaxed);
+                        let should_queue = !output_silent
+                            || should_queue_silent_output(
+                                output_capacity - output_producer.slots(),
+                                output_chunk,
+                            );
+                        if should_queue {
+                            let (_, remainder) = output_producer.push_partial_slice(&prepared);
+                            worker_telemetry
+                                .output_dropped_samples
+                                .fetch_add(remainder.len() as u64, Ordering::Relaxed);
+                        }
                         worker_telemetry.output_buffer_samples.store(
                             (output_capacity - output_producer.slots()) as u64,
                             Ordering::Relaxed,
@@ -769,6 +777,13 @@ fn chunk_samples_for_rate(sample_rate: u32, chunk_ms: u32) -> usize {
     ((sample_rate as u64 * chunk_ms as u64) / 1000).max(128) as usize
 }
 
+fn should_queue_silent_output(buffered: usize, output_chunk: usize) -> bool {
+    // Keep at most one generated-silence chunk queued. Filling the output ring
+    // during quiet periods delays or drops the first converted speech when
+    // input resumes.
+    buffered <= output_chunk
+}
+
 fn stop_startup_worker(running: &AtomicBool, worker: &mut Option<JoinHandle<()>>) {
     // Stream construction can fail after the inference worker starts. Always
     // stop and join it before returning so failed Apply attempts cannot leave a
@@ -825,5 +840,12 @@ mod tests {
         }
         .validate()
         .is_ok());
+    }
+
+    #[test]
+    fn silent_output_does_not_fill_the_output_ring() {
+        assert!(should_queue_silent_output(0, 1_000));
+        assert!(should_queue_silent_output(1_000, 1_000));
+        assert!(!should_queue_silent_output(1_001, 1_000));
     }
 }
