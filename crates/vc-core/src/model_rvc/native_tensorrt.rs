@@ -25,6 +25,7 @@ mod ffi {
             engine_path: *const c_char,
             profile_shapes: *const c_char,
             output_name: *const c_char,
+            high_priority: i32,
             message: *mut c_char,
             message_len: usize,
         ) -> *mut c_void;
@@ -115,7 +116,12 @@ impl NativeContentVecEngine {
             .and_then(NonZeroUsize::new)
             .ok_or_else(|| anyhow!("ContentVec expected channel count must be positive"))?;
         let path = ensure_native_engine(model_path, profile, profile.profile_shapes.as_str())?;
-        let handle = load_engine(&path, profile.profile_shapes.as_str(), output_name)?;
+        let handle = load_engine(
+            &path,
+            profile.profile_shapes.as_str(),
+            output_name,
+            profile.gpu_priority,
+        )?;
         let output_len = engine_output_len(handle)?;
         info!(
             "loaded native TensorRT ContentVec engine model={} engine={} input={} input_shape={} output={} output_len={}",
@@ -184,7 +190,7 @@ impl NativeRmvpeEngine {
         let waveform_len = shape_volume(waveform_shape, "RMVPE waveform")?;
         let load_profile = profile_with_scalars(profile, &[("threshold", &[1usize])]);
         let path = ensure_native_engine(model_path, profile, profile.profile_shapes.as_str())?;
-        let handle = load_engine(&path, load_profile.as_str(), "pitchf")?;
+        let handle = load_engine(&path, load_profile.as_str(), "pitchf", profile.gpu_priority)?;
         let output_len = engine_output_len(handle)?;
         info!(
             "loaded native TensorRT RMVPE engine model={} engine={} waveform_shape={} output_len={}",
@@ -244,7 +250,7 @@ impl NativeRvcEngine {
         let load_profile =
             profile_with_scalars(profile, &[("p_len", &[1usize]), ("sid", &[1usize])]);
         let path = ensure_native_engine(model_path, profile, profile.profile_shapes.as_str())?;
-        let handle = load_engine(&path, load_profile.as_str(), "audio")?;
+        let handle = load_engine(&path, load_profile.as_str(), "audio", profile.gpu_priority)?;
         let output_len = engine_output_len(handle)?;
         info!(
             "loaded native TensorRT RVC engine model={} engine={} frames={} channels={} output_len={}",
@@ -660,6 +666,7 @@ fn load_engine(
     engine_path: &Path,
     profile_shapes: &str,
     output_name: &str,
+    gpu_priority: super::GpuPriority,
 ) -> Result<std::ptr::NonNull<c_void>> {
     let c_engine = path_cstring(engine_path, "TensorRT engine path")?;
     let c_profile = CString::new(profile_shapes)
@@ -671,6 +678,7 @@ fn load_engine(
             c_engine.as_ptr(),
             c_profile.as_ptr(),
             c_output.as_ptr(),
+            i32::from(gpu_priority == super::GpuPriority::High),
             message.as_mut_ptr(),
             message.len(),
         )
@@ -689,7 +697,12 @@ fn engine_output_len(handle: std::ptr::NonNull<c_void>) -> Result<NonZeroUsize> 
 }
 
 #[cfg(not(native_tensorrt))]
-fn load_engine(_engine_path: &Path, _profile_shapes: &str, _output_name: &str) -> Result<()> {
+fn load_engine(
+    _engine_path: &Path,
+    _profile_shapes: &str,
+    _output_name: &str,
+    _gpu_priority: super::GpuPriority,
+) -> Result<()> {
     bail!("native TensorRT engine loading is unavailable in this binary")
 }
 

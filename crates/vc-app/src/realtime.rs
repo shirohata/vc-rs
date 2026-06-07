@@ -9,7 +9,9 @@ use anyhow::{anyhow, bail, Result};
 use rtrb::RingBuffer;
 use thread_priority::{set_current_thread_priority, ThreadPriority};
 use vc_core::dsp;
-use vc_core::model_rvc::{PassthroughModel, RvcPipeline, RvcPipelineConfig, VoiceModel};
+use vc_core::model_rvc::{
+    GpuPriority, PassthroughModel, RvcPipeline, RvcPipelineConfig, VoiceModel,
+};
 use vc_core::sola::{self, ChunkSmootherConfig, SmoothingKind};
 use vc_core::Provider;
 
@@ -49,6 +51,7 @@ pub struct RealtimeConfig {
     pub embedder_output: Option<String>,
     pub f0_model: Option<PathBuf>,
     pub provider: Provider,
+    pub gpu_priority: GpuPriority,
     pub audio_backend: AudioBackend,
     pub input_device: Option<String>,
     pub output_device: Option<String>,
@@ -81,6 +84,7 @@ impl Default for RealtimeConfig {
             embedder_output: None,
             f0_model: None,
             provider: Provider::Cpu,
+            gpu_priority: GpuPriority::default(),
             audio_backend: AudioBackend::Cpal,
             input_device: None,
             output_device: None,
@@ -524,6 +528,7 @@ impl RealtimeSession {
                 embedder_output: config.embedder_output.as_deref(),
                 f0_model: config.f0_model.as_ref().expect("validated"),
                 provider: config.provider,
+                gpu_priority: config.gpu_priority,
                 sample_rate: input_rate,
                 chunk_samples: input_chunk,
                 speaker_id: current_live.speaker_id,

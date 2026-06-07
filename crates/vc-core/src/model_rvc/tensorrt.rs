@@ -62,6 +62,7 @@ pub(super) struct TensorRtSessionProfile {
     pub(super) model_cache_key: Option<String>,
     pub(super) profile_shapes: String,
     pub(super) fixed_inputs: Vec<TensorRtInputShape>,
+    pub(super) gpu_priority: super::GpuPriority,
 }
 
 impl TensorRtSessionProfile {
@@ -72,7 +73,13 @@ impl TensorRtSessionProfile {
             model_cache_key: None,
             profile_shapes,
             fixed_inputs,
+            gpu_priority: super::GpuPriority::default(),
         }
+    }
+
+    pub(super) fn with_gpu_priority(mut self, gpu_priority: super::GpuPriority) -> Self {
+        self.gpu_priority = gpu_priority;
+        self
     }
 
     #[cfg(test)]

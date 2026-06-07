@@ -104,6 +104,22 @@ pub enum Smoother {
     Psola,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum GpuPriority {
+    Normal,
+    #[default]
+    High,
+}
+
+impl From<GpuPriority> for vc_core::model_rvc::GpuPriority {
+    fn from(value: GpuPriority) -> Self {
+        match value {
+            GpuPriority::Normal => Self::Normal,
+            GpuPriority::High => Self::High,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum AudioBackend {
     Cpal,
@@ -189,6 +205,8 @@ pub struct RunArgs {
     pub silence_threshold: f32,
     #[arg(long, value_enum, default_value_t = default_provider())]
     pub provider: Provider,
+    #[arg(long, value_enum, default_value_t = GpuPriority::High)]
+    pub gpu_priority: GpuPriority,
     #[arg(long, default_value_t = 0)]
     pub speaker_id: i64,
     #[arg(long, default_value_t = 0.0)]
@@ -241,6 +259,8 @@ pub struct WavArgs {
     pub rvc_output_tail_discard_ms: u32,
     #[arg(long, value_enum, default_value_t = default_provider())]
     pub provider: Provider,
+    #[arg(long, value_enum, default_value_t = GpuPriority::High)]
+    pub gpu_priority: GpuPriority,
     #[arg(long, default_value_t = 0)]
     pub speaker_id: i64,
     #[arg(long, default_value_t = 0.0)]
@@ -456,6 +476,18 @@ mod tests {
             panic!("expected wav command");
         };
         assert_eq!(args.provider, Provider::TensorRt);
+        assert_eq!(args.gpu_priority, GpuPriority::High);
+    }
+
+    #[test]
+    fn parses_normal_gpu_priority() {
+        let cli =
+            Cli::try_parse_from(["vc-rs", "run", "--passthrough", "--gpu-priority", "normal"])
+                .unwrap();
+        let Command::Run(args) = cli.command else {
+            panic!("expected run command");
+        };
+        assert_eq!(args.gpu_priority, GpuPriority::Normal);
     }
 
     #[test]

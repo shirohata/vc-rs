@@ -63,6 +63,7 @@ pub struct RvcPipelineConfig<'a> {
     pub embedder_output: Option<&'a str>,
     pub f0_model: &'a Path,
     pub provider: Provider,
+    pub gpu_priority: super::GpuPriority,
     pub sample_rate: u32,
     pub chunk_samples: usize,
     pub speaker_id: i64,
@@ -199,9 +200,11 @@ impl RvcPipeline {
             contentvec_input_name,
             input_samples_16k,
         )
+        .with_gpu_priority(config.gpu_priority)
         .with_optional_model_cache_key(contentvec_model_cache_key);
         let rmvpe_profile =
             TensorRtSessionProfile::single_input(ModelRole::Rmvpe, "waveform", input_samples_16k)
+                .with_gpu_priority(config.gpu_priority)
                 .with_optional_model_cache_key(rmvpe_model_cache_key);
         #[cfg(feature = "ort")]
         let shared_waveform_shape = [1usize, input_samples_16k];
@@ -233,6 +236,7 @@ impl RvcPipeline {
                 let feature_len = warmup.rvc_feature_len;
                 let rvc_profile =
                     TensorRtSessionProfile::rvc(feature_len, expected_feat_channels_usize)
+                        .with_gpu_priority(config.gpu_priority)
                         .with_optional_model_cache_key(rvc_model_cache_key.clone());
                 info!(
                 "fixed runtime profiles backend={} sample_rate={} chunk_samples={} contentvec={} rmvpe={} rvc={}",
@@ -340,6 +344,7 @@ impl RvcPipeline {
             let feature_len = derive_rvc_feature_len(contentvec_frames, extra_convert_samples)?;
             let rvc_profile =
                 TensorRtSessionProfile::rvc(feature_len, expected_feat_channels_usize)
+                    .with_gpu_priority(config.gpu_priority)
                     .with_optional_model_cache_key(rvc_model_cache_key.clone());
             info!(
                 "fixed runtime profiles backend={} sample_rate={} chunk_samples={} contentvec={} rmvpe={} rvc={}",
@@ -420,6 +425,7 @@ impl RvcPipeline {
                 )?;
                 let rvc_profile =
                     TensorRtSessionProfile::rvc(feature_len, expected_feat_channels_usize)
+                        .with_gpu_priority(config.gpu_priority)
                         .with_optional_model_cache_key(rvc_model_cache_key.clone());
                 info!(
                 "fixed runtime profiles backend={} sample_rate={} chunk_samples={} contentvec={} rmvpe={} rvc={}",

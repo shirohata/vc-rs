@@ -118,6 +118,7 @@ struct GuiSettings {
     embedder: String,
     f0_model: String,
     provider: String,
+    gpu_priority: String,
     audio_backend: String,
     input_device: String,
     output_device: String,
@@ -151,6 +152,7 @@ impl Default for GuiSettings {
             embedder: String::new(),
             f0_model: String::new(),
             provider: default_provider_name().to_string(),
+            gpu_priority: "high".to_string(),
             audio_backend: "cpal".to_string(),
             input_device: String::new(),
             output_device: String::new(),
@@ -193,6 +195,9 @@ impl GuiSettings {
         if !provider_names().contains(&self.provider.as_str()) {
             self.provider = default_provider_name().to_string();
         }
+        if !gpu_priority_names().contains(&self.gpu_priority.as_str()) {
+            self.gpu_priority = "high".to_string();
+        }
     }
 
     fn live(&self) -> LiveParams {
@@ -211,6 +216,7 @@ impl GuiSettings {
             embedder_output: None,
             f0_model: path_option(&self.f0_model),
             provider: parse_provider(&self.provider)?,
+            gpu_priority: parse_gpu_priority(&self.gpu_priority)?,
             audio_backend: AudioBackend::Cpal,
             input_device: string_option(&self.input_device),
             output_device: string_option(&self.output_device),
@@ -401,6 +407,19 @@ impl eframe::App for VcGui {
                                 &mut self.settings.provider,
                                 provider.to_string(),
                                 *provider,
+                            )
+                            .changed();
+                    }
+                });
+            egui::ComboBox::from_label("GPU Priority")
+                .selected_text(&self.settings.gpu_priority)
+                .show_ui(ui, |ui| {
+                    for priority in gpu_priority_names() {
+                        changed |= ui
+                            .selectable_value(
+                                &mut self.settings.gpu_priority,
+                                priority.to_string(),
+                                *priority,
                             )
                             .changed();
                     }
@@ -639,6 +658,18 @@ fn parse_provider(value: &str) -> Result<Provider, String> {
     }
 }
 
+fn parse_gpu_priority(value: &str) -> Result<vc_core::model_rvc::GpuPriority, String> {
+    match value {
+        "normal" => Ok(vc_core::model_rvc::GpuPriority::Normal),
+        "high" => Ok(vc_core::model_rvc::GpuPriority::High),
+        _ => Err(format!("Unsupported GPU priority: {value}")),
+    }
+}
+
+fn gpu_priority_names() -> &'static [&'static str] {
+    &["high", "normal"]
+}
+
 fn provider_names() -> &'static [&'static str] {
     &[
         #[cfg(not(all(feature = "tensorrt", not(feature = "windowsml"))))]
@@ -684,6 +715,21 @@ mod tests {
     fn settings_toml_ignores_unknown_fields() {
         let settings: GuiSettings = toml::from_str("unknown = 1\npitch_shift = 2.5").unwrap();
         assert_eq!(settings.pitch_shift, 2.5);
+        assert_eq!(settings.gpu_priority, "high");
+    }
+
+    #[test]
+    fn gui_gpu_priority_parses_and_normalizes() {
+        assert_eq!(
+            parse_gpu_priority("normal").unwrap(),
+            vc_core::model_rvc::GpuPriority::Normal
+        );
+        let mut settings = GuiSettings {
+            gpu_priority: "unsupported".to_string(),
+            ..GuiSettings::default()
+        };
+        settings.normalize_gui_managed_settings();
+        assert_eq!(settings.gpu_priority, "high");
     }
 
     #[test]

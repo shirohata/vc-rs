@@ -410,6 +410,7 @@ extern "C" NativeEngine* vc_rs_trt_engine_create(
     char const* engine_path,
     char const* profile_shapes,
     char const* output_name,
+    int32_t high_priority,
     char* message,
     std::size_t message_len
 ) {
@@ -450,8 +451,33 @@ extern "C" NativeEngine* vc_rs_trt_engine_create(
         msg.append("createExecutionContext failed\n");
         return nullptr;
     }
-    if (!cuda_ok(cudaStreamCreate(&native->stream), msg, "cudaStreamCreate")) {
-        return nullptr;
+    if (high_priority != 0) {
+        int least_priority = 0;
+        int greatest_priority = 0;
+        cudaError_t range_status = cudaDeviceGetStreamPriorityRange(&least_priority, &greatest_priority);
+        cudaError_t stream_status = range_status == cudaSuccess
+            ? cudaStreamCreateWithPriority(&native->stream, cudaStreamDefault, greatest_priority)
+            : range_status;
+        if (stream_status == cudaSuccess) {
+            msg.append("created native TensorRT CUDA stream priority=high value=%d\n", greatest_priority);
+        } else {
+            // Priority support varies by GPU/driver. Fall back during model load
+            // so the realtime inference path remains unchanged.
+            msg.append(
+                "high-priority CUDA stream unavailable (%s); falling back to normal priority\n",
+                cudaGetErrorString(stream_status)
+            );
+            native->stream = nullptr;
+            if (!cuda_ok(cudaStreamCreate(&native->stream), msg, "cudaStreamCreate fallback")) {
+                return nullptr;
+            }
+            msg.append("created native TensorRT CUDA stream priority=normal\n");
+        }
+    } else {
+        if (!cuda_ok(cudaStreamCreate(&native->stream), msg, "cudaStreamCreate")) {
+            return nullptr;
+        }
+        msg.append("created native TensorRT CUDA stream priority=normal\n");
     }
 
     int32_t const nb_io = native->engine->getNbIOTensors();

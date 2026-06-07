@@ -429,3 +429,7 @@ fn stream_state_pitch_update_writes_short_rmvpe_to_tail() {
 fn derives_vcclient_onnx_silence_front_feature_offset() {
     assert_eq!(onnx_silence_front_feature_frames(4096), 6);
 }
+#[test]
+fn gpu_priority_defaults_to_high() {
+    assert_eq!(super::GpuPriority::default(), super::GpuPriority::High);
+}

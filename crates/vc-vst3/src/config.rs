@@ -9,6 +9,7 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use vc_core::model_rvc::GpuPriority;
 use vc_core::Provider;
 
 /// Search order for the config file:
@@ -34,6 +35,8 @@ pub struct PluginConfig {
     /// to whichever GPU-capable backend this package was built with (see
     /// [`PluginConfig::provider`]).
     pub provider: String,
+    /// "high" | "normal". Only native TensorRT consumes this setting.
+    pub gpu_priority: String,
     pub f0_threshold: f32,
     pub silence_threshold: f32,
     pub chunk_ms: u32,
@@ -60,6 +63,7 @@ impl Default for PluginConfig {
             embedder_output: None,
             rvc_engine: None,
             provider: default_provider().to_string(),
+            gpu_priority: "high".to_string(),
             f0_threshold: 0.3,
             silence_threshold: 0.0001,
             chunk_ms: 500,
@@ -117,6 +121,13 @@ impl PluginConfig {
         match self.smoother.trim().to_ascii_lowercase().as_str() {
             "psola" => vc_core::sola::SmoothingKind::Psola,
             _ => vc_core::sola::SmoothingKind::Sola,
+        }
+    }
+
+    pub fn gpu_priority(&self) -> GpuPriority {
+        match self.gpu_priority.trim().to_ascii_lowercase().as_str() {
+            "normal" => GpuPriority::Normal,
+            _ => GpuPriority::High,
         }
     }
 
@@ -245,4 +256,16 @@ fn os_config_dir() -> Option<PathBuf> {
         return Some(PathBuf::from(xdg));
     }
     std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gpu_priority_defaults_high_and_parses_normal() {
+        assert_eq!(PluginConfig::default().gpu_priority(), GpuPriority::High);
+        let config: PluginConfig = toml::from_str("gpu_priority = \"normal\"").unwrap();
+        assert_eq!(config.gpu_priority(), GpuPriority::Normal);
+    }
 }

@@ -473,6 +473,7 @@ impl WorkerCtx {
             embedder_output: settings.embedder_output.as_deref(),
             f0_model: &settings.f0_model,
             provider,
+            gpu_priority: settings.gpu_priority(),
             sample_rate: self.sample_rate,
             chunk_samples,
             // pitch / speaker / gains are DAW parameters; the worker applies the

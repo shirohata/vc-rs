@@ -32,6 +32,8 @@ f0_model = "/path/to/models/rmvpe/rmvpe.onnx"
 # Explicit Windows ML catalog EPs are also valid: "windowsml-nvtrtx",
 # "windowsml-qnn", "windowsml-openvino", "windowsml-migraphx", "windowsml-vitisai".
 provider = "windowsml"
+# "high" | "normal". Applied only by the native TensorRT backend.
+gpu_priority = "high"
 
 # Pitch, Speaker, Input Gain and Output Gain are NOT set here: they are DAW
 # parameters (the host saves/restores them per project and they are
