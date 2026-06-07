@@ -3,8 +3,8 @@
 This document is the required checklist for packages distributed to other
 users. The repository currently ships four Windows x64 variants:
 
-- `vc-rs-cli-windowsml`
-- `vc-rs-cli-tensorrt`
+- `vc-rs-windowsml` (GUI + CLI)
+- `vc-rs-tensorrt` (GUI + CLI)
 - `vc-vst3-windowsml`
 - `vc-vst3-tensorrt`
 
@@ -64,7 +64,7 @@ as a release blocker, even when a packaging script emits only a warning.
 
 In particular, verify:
 
-- The Rust dependency notice covers the actual CLI or VST3 variant.
+- The Rust dependency notice covers the actual standalone app or VST3 variant.
 - Windows ML packages include the license matching the redistributed Windows
   App SDK bootstrapper.
 - TensorRT packages include the applicable NVIDIA license or EULA text.
@@ -81,7 +81,8 @@ Before publishing each final ZIP:
    files are present, and prohibited files are absent.
 4. Search the extracted files and printable binary strings for build-machine
    paths, user names, secrets, and other local state.
-5. Smoke-test the extracted CLI package. Validate the extracted VST3 package
+5. Smoke-test both executables in the extracted standalone app package. Validate
+   the extracted VST3 package
    with the Steinberg validator and, when practical, load it in a clean DAW
    environment.
 6. Test on a machine or environment that does not rely on the build machine's
@@ -100,8 +101,8 @@ copying. They do not currently provide a complete publish gate.
 
 Review these known limitations before release:
 
-- CLI packages currently copy the committed VST3 license directory rather than
-  generating a CLI-specific Rust dependency notice.
+- Standalone app packages currently copy the committed VST3 license directory
+  rather than generating an app-specific Rust dependency notice.
 - Packaging may continue after warning that a Windows App SDK license is
   unavailable, and TensorRT license discovery is best-effort.
 - Final ZIPs are not automatically scanned for secrets, local paths, prohibited

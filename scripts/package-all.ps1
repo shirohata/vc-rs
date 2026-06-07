@@ -5,8 +5,8 @@
 .DESCRIPTION
     The shipped Windows distributions are four packages:
 
-        cli-windowsml    crates\vc-cli\package.ps1
-        cli-tensorrt     crates\vc-cli\package.ps1   -Variant tensorrt
+        app-windowsml    crates\vc-cli\package.ps1
+        app-tensorrt     crates\vc-cli\package.ps1   -Variant tensorrt
         vst3-windowsml   crates\vc-vst3\package.ps1
         vst3-tensorrt    crates\vc-vst3\package.ps1  -Variant tensorrt
 
@@ -22,7 +22,8 @@
 
 .PARAMETER Targets
     Which packages to build. Default: all four. Accepts any of
-    cli-windowsml, cli-tensorrt, vst3-windowsml, vst3-tensorrt.
+    app-windowsml, app-tensorrt, vst3-windowsml, vst3-tensorrt.
+    Legacy cli-windowsml / cli-tensorrt names remain accepted as aliases.
 
 .PARAMETER OutDir
     Where to write the .zip files. Default: <repo>\dist. Forwarded to each
@@ -52,16 +53,16 @@
 
 .EXAMPLE
     # Only the Windows ML pair (no GPU toolchain needed):
-    pwsh scripts\package-all.ps1 -Targets cli-windowsml,vst3-windowsml
+    pwsh scripts\package-all.ps1 -Targets app-windowsml,vst3-windowsml
 
 .EXAMPLE
     # Smallest TensorRT packages (engines built/cached elsewhere):
-    pwsh scripts\package-all.ps1 -Targets cli-tensorrt,vst3-tensorrt -RuntimeOnly
+    pwsh scripts\package-all.ps1 -Targets app-tensorrt,vst3-tensorrt -RuntimeOnly
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('cli-windowsml', 'cli-tensorrt', 'vst3-windowsml', 'vst3-tensorrt')]
-    [string[]]$Targets = @('cli-windowsml', 'cli-tensorrt', 'vst3-windowsml', 'vst3-tensorrt'),
+    [ValidateSet('app-windowsml', 'app-tensorrt', 'cli-windowsml', 'cli-tensorrt', 'vst3-windowsml', 'vst3-tensorrt')]
+    [string[]]$Targets = @('app-windowsml', 'app-tensorrt', 'vst3-windowsml', 'vst3-tensorrt'),
     [string]$OutDir,
 
     # tensorrt targets
@@ -84,11 +85,11 @@ if (-not $OutDir) { $OutDir = Join-Path $repoRoot 'dist' }
 
 # Map each target to its package script and variant. The tensorrt-only options
 # are forwarded just to the tensorrt targets.
-$cliScript = Join-Path $repoRoot 'crates\vc-cli\package.ps1'
+$appScript = Join-Path $repoRoot 'crates\vc-cli\package.ps1'
 $vst3Script = Join-Path $repoRoot 'crates\vc-vst3\package.ps1'
 $plan = [ordered]@{
-    'cli-windowsml'  = @{ Script = $cliScript;  Variant = 'windowsml' }
-    'cli-tensorrt'   = @{ Script = $cliScript;  Variant = 'tensorrt' }
+    'app-windowsml'  = @{ Script = $appScript;  Variant = 'windowsml'; Aliases = @('cli-windowsml') }
+    'app-tensorrt'   = @{ Script = $appScript;  Variant = 'tensorrt'; Aliases = @('cli-tensorrt') }
     'vst3-windowsml' = @{ Script = $vst3Script; Variant = 'windowsml' }
     'vst3-tensorrt'  = @{ Script = $vst3Script; Variant = 'tensorrt' }
 }
@@ -96,8 +97,12 @@ $plan = [ordered]@{
 $results = [System.Collections.Generic.List[object]]::new()
 
 foreach ($name in $plan.Keys) {
-    if ($Targets -notcontains $name) { continue }
     $spec = $plan[$name]
+    $selected = $Targets -contains $name
+    foreach ($alias in @($spec.Aliases)) {
+        if ($Targets -contains $alias) { $selected = $true }
+    }
+    if (-not $selected) { continue }
 
     # Build the argument splat for this target's package.ps1. ($pkgArgs, not the
     # automatic $args variable.)

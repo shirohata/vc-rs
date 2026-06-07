@@ -56,7 +56,7 @@ install-vst3 variant="windowsml":
 verify *args:
     ./scripts/verify.ps1 {{args}}
 
-# Build the shipped distribution zips; forwards flags, e.g. `just package -Targets cli-windowsml,vst3-windowsml`.
+# Build the shipped distribution zips; forwards flags, e.g. `just package -Targets app-windowsml,vst3-windowsml`.
 package *args:
     ./scripts/package-all.ps1 {{args}}
 

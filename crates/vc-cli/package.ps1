@@ -1,18 +1,18 @@
 <#
 .SYNOPSIS
-    Build, populate, and zip a distributable vc-rs CLI package end to end.
+    Build, populate, and zip a distributable vc-rs standalone app package.
 
 .DESCRIPTION
     One command that produces a ready-to-ship archive for a given backend
     variant. It runs the whole pipeline:
 
-        1. cargo build --release -p vc-cli  (with the variant's features)
+        1. cargo build --release -p vc-cli -p vc-gui (with matching features)
         2. (tensorrt only) build the ORT-free engine builder helper if needed
-        3. stage vc-rs.exe into dist\_stage_<variant>\
+        3. stage vc-rs.exe and vc-gui.exe into dist\<stem>\
         4. the matching populate script (package-windowsml|tensorrt.ps1), which
-           copies the runtime DLLs + licenses next to the staged vc-rs.exe
+           copies the runtime DLLs + licenses next to both executables
         5. add LICENSE + a generated INSTALL.txt
-        6. Compress-Archive into dist\vc-rs-cli-<variant>-v<version>-win-x64.zip
+        6. Compress-Archive into dist\vc-rs-<variant>-v<version>-win-x64.zip
 
     The populate scripts are reused as-is; this only orchestrates them and adds
     the build + stage + archive steps.
@@ -30,7 +30,7 @@
     Where to write the .zip. Default: <repo>\dist.
 
 .PARAMETER SkipBuild
-    Reuse the existing target\release\vc-rs.exe instead of running cargo build.
+    Reuse existing target\release\vc-rs.exe and vc-gui.exe instead of building.
     The stage, populate, and archive steps still run.
 
 .PARAMETER NoZip
@@ -129,10 +129,11 @@ $buildFeatureArgs = switch ($Variant) {
 
 Push-Location $repoRoot
 try {
-    # 1. Build the CLI.
+    # 1. Build the GUI and CLI with the same provider feature set. Keeping this
+    #    in one command prevents a package from mixing backend variants.
     if (-not $SkipBuild) {
-        Write-Host "==> cargo build --release -p vc-cli $($buildFeatureArgs -join ' ')" -ForegroundColor Cyan
-        cargo build --release -p vc-cli @buildFeatureArgs
+        Write-Host "==> cargo build --release -p vc-cli -p vc-gui $($buildFeatureArgs -join ' ')" -ForegroundColor Cyan
+        cargo build --release -p vc-cli -p vc-gui @buildFeatureArgs
         if ($LASTEXITCODE -ne 0) { throw "cargo build failed (exit $LASTEXITCODE)." }
 
         # The TensorRT engine-builder helper is a separate ORT-free binary. Build
@@ -146,15 +147,17 @@ try {
         }
     }
     else {
-        Write-Host "==> Skipping build (-SkipBuild); reusing $releaseDir\vc-rs.exe" -ForegroundColor Yellow
+        Write-Host "==> Skipping build (-SkipBuild); reusing standalone executables in $releaseDir" -ForegroundColor Yellow
     }
 
     $exe = Join-Path $releaseDir 'vc-rs.exe'
     if (-not (Test-Path $exe)) { throw "vc-rs.exe not found in $releaseDir. Run without -SkipBuild first." }
+    $guiExe = Join-Path $releaseDir 'vc-gui.exe'
+    if (-not (Test-Path $guiExe)) { throw "vc-gui.exe not found in $releaseDir. Run without -SkipBuild first." }
 
-    # 2. Stage vc-rs.exe into its own folder so the populate step drops the
-    #    variant DLLs beside it (and so we don't pollute target\release). The
-    #    folder is named after the archive stem so a kept dir sits next to its .zip.
+    # 2. Stage both executables together so the populate step drops the variant
+    #    DLLs beside them (and so we don't pollute target\release). The folder is
+    #    named after the archive stem so a kept dir sits next to its .zip.
     $tag = $Variant
     if ($Variant -eq 'tensorrt') {
         if ($RuntimeOnly) { $tag += '-runtime' }
@@ -168,12 +171,13 @@ try {
     if ($wsToml -match '(?ms)\[workspace\.package\].*?^\s*version\s*=\s*"([^"]+)"') {
         $version = $Matches[1]
     }
-    $stem = "vc-rs-cli-$tag-v$version-win-x64"
+    $stem = "vc-rs-$tag-v$version-win-x64"
 
     $staging = Join-Path $OutDir $stem
     if (Test-Path $staging) { Remove-Item -Recurse -Force $staging }
     New-Item -ItemType Directory -Force -Path $staging | Out-Null
     Copy-Item $exe (Join-Path $staging 'vc-rs.exe') -Force
+    Copy-Item $guiExe (Join-Path $staging 'vc-gui.exe') -Force
 
     # 3. Populate the staged folder with the variant's runtime DLLs + licenses by
     #    forwarding only the parameters the caller actually supplied.
@@ -197,7 +201,7 @@ try {
     & $populateScript @forward
 
     # 4. License + a short install/usage note. Also ship the optional model
-    #    downloader beside vc-rs.exe; it fetches the shared embedder + F0 models
+    #    downloader beside the executables; it fetches the shared embedder + F0 models
     #    into .\assets\ (relative to itself), which the run flags below point at.
     $license = Join-Path $repoRoot 'LICENSE'
     if (Test-Path $license) { Copy-Item $license (Join-Path $staging 'LICENSE') -Force }
@@ -213,16 +217,20 @@ try {
         @"
 
 First-run TensorRT engine builds use the bundled vc-tensorrt-builder.exe, which
-vc-rs.exe finds automatically beside itself — keep the two together.
+the applications find automatically beside themselves — keep these files together.
 "@
     }
     else { '' }
 
     $install = @"
-vc-rs — RVC voice conversion CLI ($Variant build, v$version)
+vc-rs — RVC voice conversion standalone app ($Variant build, v$version)
 
-Run from this folder (keep the DLLs beside vc-rs.exe):
+Run the GUI from this folder (keep the DLLs beside both executables):
+    .\vc-gui.exe
+
+The CLI is included for diagnostics, automation, and WAV conversion:
     .\vc-rs.exe --help
+    .\vc-rs.exe doctor
     .\vc-rs.exe devices
 
 Models — get the shared embedder + F0 models (optional helper):

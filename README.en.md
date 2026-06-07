@@ -3,11 +3,12 @@
 > [日本語](README.md) | English
 
 `vc-rs` is a Rust **RVC voice conversion app**. It converts microphone input or
-WAV files into another voice using an ONNX-format RVC model. There are two ways
+WAV files into another voice using an ONNX-format RVC model. There are three ways
 to use it:
 
-- **CLI (`vc-rs.exe`)** — the command-line front-end. Supports real-time
-  conversion and WAV file conversion.
+- **GUI (`vc-gui.exe`)** — the desktop app for standalone use.
+- **Bundled CLI (`vc-rs.exe`)** — for diagnostics, automation, real-time
+  conversion, and WAV file conversion.
 - **VST3 plugin (`vc-vst3.vst3`)** — a plugin you load into your DAW.
 
 Prebuilt Windows packages are distributed. **You do not need to build from
@@ -25,8 +26,8 @@ Windows (x64). There are four, depending on your front-end and hardware:
 
 | Package | Form | Backend | Target | Size | Requirements |
 | --- | --- | --- | --- | --- | --- |
-| `vc-rs-cli-windowsml-…zip` | CLI | Windows ML | Most GPUs (incl. non-NVIDIA) | Small (a few MB) | Windows App SDK Runtime |
-| `vc-rs-cli-tensorrt-…zip` | CLI | TensorRT | NVIDIA GPU | Large (~1.9 GB) | Up-to-date NVIDIA driver |
+| `vc-rs-windowsml-…zip` | GUI + CLI | Windows ML | Most GPUs (incl. non-NVIDIA) | Small (a few MB) | Windows App SDK Runtime |
+| `vc-rs-tensorrt-…zip` | GUI + CLI | TensorRT | NVIDIA GPU | Large (~1.9 GB) | Up-to-date NVIDIA driver |
 | `vc-vst3-windowsml-…zip` | VST3 plugin | Windows ML | Most GPUs (incl. non-NVIDIA) | Small | Windows App SDK Runtime |
 | `vc-vst3-tensorrt-…zip` | VST3 plugin | TensorRT | NVIDIA GPU | Large (~1.9 GB) | Up-to-date NVIDIA driver |
 
@@ -37,8 +38,9 @@ Windows (x64). There are four, depending on your front-end and hardware:
 - If you **have an NVIDIA GPU and want maximum speed**, pick a **tensorrt**
   package. It is a large download and the first launch is slow (engine build),
   but subsequent runs are fast.
-- Use the **VST3** packages for singing/streaming in a DAW; use the **CLI**
-  packages for standalone use, automation, or batch WAV conversion.
+- Use the **GUI + CLI** packages for standalone use and the **VST3** packages
+  for singing/streaming in a DAW. The bundled CLI handles automation and batch
+  WAV conversion.
 
 ## Requirements
 
@@ -65,11 +67,12 @@ Windows (x64). There are four, depending on your front-end and hardware:
 
 Items 2 and 3 can be fetched with the bundled `download-models.ps1` (see below).
 
-## Usage (CLI)
+## Usage (GUI + CLI)
 
 1. Extract the downloaded zip (**keep the DLLs in the same folder as
-   `vc-rs.exe`**).
-2. Open PowerShell in that folder.
+   `vc-gui.exe` and `vc-rs.exe`**).
+2. Launch `vc-gui.exe` for normal use. To use the CLI, open PowerShell in that
+   folder.
 
 ### Prepare models
 

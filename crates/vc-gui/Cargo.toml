@@ -14,7 +14,7 @@ cuda = ["vc-app/cuda", "vc-core/cuda"]
 [dependencies]
 vc-app = { path = "../vc-app", default-features = false }
 vc-core = { path = "../vc-core" }
-eframe = "0.34.1"
+eframe = { version = "0.34.1", default-features = false, features = ["glow", "default_fonts"] }
 egui = "0.34.1"
 rfd = "0.15"
 serde = { version = "1", features = ["derive"] }

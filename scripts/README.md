@@ -110,8 +110,9 @@ pwsh -File scripts/install-vst3-bundle.ps1 -DestinationRoot C:\tmp\VST3 -WhatIf
 
 ## Package the distributables
 
-The shipped Windows distributions are four packages: `cli-windowsml`,
-`cli-tensorrt`, `vst3-windowsml`, and `vst3-tensorrt`. Each crate's
+The shipped Windows distributions are four packages: `app-windowsml`,
+`app-tensorrt`, `vst3-windowsml`, and `vst3-tensorrt`. The app packages contain
+both `vc-gui.exe` and `vc-rs.exe`. Each crate's
 `package.ps1` builds one (`-Variant windowsml|tensorrt`); `package-all.ps1`
 drives all four into `dist\`:
 
@@ -126,8 +127,10 @@ the windowsml variants and removed for tensorrt (which can be multiple GB). All
 of `dist\` is gitignored.
 
 Flags:
-- `-Targets cli-windowsml,vst3-windowsml` — build only a subset (e.g. the
+- `-Targets app-windowsml,vst3-windowsml` — build only a subset (e.g. the
   Windows ML pair, which needs no GPU toolchain).
+- `cli-windowsml` and `cli-tensorrt` remain accepted as legacy aliases for the
+  corresponding app targets.
 - `-BuilderSm <sm..>` / `-RuntimeOnly` / `-TensorRtBin <dir>` — forwarded to the
   tensorrt targets (see each crate's `package-tensorrt.ps1`).
 - `-KeepStage` / `-CleanStage` — force keeping (e.g. tensorrt) or removing the
