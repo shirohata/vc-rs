@@ -92,8 +92,7 @@ pub fn engine_cache_info() -> Result<EngineCacheInfo> {
     let read_dir = fs::read_dir(&root)
         .with_context(|| format!("failed to read engine cache directory {}", root.display()))?;
     for entry in read_dir {
-        let entry = entry
-            .with_context(|| format!("failed to read entry in {}", root.display()))?;
+        let entry = entry.with_context(|| format!("failed to read entry in {}", root.display()))?;
         let path = entry.path();
         let file_type = entry
             .file_type()
@@ -158,8 +157,8 @@ pub fn clear_engine_cache() -> Result<ClearedEngineCache> {
 }
 
 fn file_len(path: &Path) -> Result<u64> {
-    let metadata = fs::metadata(path)
-        .with_context(|| format!("failed to stat {}", path.display()))?;
+    let metadata =
+        fs::metadata(path).with_context(|| format!("failed to stat {}", path.display()))?;
     Ok(metadata.len())
 }
 
@@ -167,8 +166,8 @@ fn file_len(path: &Path) -> Result<u64> {
 fn dir_size(dir: &Path) -> Result<(u64, u64)> {
     let mut total_bytes = 0u64;
     let mut file_count = 0u64;
-    let read_dir = fs::read_dir(dir)
-        .with_context(|| format!("failed to read {}", dir.display()))?;
+    let read_dir =
+        fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))?;
     for entry in read_dir {
         let entry = entry.with_context(|| format!("failed to read entry in {}", dir.display()))?;
         let file_type = entry

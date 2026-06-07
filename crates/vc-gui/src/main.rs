@@ -1,14 +1,24 @@
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 use tracing_subscriber::EnvFilter;
-use vc_app::{AudioBackend, EngineController, EngineState, LiveParams, RealtimeConfig, Smoother};
+use vc_app::{
+    AudioBackend, EngineController, EngineState, LiveParams, RealtimeConfig, Smoother,
+    TelemetrySnapshot,
+};
 use vc_core::Provider;
 
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
+const TELEMETRY_REFRESH: Duration = Duration::from_millis(250);
+const GUI_CROSSFADE_MS: u32 = 85;
+const GUI_SOLA_SEARCH_MS: u32 = 12;
+const RMS_HEALTHY_MIN: f32 = 0.01;
+const RMS_HEALTHY_MAX: f32 = 0.10;
+const RMS_HIGH_MAX: f32 = 0.25;
 
 fn main() -> eframe::Result {
     tracing_subscriber::fmt()
@@ -17,8 +27,88 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "vc-rs",
         eframe::NativeOptions::default(),
-        Box::new(|_| Ok(Box::new(VcGui::new()))),
+        Box::new(|cc| {
+            install_system_japanese_font(&cc.egui_ctx);
+            Ok(Box::new(VcGui::new()))
+        }),
     )
+}
+
+fn install_system_japanese_font(ctx: &egui::Context) {
+    let Some((bytes, face_index)) = system_japanese_font_candidates()
+        .into_iter()
+        .find_map(|(path, face_index)| fs::read(path).ok().map(|bytes| (bytes, face_index)))
+    else {
+        return;
+    };
+
+    // Keep egui's compact Latin fonts first and use the OS font only for
+    // missing glyphs. Bundling a CJK font would add roughly 5-15 MB to every
+    // package, while loading it here has no impact on the real-time audio path.
+    let font_name = "system_japanese".to_owned();
+    let mut font_data = egui::FontData::from_owned(bytes);
+    font_data.index = face_index;
+
+    let mut fonts = egui::FontDefinitions::default();
+    fonts
+        .font_data
+        .insert(font_name.clone(), Arc::new(font_data));
+    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        fonts
+            .families
+            .entry(family)
+            .or_default()
+            .push(font_name.clone());
+    }
+    ctx.set_fonts(fonts);
+}
+
+fn system_japanese_font_candidates() -> Vec<(PathBuf, u32)> {
+    #[cfg(target_os = "windows")]
+    {
+        let fonts = std::env::var_os("WINDIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
+            .join("Fonts");
+        return [
+            "NotoSansJP-VF.ttf",
+            "BIZ-UDGothicR.ttc",
+            "YuGothM.ttc",
+            "meiryo.ttc",
+            "msgothic.ttc",
+        ]
+        .into_iter()
+        .map(|name| (fonts.join(name), 0))
+        .collect();
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        return [
+            "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc",
+            "/System/Library/Fonts/ヒラギノ角ゴシック W4.ttc",
+            "/Library/Fonts/NotoSansJP-Regular.ttf",
+        ]
+        .into_iter()
+        .map(|path| (PathBuf::from(path), 0))
+        .collect();
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        return [
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/noto/NotoSansJP-Regular.ttf",
+        ]
+        .into_iter()
+        .map(|path| (PathBuf::from(path), 0))
+        .collect();
+    }
+
+    #[allow(unreachable_code)]
+    Vec::new()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -68,8 +158,8 @@ impl Default for GuiSettings {
             wasapi_output_exclusive: false,
             wasapi_buffer_ms: 0,
             chunk_ms: 500,
-            crossfade_ms: 85,
-            sola_search_ms: 12,
+            crossfade_ms: GUI_CROSSFADE_MS,
+            sola_search_ms: GUI_SOLA_SEARCH_MS,
             smoother: "sola".to_string(),
             rvc_output_tail_discard_ms: 10,
             extra_convert_ms: 100,
@@ -90,6 +180,21 @@ impl Default for GuiSettings {
 }
 
 impl GuiSettings {
+    fn normalize_gui_managed_settings(&mut self) {
+        // WASAPI and these smoothing timings remain available to the CLI, but
+        // the GUI intentionally pins them until their safe tuning and failure
+        // behavior are clear enough to expose to general users.
+        self.audio_backend = "cpal".to_string();
+        self.wasapi_input_exclusive = false;
+        self.wasapi_output_exclusive = false;
+        self.wasapi_buffer_ms = 0;
+        self.crossfade_ms = GUI_CROSSFADE_MS;
+        self.sola_search_ms = GUI_SOLA_SEARCH_MS;
+        if !provider_names().contains(&self.provider.as_str()) {
+            self.provider = default_provider_name().to_string();
+        }
+    }
+
     fn live(&self) -> LiveParams {
         LiveParams {
             pitch_shift: self.pitch_shift,
@@ -106,15 +211,15 @@ impl GuiSettings {
             embedder_output: None,
             f0_model: path_option(&self.f0_model),
             provider: parse_provider(&self.provider)?,
-            audio_backend: self.backend(),
+            audio_backend: AudioBackend::Cpal,
             input_device: string_option(&self.input_device),
             output_device: string_option(&self.output_device),
-            wasapi_input_exclusive: self.wasapi_input_exclusive,
-            wasapi_output_exclusive: self.wasapi_output_exclusive,
-            wasapi_buffer_ms: self.wasapi_buffer_ms,
+            wasapi_input_exclusive: false,
+            wasapi_output_exclusive: false,
+            wasapi_buffer_ms: 0,
             chunk_ms: self.chunk_ms,
-            crossfade_ms: self.crossfade_ms,
-            sola_search_ms: self.sola_search_ms,
+            crossfade_ms: GUI_CROSSFADE_MS,
+            sola_search_ms: GUI_SOLA_SEARCH_MS,
             smoother: if self.smoother == "psola" {
                 Smoother::Psola
             } else {
@@ -136,11 +241,7 @@ impl GuiSettings {
     }
 
     fn backend(&self) -> AudioBackend {
-        if self.audio_backend == "wasapi" {
-            AudioBackend::Wasapi
-        } else {
-            AudioBackend::Cpal
-        }
+        AudioBackend::Cpal
     }
 }
 
@@ -149,11 +250,15 @@ struct VcGui {
     settings: GuiSettings,
     dirty_since: Option<Instant>,
     ui_error: Option<String>,
+    telemetry: TelemetrySnapshot,
+    telemetry_updated_at: Instant,
+    applied_chunk_ms: Option<u32>,
 }
 
 impl VcGui {
     fn new() -> Self {
-        let (settings, ui_error) = load_settings();
+        let (mut settings, ui_error) = load_settings();
+        settings.normalize_gui_managed_settings();
         let controller = EngineController::new(settings.live());
         let _ = controller.refresh_devices(settings.backend());
         Self {
@@ -161,6 +266,9 @@ impl VcGui {
             settings,
             dirty_since: None,
             ui_error,
+            telemetry: TelemetrySnapshot::default(),
+            telemetry_updated_at: Instant::now() - TELEMETRY_REFRESH,
+            applied_chunk_ms: None,
         }
     }
 
@@ -195,12 +303,41 @@ impl VcGui {
             self.changed();
         }
     }
+
+    fn apply_or_start(&mut self) {
+        self.controller.set_live_params(self.settings.live());
+        let chunk_ms = self.settings.chunk_ms;
+        match self.settings.realtime().and_then(|config| {
+            self.controller
+                .apply_config(config)
+                .map_err(|e| format!("{e:#}"))
+        }) {
+            Ok(()) => {
+                self.ui_error = None;
+                self.applied_chunk_ms = Some(chunk_ms);
+            }
+            Err(err) => self.ui_error = Some(err),
+        }
+    }
+
+    fn stop(&mut self) {
+        if let Err(err) = self.controller.stop() {
+            self.ui_error = Some(format!("{err:#}"));
+        } else {
+            self.applied_chunk_ms = None;
+        }
+    }
 }
 
 impl eframe::App for VcGui {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.maybe_save();
-        let (status, telemetry, devices) = self.controller.snapshot();
+        let (status, latest_telemetry, devices) = self.controller.snapshot();
+        if self.telemetry_updated_at.elapsed() >= TELEMETRY_REFRESH {
+            self.telemetry = latest_telemetry;
+            self.telemetry_updated_at = Instant::now();
+        }
+        let telemetry = self.telemetry;
         ui.heading("vc-rs Standalone");
         ui.horizontal(|ui| {
             ui.label(format!("Status: {:?} - {}", status.state, status.message));
@@ -217,27 +354,44 @@ impl eframe::App for VcGui {
         if let Some(error) = &devices.error {
             ui.colored_label(egui::Color32::LIGHT_RED, error);
         }
+        ui.horizontal(|ui| {
+            if ui.button("Apply / Start").clicked() {
+                self.apply_or_start();
+            }
+            if ui.button("Stop").clicked() {
+                self.stop();
+            }
+            if ui
+                .checkbox(&mut self.settings.passthrough, "Passthrough")
+                .changed()
+            {
+                self.changed();
+            }
+        });
         ui.separator();
 
         egui::ScrollArea::vertical().show(ui, |ui| {
             let mut changed = false;
             ui.heading("Models");
-            changed |= path_row(ui, "RVC model", &mut self.settings.model);
-            if ui.button("Browse RVC model").clicked() {
+            let (path_changed, browse_clicked) =
+                model_path_control(ui, "RVC model", &mut self.settings.model);
+            changed |= path_changed;
+            if browse_clicked {
                 self.browse_into(ModelKind::Rvc);
             }
-            changed |= path_row(ui, "Embedder", &mut self.settings.embedder);
-            if ui.button("Browse embedder").clicked() {
+            let (path_changed, browse_clicked) =
+                model_path_control(ui, "Embedder", &mut self.settings.embedder);
+            changed |= path_changed;
+            if browse_clicked {
                 self.browse_into(ModelKind::Embedder);
             }
-            changed |= path_row(ui, "F0 model", &mut self.settings.f0_model);
-            if ui.button("Browse F0 model").clicked() {
+            let (path_changed, browse_clicked) =
+                model_path_control(ui, "F0 model", &mut self.settings.f0_model);
+            changed |= path_changed;
+            if browse_clicked {
                 self.browse_into(ModelKind::F0);
             }
 
-            changed |= ui
-                .checkbox(&mut self.settings.passthrough, "Passthrough (no models)")
-                .changed();
             egui::ComboBox::from_label("Provider")
                 .selected_text(&self.settings.provider)
                 .show_ui(ui, |ui| {
@@ -254,28 +408,6 @@ impl eframe::App for VcGui {
 
             ui.separator();
             ui.heading("Audio");
-            let old_backend = self.settings.audio_backend.clone();
-            egui::ComboBox::from_label("Backend")
-                .selected_text(&self.settings.audio_backend)
-                .show_ui(ui, |ui| {
-                    changed |= ui
-                        .selectable_value(
-                            &mut self.settings.audio_backend,
-                            "cpal".to_string(),
-                            "CPAL",
-                        )
-                        .changed();
-                    changed |= ui
-                        .selectable_value(
-                            &mut self.settings.audio_backend,
-                            "wasapi".to_string(),
-                            "WASAPI",
-                        )
-                        .changed();
-                });
-            if old_backend != self.settings.audio_backend {
-                let _ = self.controller.refresh_devices(self.settings.backend());
-            }
             if ui.button("Refresh devices").clicked() {
                 let _ = self.controller.refresh_devices(self.settings.backend());
             }
@@ -293,57 +425,18 @@ impl eframe::App for VcGui {
                 &devices.outputs,
                 &mut changed,
             );
-            if self.settings.backend() == AudioBackend::Wasapi {
-                changed |= ui
-                    .checkbox(&mut self.settings.wasapi_input_exclusive, "Exclusive input")
-                    .changed();
-                changed |= ui
-                    .checkbox(
-                        &mut self.settings.wasapi_output_exclusive,
-                        "Exclusive output",
-                    )
-                    .changed();
-                changed |= ui
-                    .add(
-                        egui::Slider::new(&mut self.settings.wasapi_buffer_ms, 0..=50)
-                            .text("WASAPI buffer ms"),
-                    )
-                    .changed();
-            }
 
             ui.separator();
             ui.heading("Engine configuration (Apply to restart)");
             changed |= ui
-                .add(egui::Slider::new(&mut self.settings.chunk_ms, 50..=2000).text("Chunk ms"))
+                .add(egui::Slider::new(&mut self.settings.chunk_ms, 50..=1000).text("Chunk ms"))
                 .changed();
             changed |= ui
                 .add(
-                    egui::Slider::new(&mut self.settings.crossfade_ms, 0..=500)
-                        .text("Crossfade ms"),
-                )
-                .changed();
-            changed |= ui
-                .add(
-                    egui::Slider::new(&mut self.settings.sola_search_ms, 0..=100)
-                        .text("SOLA search ms"),
-                )
-                .changed();
-            changed |= ui
-                .add(
-                    egui::Slider::new(&mut self.settings.extra_convert_ms, 0..=1000)
+                    egui::Slider::new(&mut self.settings.extra_convert_ms, 0..=2000)
                         .text("Extra convert ms"),
                 )
                 .changed();
-            egui::ComboBox::from_label("Smoother")
-                .selected_text(&self.settings.smoother)
-                .show_ui(ui, |ui| {
-                    changed |= ui
-                        .selectable_value(&mut self.settings.smoother, "sola".to_string(), "SOLA")
-                        .changed();
-                    changed |= ui
-                        .selectable_value(&mut self.settings.smoother, "psola".to_string(), "PSOLA")
-                        .changed();
-                });
 
             ui.separator();
             ui.heading("Live parameters");
@@ -357,44 +450,36 @@ impl eframe::App for VcGui {
                 .add(egui::Slider::new(&mut self.settings.speaker_id, 0..=255).text("Speaker ID"))
                 .changed();
             changed |= ui
-                .add(egui::Slider::new(&mut self.settings.input_gain, 0.0..=4.0).text("Input gain"))
+                .add(
+                    egui::Slider::new(&mut self.settings.input_gain, 0.0..=12.0).text("Input gain"),
+                )
                 .changed();
             changed |= ui
                 .add(
-                    egui::Slider::new(&mut self.settings.output_gain, 0.0..=4.0)
+                    egui::Slider::new(&mut self.settings.output_gain, 0.0..=12.0)
                         .text("Output gain"),
                 )
                 .changed();
             if changed {
                 self.changed();
             }
-
-            ui.horizontal(|ui| {
-                if ui.button("Apply / Start").clicked() {
-                    self.controller.set_live_params(self.settings.live());
-                    match self.settings.realtime().and_then(|c| {
-                        self.controller
-                            .apply_config(c)
-                            .map_err(|e| format!("{e:#}"))
-                    }) {
-                        Ok(()) => self.ui_error = None,
-                        Err(err) => self.ui_error = Some(err),
-                    }
-                }
-                if ui.button("Stop").clicked() {
-                    if let Err(err) = self.controller.stop() {
-                        self.ui_error = Some(format!("{err:#}"));
-                    }
-                }
-            });
-
             ui.separator();
             ui.heading("Telemetry");
             egui::Grid::new("telemetry").show(ui, |ui| {
-                metric(ui, "Chunks", telemetry.chunks);
-                metric(ui, "Inference", format!("{} us", telemetry.inference_us));
-                metric(ui, "Input RMS", format!("{:.6}", telemetry.input_rms));
-                metric(ui, "Output RMS", format!("{:.6}", telemetry.output_rms));
+                let inference_ms = telemetry.inference_us.saturating_add(500) / 1_000;
+                let inference_color = (status.state == EngineState::Running)
+                    .then(|| {
+                        self.applied_chunk_ms
+                            .and_then(|chunk_ms| inference_color(telemetry.inference_us, chunk_ms))
+                    })
+                    .flatten();
+                if let Some(color) = inference_color {
+                    colored_metric(ui, "Inference", format!("{inference_ms} ms"), color);
+                } else {
+                    metric(ui, "Inference", format!("{inference_ms} ms"));
+                }
+                rms_metric(ui, "Input RMS", telemetry.input_rms);
+                rms_metric(ui, "Output RMS", telemetry.output_rms);
                 metric(ui, "Input overruns", telemetry.input_overruns);
                 metric(ui, "Output underruns", telemetry.output_underruns);
                 metric(
@@ -419,12 +504,18 @@ enum ModelKind {
     F0,
 }
 
-fn path_row(ui: &mut egui::Ui, label: &str, value: &mut String) -> bool {
-    ui.horizontal(|ui| {
-        ui.label(label);
-        ui.text_edit_singleline(value).changed()
-    })
-    .inner
+fn model_path_control(ui: &mut egui::Ui, label: &str, value: &mut String) -> (bool, bool) {
+    let browse_clicked = ui
+        .horizontal(|ui| {
+            ui.label(label);
+            ui.button("Browse").clicked()
+        })
+        .inner;
+    let available_width = ui.available_width();
+    let changed = ui
+        .add(egui::TextEdit::singleline(value).desired_width(available_width))
+        .changed();
+    (changed, browse_clicked)
 }
 
 fn device_combo(
@@ -454,6 +545,39 @@ fn metric(ui: &mut egui::Ui, label: &str, value: impl ToString) {
     ui.label(label);
     ui.monospace(value.to_string());
     ui.end_row();
+}
+
+fn colored_metric(ui: &mut egui::Ui, label: &str, value: impl ToString, color: egui::Color32) {
+    ui.colored_label(color, label);
+    ui.colored_label(color, egui::RichText::new(value.to_string()).monospace());
+    ui.end_row();
+}
+
+fn rms_metric(ui: &mut egui::Ui, label: &str, rms: f32) {
+    colored_metric(ui, label, format!("{rms:.6}"), rms_color(rms));
+}
+
+fn rms_color(rms: f32) -> egui::Color32 {
+    if !rms.is_finite() || rms > RMS_HIGH_MAX {
+        egui::Color32::LIGHT_RED
+    } else if rms < RMS_HEALTHY_MIN {
+        egui::Color32::GRAY
+    } else if rms > RMS_HEALTHY_MAX {
+        egui::Color32::YELLOW
+    } else {
+        egui::Color32::LIGHT_GREEN
+    }
+}
+
+fn inference_color(inference_us: u64, chunk_ms: u32) -> Option<egui::Color32> {
+    let budget_us = u64::from(chunk_ms).saturating_mul(1_000);
+    if inference_us > budget_us {
+        Some(egui::Color32::LIGHT_RED)
+    } else if inference_us.saturating_mul(5) >= budget_us.saturating_mul(4) {
+        Some(egui::Color32::YELLOW)
+    } else {
+        None
+    }
 }
 
 fn string_option(value: &str) -> Option<String> {
@@ -517,6 +641,7 @@ fn parse_provider(value: &str) -> Result<Provider, String> {
 
 fn provider_names() -> &'static [&'static str] {
     &[
+        #[cfg(not(all(feature = "tensorrt", not(feature = "windowsml"))))]
         "cpu",
         #[cfg(feature = "cuda")]
         "cuda",
@@ -568,5 +693,83 @@ mod tests {
             .unwrap()
             .validate()
             .is_err());
+    }
+
+    #[test]
+    fn gui_realtime_config_forces_safe_audio_and_smoothing_settings() {
+        let settings: GuiSettings = toml::from_str(
+            r#"
+audio_backend = "wasapi"
+wasapi_input_exclusive = true
+wasapi_output_exclusive = true
+wasapi_buffer_ms = 1
+crossfade_ms = 1
+sola_search_ms = 99
+passthrough = true
+"#,
+        )
+        .unwrap();
+
+        let config = settings.realtime().unwrap();
+        assert_eq!(config.audio_backend, AudioBackend::Cpal);
+        assert!(!config.wasapi_input_exclusive);
+        assert!(!config.wasapi_output_exclusive);
+        assert_eq!(config.wasapi_buffer_ms, 0);
+        assert_eq!(config.crossfade_ms, GUI_CROSSFADE_MS);
+        assert_eq!(config.sola_search_ms, GUI_SOLA_SEARCH_MS);
+    }
+
+    #[test]
+    fn normalization_removes_hidden_unsafe_gui_settings() {
+        let mut settings = GuiSettings {
+            audio_backend: "wasapi".to_string(),
+            wasapi_input_exclusive: true,
+            wasapi_output_exclusive: true,
+            wasapi_buffer_ms: 1,
+            crossfade_ms: 1,
+            sola_search_ms: 99,
+            ..GuiSettings::default()
+        };
+
+        settings.normalize_gui_managed_settings();
+        assert_eq!(settings.audio_backend, "cpal");
+        assert!(!settings.wasapi_input_exclusive);
+        assert!(!settings.wasapi_output_exclusive);
+        assert_eq!(settings.wasapi_buffer_ms, 0);
+        assert_eq!(settings.crossfade_ms, GUI_CROSSFADE_MS);
+        assert_eq!(settings.sola_search_ms, GUI_SOLA_SEARCH_MS);
+    }
+
+    #[cfg(all(feature = "tensorrt", not(feature = "windowsml")))]
+    #[test]
+    fn tensorrt_only_gui_removes_cpu_provider() {
+        assert!(!provider_names().contains(&"cpu"));
+        let mut settings = GuiSettings {
+            provider: "cpu".to_string(),
+            ..GuiSettings::default()
+        };
+        settings.normalize_gui_managed_settings();
+        assert_eq!(settings.provider, "tensorrt");
+    }
+
+    #[test]
+    fn rms_colors_distinguish_silence_healthy_and_excessive_levels() {
+        assert_eq!(rms_color(0.0), egui::Color32::GRAY);
+        assert_eq!(rms_color(0.005), egui::Color32::GRAY);
+        assert_eq!(rms_color(0.03), egui::Color32::LIGHT_GREEN);
+        assert_eq!(rms_color(0.15), egui::Color32::YELLOW);
+        assert_eq!(rms_color(0.30), egui::Color32::LIGHT_RED);
+        assert_eq!(rms_color(f32::NAN), egui::Color32::LIGHT_RED);
+    }
+
+    #[test]
+    fn inference_color_warns_at_eighty_percent_and_errors_over_budget() {
+        assert_eq!(inference_color(399_999, 500), None);
+        assert_eq!(inference_color(400_000, 500), Some(egui::Color32::YELLOW));
+        assert_eq!(inference_color(500_000, 500), Some(egui::Color32::YELLOW));
+        assert_eq!(
+            inference_color(500_001, 500),
+            Some(egui::Color32::LIGHT_RED)
+        );
     }
 }

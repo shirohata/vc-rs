@@ -559,7 +559,9 @@ impl RealtimeSession {
             thread::Builder::new()
                 .name("vc-app-inference".to_string())
                 .spawn(move || {
-                    let _ = set_current_thread_priority(ThreadPriority::Max);
+                    if let Err(err) = set_current_thread_priority(ThreadPriority::Max) {
+                        tracing::warn!("failed to set inference worker thread priority: {err}");
+                    }
                     let mut model = model;
                     let mut input_acc = Vec::<f32>::with_capacity(input_chunk * 2);
                     let mut prepared = Vec::<f32>::with_capacity(output_chunk * 2);
