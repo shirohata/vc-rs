@@ -53,10 +53,6 @@
 .PARAMETER CudaBin
     (tensorrt) CUDA Toolkit bin directory. Forwarded to package-tensorrt.ps1.
 
-.PARAMETER BuilderSm
-    (tensorrt) GPU SM tags whose builder-resource DLLs to bundle (e.g. sm86).
-    Forwarded to package-tensorrt.ps1.
-
 .PARAMETER RuntimeOnly
     (tensorrt) Bundle only the runtime DLLs (no engine builder). Forwarded to
     package-tensorrt.ps1.
@@ -83,8 +79,8 @@
     pwsh crates\vc-cli\package.ps1
 
 .EXAMPLE
-    # Self-contained TensorRT package for an RTX 30xx (sm86):
-    pwsh crates\vc-cli\package.ps1 -Variant tensorrt -BuilderSm sm86
+    # Self-contained TensorRT package (bundles all GPU builder resources):
+    pwsh crates\vc-cli\package.ps1 -Variant tensorrt
 
 .EXAMPLE
     # Smallest TensorRT package (engines built/cached elsewhere):
@@ -106,7 +102,6 @@ param(
     # tensorrt
     [string]$TensorRtBin,
     [string]$CudaBin,
-    [string[]]$BuilderSm,
     [switch]$RuntimeOnly,
     [string]$BuilderExe,
 
@@ -171,12 +166,7 @@ try {
     #    DLLs beside them (and so we don't pollute target\release). The folder is
     #    named after the archive stem so a kept dir sits next to its .zip.
     $tag = $Variant
-    if ($Variant -eq 'tensorrt') {
-        if ($RuntimeOnly) { $tag += '-runtime' }
-        elseif ($BuilderSm -and $BuilderSm.Count -gt 0 -and ($BuilderSm -notcontains 'none')) {
-            $tag += '-' + ($BuilderSm -join '-')
-        }
-    }
+    if ($Variant -eq 'tensorrt' -and $RuntimeOnly) { $tag += '-runtime' }
 
     $version = '0.0.0'
     $wsToml = Get-Content (Join-Path $repoRoot 'Cargo.toml') -Raw
@@ -199,7 +189,7 @@ try {
     $forward = @{ DestDir = $staging }
     $forwardable = switch ($Variant) {
         'windowsml' { @('FoundationVersion', 'BootstrapDll', 'WindowsAppSdkLicense') }
-        'tensorrt' { @('TensorRtBin', 'CudaBin', 'BuilderSm', 'RuntimeOnly', 'BuilderExe') }
+        'tensorrt' { @('TensorRtBin', 'CudaBin', 'RuntimeOnly', 'BuilderExe') }
     }
     foreach ($name in $forwardable) {
         if ($PSBoundParameters.ContainsKey($name)) { $forward[$name] = $PSBoundParameters[$name] }

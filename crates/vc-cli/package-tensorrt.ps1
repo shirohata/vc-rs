@@ -44,20 +44,13 @@
     Path to vc-tensorrt-builder.exe. Default: searched under target\release and
     tools\tensorrt_builder\target\release. Ignored with -RuntimeOnly.
 
-.PARAMETER BuilderSm
-    Which GPU builder-resource DLLs to bundle, by SM tag (e.g. sm89 for RTX 40xx,
-    sm86 for RTX 30xx, sm75 for RTX 20xx, sm90 Hopper, sm100/sm120 Blackwell, and
-    'ptx' for the JIT fallback). Default: all present (full compatibility, ~2.5 GB
-    — a size warning is printed). Pass 'none' to skip them. Ignored with
-    -RuntimeOnly.
-
 .PARAMETER RuntimeOnly
     Copy only the runtime DLLs (no builder helper, parser, or builder resources).
     Use when engines are prebuilt/cached or built outside the CLI.
 
 .EXAMPLE
-    # Self-contained for an RTX 40-series (Ada / sm89) machine:
-    pwsh crates\vc-cli\package-tensorrt.ps1 -BuilderSm sm89
+    # Self-contained package (bundles all GPU builder resources, ~2.5 GB):
+    pwsh crates\vc-cli\package-tensorrt.ps1
 
 .EXAMPLE
     # Just the runtime DLLs (smallest; engines built elsewhere):
@@ -69,7 +62,6 @@ param(
     [string]$TensorRtBin = $(if ($env:TENSORRT_ROOT) { Join-Path $env:TENSORRT_ROOT 'bin' } else { '' }),
     [string]$CudaBin = '',
     [string]$BuilderExe,
-    [string[]]$BuilderSm = @(),
     [switch]$RuntimeOnly
 )
 
@@ -228,27 +220,12 @@ $($candidates -join "`n")
     $builderSources += (Resolve-Required $BuilderExe 'BuilderExe (vc-tensorrt-builder.exe)')
     $builderSources += (Join-Path $TensorRtBin "nvonnxparser_$major.dll")
 
-    # Builder-resource DLLs. These are GPU-architecture specific and very large.
+    # Builder-resource DLLs. These are GPU-architecture specific and very large;
+    # distribution packages bundle every SM tag for full GPU compatibility.
     $allResources = Get-ChildItem -Path $TensorRtBin -Filter "nvinfer_builder_resource_*_$major.dll"
-    if ($BuilderSm -contains 'none') {
-        Write-Host "Skipping builder-resource DLLs (-BuilderSm none). First-run engine builds will need them on PATH." -ForegroundColor Yellow
-    }
-    elseif (-not $BuilderSm -or $BuilderSm.Count -eq 0) {
-        $builderSources += $allResources.FullName
-        $bytes = ($allResources | Measure-Object -Property Length -Sum).Sum
-        Write-Host ("WARNING: bundling ALL builder-resource DLLs ({0:N1} GB). Pass -BuilderSm <sm89,...> to ship only your GPU's resource." -f ($bytes / 1GB)) -ForegroundColor Yellow
-    }
-    else {
-        foreach ($sm in $BuilderSm) {
-            $name = "nvinfer_builder_resource_${sm}_$major.dll"
-            $path = Join-Path $TensorRtBin $name
-            if (-not (Test-Path $path)) {
-                $available = ($allResources.Name | ForEach-Object { ($_ -replace '^nvinfer_builder_resource_', '') -replace "_$major\.dll$", '' }) -join ', '
-                throw "Builder resource '$name' not found in $TensorRtBin. Available SM tags: $available"
-            }
-            $builderSources += $path
-        }
-    }
+    $builderSources += $allResources.FullName
+    $bytes = ($allResources | Measure-Object -Property Length -Sum).Sum
+    Write-Host ("Bundling ALL builder-resource DLLs ({0:N1} GB) for full GPU compatibility." -f ($bytes / 1GB)) -ForegroundColor Cyan
 }
 
 $sources = @($runtimeSources + $builderSources)

@@ -29,11 +29,6 @@
     Where to write the .zip files. Default: <repo>\dist. Forwarded to each
     package.ps1.
 
-.PARAMETER BuilderSm
-    (tensorrt targets) GPU SM tags whose builder-resource DLLs to bundle (e.g.
-    sm86 for RTX 30xx, sm89 for RTX 40xx). Forwarded to both tensorrt packages.
-    Omit to bundle all resources (large) or pass -RuntimeOnly to skip them.
-
 .PARAMETER RuntimeOnly
     (tensorrt targets) Bundle only the runtime DLLs (no engine builder).
     Forwarded to both tensorrt packages.
@@ -49,7 +44,7 @@
 .EXAMPLE
     # All four packages (TensorRT bundling every GPU resource):
     . scripts\activate.ps1
-    pwsh scripts\package-all.ps1 -BuilderSm sm86
+    pwsh scripts\package-all.ps1
 
 .EXAMPLE
     # Only the Windows ML pair (no GPU toolchain needed):
@@ -66,7 +61,6 @@ param(
     [string]$OutDir,
 
     # tensorrt targets
-    [string[]]$BuilderSm,
     [switch]$RuntimeOnly,
     [string]$TensorRtBin,
 
@@ -110,7 +104,6 @@ foreach ($name in $plan.Keys) {
     if ($KeepStage) { $pkgArgs['KeepStage'] = $true }
     if ($CleanStage) { $pkgArgs['CleanStage'] = $true }
     if ($spec.Variant -eq 'tensorrt') {
-        if ($PSBoundParameters.ContainsKey('BuilderSm')) { $pkgArgs['BuilderSm'] = $BuilderSm }
         if ($RuntimeOnly) { $pkgArgs['RuntimeOnly'] = $true }
         if ($PSBoundParameters.ContainsKey('TensorRtBin')) { $pkgArgs['TensorRtBin'] = $TensorRtBin }
     }

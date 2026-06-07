@@ -119,7 +119,7 @@ drives all four into `dist\`:
 ```powershell
 . scripts/activate.ps1                 # tensorrt targets need the GPU toolchain
 cargo install cargo-about --features cli # one-time packaging prerequisite
-pwsh scripts/package-all.ps1 -BuilderSm sm86
+pwsh scripts/package-all.ps1
 ```
 
 Packaging requires `cargo-about` so each staged binary receives a notice for its
@@ -140,8 +140,9 @@ Flags:
   Windows ML pair, which needs no GPU toolchain).
 - `cli-windowsml` and `cli-tensorrt` remain accepted as legacy aliases for the
   corresponding app targets.
-- `-BuilderSm <sm..>` / `-RuntimeOnly` / `-TensorRtBin <dir>` — forwarded to the
-  tensorrt targets (see each crate's `package-tensorrt.ps1`).
+- `-RuntimeOnly` / `-TensorRtBin <dir>` — forwarded to the tensorrt targets (see
+  each crate's `package-tensorrt.ps1`). TensorRT packages always bundle every
+  GPU builder resource for full compatibility.
 - `-KeepStage` / `-CleanStage` — force keeping (e.g. tensorrt) or removing the
   ready-to-run `dist\<stem>\` folders, overriding the per-variant default.
 - `-OutDir <dir>` — where the `.zip` files (and kept folders) land (default `dist\`).

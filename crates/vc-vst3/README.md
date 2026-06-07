@@ -88,7 +88,7 @@ a versioned
 ```powershell
 cargo install cargo-about --features cli # one-time packaging prerequisite
 pwsh crates\vc-vst3\package.ps1                                  # Windows ML (default)
-pwsh crates\vc-vst3\package.ps1 -Variant tensorrt -BuilderSm sm86
+pwsh crates\vc-vst3\package.ps1 -Variant tensorrt
 ```
 
 Variant-specific options are forwarded to the populate script. Useful flags:
@@ -189,16 +189,15 @@ folder under `external\nvidia\`, or `%TENSORRT_ROOT%`), and the CUDA major `<M>`
 is paired automatically (TRT10 → CUDA 12, TRT11 → CUDA 13).
 
 ```powershell
-# Self-contained for the target GPU's SM (e.g. sm86 = RTX 30xx, sm89 = RTX 40xx;
-# `nvidia-smi --query-gpu=compute_cap --format=csv` reports it):
-pwsh crates\vc-vst3\package-tensorrt.ps1 -BuilderSm sm86
+# Self-contained (bundles every GPU builder resource for full compatibility):
+pwsh crates\vc-vst3\package-tensorrt.ps1
 
 # Or runtime DLLs only (smallest; engines built/cached elsewhere):
 pwsh crates\vc-vst3\package-tensorrt.ps1 -RuntimeOnly
 ```
 
 The builder resource DLLs are GPU-architecture specific and large (~160–640 MB
-each); with no `-BuilderSm` the script bundles them all (~2.5 GB) and warns.
+each); the script always bundles them all (~2.5 GB) for full GPU compatibility.
 The plugin finds the bundled helper automatically: it resolves it relative to
 its own module directory (the plugin DLL), not the DAW exe, so co-locating the
 helper in the bundle is enough — no `VC_RS_TENSORRT_BUILDER_HELPER` env var or

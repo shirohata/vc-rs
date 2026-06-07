@@ -60,6 +60,10 @@ verify *args:
 package *args:
     ./scripts/package-all.ps1 {{args}}
 
+# Verify built zips (scan + checksums); add -Build to build first, -Publish to tag and release.
+release *args:
+    ./scripts/release.ps1 {{args}}
+
 # Format the workspace.
 fmt:
     cargo fmt --all
