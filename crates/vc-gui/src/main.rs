@@ -1,3 +1,5 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
