@@ -60,11 +60,15 @@ texts required by bundled third-party code and redistributable DLLs.
 
 License generation and collection must be checked for the exact package and
 feature set being shipped. Treat a missing, stale, or mismatched license notice
-as a release blocker, even when a packaging script emits only a warning.
+as a release blocker. Distribution packaging requires `cargo-about`; ordinary
+builds and tests do not.
 
 In particular, verify:
 
 - The Rust dependency notice covers the actual standalone app or VST3 variant.
+- Standalone packages contain separate notices for `vc-rs.exe` and `vc-gui.exe`.
+- Non-runtime-only TensorRT packages contain a separate notice for the bundled
+  `vc-tensorrt-builder.exe`.
 - Windows ML packages include the license matching the redistributed Windows
   App SDK bootstrapper.
 - TensorRT packages include the applicable NVIDIA license or EULA text.
@@ -96,15 +100,12 @@ introduced.
 ## Current Automation Limits
 
 The packaging scripts provide important safeguards, including release stripping,
-Rust path remapping, fresh VST3 staging, variant-specific population, and license
-copying. They do not currently provide a complete publish gate.
+Rust path remapping, fresh VST3 staging, variant-specific population, exact
+per-binary Rust license generation, and required redistributable license
+collection. They do not currently provide a complete publish gate.
 
 Review these known limitations before release:
 
-- Standalone app packages currently copy the committed VST3 license directory
-  rather than generating an app-specific Rust dependency notice.
-- Packaging may continue after warning that a Windows App SDK license is
-  unavailable, and TensorRT license discovery is best-effort.
 - Final ZIPs are not automatically scanned for secrets, local paths, prohibited
   files, or backend cross-contamination.
 - `-SkipBuild` does not prove that the reused binary matches the requested

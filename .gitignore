@@ -4,6 +4,7 @@
 /tools/vst3sdk-build/
 /dist/
 /external/
+/crates/vc-vst3/dist/licenses/THIRD-PARTY-LICENSES.md
 
 *.wav
 *.engine

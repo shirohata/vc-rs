@@ -118,8 +118,13 @@ drives all four into `dist\`:
 
 ```powershell
 . scripts/activate.ps1                 # tensorrt targets need the GPU toolchain
+cargo install cargo-about --features cli # one-time packaging prerequisite
 pwsh scripts/package-all.ps1 -BuilderSm sm86
 ```
+
+Packaging requires `cargo-about` so each staged binary receives a notice for its
+exact package and backend feature set. Ordinary builds, tests, validation, and
+local install workflows do not require it.
 
 Alongside each `.zip`, a populated, ready-to-run `dist\<stem>\` folder (binary +
 DLLs + licenses) is left in place for quick local testing — kept by default for

@@ -75,12 +75,24 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
-$licenseSrc = Join-Path (Join-Path $PSScriptRoot '..\vc-vst3') 'dist\licenses'
+$licenseSrc = Join-Path $repoRoot 'scripts\licenses\static'
+if (-not (Test-Path $licenseSrc)) { throw "Static license material not found: $licenseSrc" }
 
 function Resolve-Required([string]$path, [string]$what) {
     if (-not $path) { throw "$what is not set." }
     if (-not (Test-Path $path)) { throw "$what not found: $path" }
     return (Resolve-Path $path).Path
+}
+
+function Find-LicenseText([string]$root) {
+    $namePattern = '^(LICENSE|EULA)|LICENSE'
+    $direct = Get-ChildItem -Path $root -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match $namePattern } |
+        Select-Object -First 1
+    if ($direct) { return $direct }
+    return Get-ChildItem -Path $root -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match $namePattern } |
+        Select-Object -First 1
 }
 
 # Detect the TensorRT major version (10, 11, ...) from nvinfer_<N>.dll in a bin dir.
@@ -244,13 +256,20 @@ foreach ($src in $sources) {
 $licDest = Join-Path $DestDir 'licenses'
 New-Item -ItemType Directory -Force -Path $licDest | Out-Null
 if (Test-Path $licenseSrc) {
-    Copy-Item -Path (Join-Path $licenseSrc '*') -Destination $licDest -Recurse -Force
+    Copy-Item -Path (Join-Path $licenseSrc 'THIRD-PARTY-NOTICES.md') -Destination $licDest -Force
 }
 
-# TensorRT's own license text from the local install when present.
+# The redistributed TensorRT and CUDA runtime DLLs must travel with their
+# matching license/EULA texts. Missing material is a packaging failure.
 $trtRoot = Split-Path $TensorRtBin -Parent
-$trtLic = Get-ChildItem -Path $trtRoot -Recurse -Include 'LICENSE*', '*LICENSE*.txt', 'EULA*' -ErrorAction SilentlyContinue | Select-Object -First 1
-if ($trtLic) { Copy-Item $trtLic.FullName (Join-Path $licDest 'TensorRT-LICENSE.txt') -Force }
+$trtLic = Find-LicenseText $trtRoot
+if (-not $trtLic) { throw "TensorRT license/EULA not found under $trtRoot." }
+$cudaRoot = Split-Path $CudaBin -Parent
+if ((Split-Path $CudaBin -Leaf) -eq 'x64') { $cudaRoot = Split-Path $cudaRoot -Parent }
+$cudaLic = Find-LicenseText $cudaRoot
+if (-not $cudaLic) { throw "CUDA license/EULA not found under $cudaRoot." }
+Copy-Item $trtLic.FullName (Join-Path $licDest 'TensorRT-LICENSE.txt') -Force
+Copy-Item $cudaLic.FullName (Join-Path $licDest 'CUDA-EULA.txt') -Force
 
 $count = $sources.Count
 $total = ($sources | ForEach-Object { (Get-Item $_).Length } | Measure-Object -Sum).Sum

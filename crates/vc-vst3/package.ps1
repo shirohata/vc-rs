@@ -8,12 +8,11 @@
 
         1. cargo xtask bundle vc-vst3 --release  (with the variant's features)
         2. (tensorrt only) build the ORT-free engine builder helper if needed
-        2b. regenerate dist\licenses\THIRD-PARTY-LICENSES.md with cargo-about so
-            the bundled Rust-crate notice matches this variant's dependencies
         3. the matching populate script (package-windowsml|tensorrt.ps1),
            which copies the runtime DLLs + licenses into the bundle
-        4. stage vc-vst3-<variant>.vst3 + LICENSE + a generated INSTALL.txt
-        5. Compress-Archive into dist\vc-vst3-<variant>-v<version>-win-x64.zip
+        4. generate the variant's Rust dependency notice into the staged bundle
+        5. stage vc-vst3-<variant>.vst3 + LICENSE + a generated INSTALL.txt
+        6. Compress-Archive into dist\vc-vst3-<variant>-v<version>-win-x64.zip
 
     The populate scripts are reused as-is; this only orchestrates them and adds
     the build + archive steps. Variant-specific options are forwarded to the
@@ -54,11 +53,6 @@
     Remove the staged dist\<stem>\ folder after zipping, overriding the
     default-keep for windowsml.
 
-.PARAMETER SkipLicenseGen
-    Skip running cargo-about to regenerate dist\licenses\THIRD-PARTY-LICENSES.md.
-    The committed copy is shipped as-is. Generation is also skipped automatically
-    (with a warning) when cargo-about is not installed.
-
 .PARAMETER TensorRtBin
     (tensorrt) TensorRT bin directory. Forwarded to package-tensorrt.ps1.
 
@@ -83,6 +77,10 @@
     (windowsml) Existing bootstrapper DLL to copy. Forwarded to
     package-windowsml.ps1.
 
+.PARAMETER WindowsAppSdkLicense
+    (windowsml) License text matching -BootstrapDll. Required when passing the
+    bootstrapper DLL directly.
+
 .EXAMPLE
     # Default Windows ML package:
     pwsh crates\vc-vst3\package.ps1
@@ -105,10 +103,6 @@ param(
     [switch]$KeepStage,
     [switch]$CleanStage,
 
-    # Skip regenerating dist\licenses\THIRD-PARTY-LICENSES.md with cargo-about;
-    # ship the committed copy as-is.
-    [switch]$SkipLicenseGen,
-
     # tensorrt
     [string]$TensorRtBin,
     [string[]]$BuilderSm,
@@ -117,13 +111,20 @@ param(
 
     # windowsml
     [string]$FoundationVersion,
-    [string]$BootstrapDll
+    [string]$BootstrapDll,
+    [string]$WindowsAppSdkLicense
 )
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $bundleDir = Join-Path $repoRoot 'target\bundled'
 if (-not $OutDir) { $OutDir = Join-Path $repoRoot 'dist' }
+
+# A distribution package must contain a notice generated for its exact feature
+# set. Fail before the expensive build instead of reusing a stale shared file.
+if (-not (Get-Command cargo-about -ErrorAction SilentlyContinue)) {
+    throw "cargo-about is required to build distribution packages. Install it with: cargo install cargo-about --features cli"
+}
 
 # Strip absolute build-machine paths (user name etc.) from the shipped plugin DLL.
 # Sets CARGO_ENCODED_RUSTFLAGS, inherited by the cargo xtask bundle subprocess
@@ -167,29 +168,6 @@ try {
     }
     else {
         Write-Host "==> Skipping build (-SkipBuild); reusing $bundleDir" -ForegroundColor Yellow
-    }
-
-    # 2b. Regenerate the third-party Rust-crate license notice so the shipped
-    #     THIRD-PARTY-LICENSES.md reflects THIS variant's dependency tree (e.g.
-    #     the tensorrt build drops ORT). It lives in dist\licenses\, which the
-    #     populate step copies into the bundle, so this must run first. The
-    #     feature flags match the bundle build. Skipped gracefully when
-    #     cargo-about is absent so packaging never hard-depends on it.
-    if (-not $SkipLicenseGen) {
-        if (Get-Command cargo-about -ErrorAction SilentlyContinue) {
-            $aboutCfg = Join-Path $PSScriptRoot 'about.toml'
-            $aboutTpl = Join-Path $PSScriptRoot 'about.hbs'
-            $licOut = Join-Path $PSScriptRoot 'dist\licenses\THIRD-PARTY-LICENSES.md'
-            Write-Host "==> cargo about generate ($Variant features)" -ForegroundColor Cyan
-            cargo about generate --manifest-path $PSScriptRoot\Cargo.toml -c $aboutCfg --locked @bundleFeatureArgs $aboutTpl -o $licOut
-            if ($LASTEXITCODE -ne 0) { throw "cargo about generate failed (exit $LASTEXITCODE)." }
-        }
-        else {
-            Write-Warning @"
-cargo-about not found; shipping the committed THIRD-PARTY-LICENSES.md as-is.
-Install it to regenerate the notice: cargo install cargo-about --features cli
-"@
-        }
     }
 
     # 3. Locate the raw, DLL-only bundle that `cargo xtask bundle` produced. We do
@@ -237,7 +215,7 @@ Install it to regenerate the notice: cargo install cargo-about --features cli
 
     $forward = @{ BundleDir = $staging; BundleName = $installBundleName }
     $forwardable = switch ($Variant) {
-        'windowsml' { @('FoundationVersion', 'BootstrapDll') }
+        'windowsml' { @('FoundationVersion', 'BootstrapDll', 'WindowsAppSdkLicense') }
         'tensorrt' { @('TensorRtBin', 'BuilderSm', 'RuntimeOnly', 'BuilderExe') }
     }
     foreach ($name in $forwardable) {
@@ -250,6 +228,33 @@ Install it to regenerate the notice: cargo install cargo-about --features cli
 
     Write-Host "==> $((Split-Path $populateScript -Leaf))" -ForegroundColor Cyan
     & $populateScript @forward
+
+    # Static notices are copied by the populate script. Generate the Rust notice
+    # directly into this staged variant so another package can never overwrite
+    # or accidentally reuse it.
+    $licenseDirs = @(Get-ChildItem -Path (Join-Path $staging $installBundleName) `
+        -Recurse -Filter 'THIRD-PARTY-NOTICES.md' | ForEach-Object { $_.Directory.FullName })
+    if ($licenseDirs.Count -eq 0) {
+        throw "Populate script did not create a licenses directory in the staged VST3 bundle."
+    }
+    $rustLicense = Join-Path $licenseDirs[0] 'THIRD-PARTY-LICENSES.md'
+    & (Join-Path $repoRoot 'scripts\generate-rust-licenses.ps1') `
+        -ManifestPath (Join-Path $PSScriptRoot 'Cargo.toml') `
+        -OutputPath $rustLicense `
+        -FeatureArgs $bundleFeatureArgs
+    $builderLicense = $null
+    if ($Variant -eq 'tensorrt' -and -not $RuntimeOnly) {
+        $builderLicense = Join-Path $licenseDirs[0] 'THIRD-PARTY-LICENSES-vc-tensorrt-builder.md'
+        & (Join-Path $repoRoot 'scripts\generate-rust-licenses.ps1') `
+            -ManifestPath (Join-Path $repoRoot 'tools\tensorrt_builder\Cargo.toml') `
+            -OutputPath $builderLicense
+    }
+    foreach ($licenseDir in $licenseDirs | Select-Object -Skip 1) {
+        Copy-Item $rustLicense (Join-Path $licenseDir 'THIRD-PARTY-LICENSES.md') -Force
+        if ($builderLicense) {
+            Copy-Item $builderLicense (Join-Path $licenseDir 'THIRD-PARTY-LICENSES-vc-tensorrt-builder.md') -Force
+        }
+    }
 
     if ($NoZip) {
         Write-Host "==> -NoZip: populated bundle ready in $staging (skipping archive)." -ForegroundColor Green

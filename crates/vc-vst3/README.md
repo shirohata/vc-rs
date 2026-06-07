@@ -81,10 +81,12 @@ longer a packaged distribution; see git history for the old `package-cuda.ps1`.)
 variant: `cargo xtask bundle` → (TensorRT) build the engine-builder helper →
 the matching `package-<variant>.ps1` populate step → stage a variant-named VST3
 bundle (`vc-vst3-windowsml.vst3` or `vc-vst3-tensorrt.vst3`) +
-`LICENSE` + a generated `INSTALL.txt` → a versioned
+exact Rust dependency license notices + `LICENSE` + a generated `INSTALL.txt` →
+a versioned
 `dist\vc-vst3-<variant>-v<version>-win-x64.zip`.
 
 ```powershell
+cargo install cargo-about --features cli # one-time packaging prerequisite
 pwsh crates\vc-vst3\package.ps1                                  # Windows ML (default)
 pwsh crates\vc-vst3\package.ps1 -Variant tensorrt -BuilderSm sm86
 ```

@@ -1,0 +1,28 @@
+# Shared cargo-about policy for Rust binaries shipped by this repository.
+# Each packaging script supplies the exact package manifest and feature set for
+# the artifact it is staging; do not generate one workspace-wide notice because
+# that would include crates which are not present in the distributed binary.
+
+targets = ["x86_64-pc-windows-msvc"]
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+ignore-transitive-dependencies = false
+private = { ignore = true }
+
+# For dual/OR expressions cargo-about picks the first accepted match, so
+# copyleft alternatives (GPL-2.0, LGPL-2.1, BlueOak) are intentionally omitted.
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "ISC",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Zlib",
+    "0BSD",
+    "BSL-1.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "CDLA-Permissive-2.0",
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+]

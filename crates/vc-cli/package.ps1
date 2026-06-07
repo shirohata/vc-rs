@@ -11,8 +11,9 @@
         3. stage vc-rs.exe and vc-gui.exe into dist\<stem>\
         4. the matching populate script (package-windowsml|tensorrt.ps1), which
            copies the runtime DLLs + licenses next to both executables
-        5. add LICENSE + a generated INSTALL.txt
-        6. Compress-Archive into dist\vc-rs-<variant>-v<version>-win-x64.zip
+        5. generate exact Rust dependency notices for vc-rs.exe and vc-gui.exe
+        6. add LICENSE + a generated INSTALL.txt
+        7. Compress-Archive into dist\vc-rs-<variant>-v<version>-win-x64.zip
 
     The populate scripts are reused as-is; this only orchestrates them and adds
     the build + stage + archive steps.
@@ -73,6 +74,10 @@
     (windowsml) Existing bootstrapper DLL to copy. Forwarded to
     package-windowsml.ps1.
 
+.PARAMETER WindowsAppSdkLicense
+    (windowsml) License text matching -BootstrapDll. Required when passing the
+    bootstrapper DLL directly.
+
 .EXAMPLE
     # Default Windows ML package:
     pwsh crates\vc-cli\package.ps1
@@ -107,13 +112,20 @@ param(
 
     # windowsml
     [string]$FoundationVersion,
-    [string]$BootstrapDll
+    [string]$BootstrapDll,
+    [string]$WindowsAppSdkLicense
 )
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $releaseDir = Join-Path $repoRoot 'target\release'
 if (-not $OutDir) { $OutDir = Join-Path $repoRoot 'dist' }
+
+# The standalone archive ships two binaries with different dependency graphs.
+# Require fresh notices for both rather than copying the VST3 notice.
+if (-not (Get-Command cargo-about -ErrorAction SilentlyContinue)) {
+    throw "cargo-about is required to build distribution packages. Install it with: cargo install cargo-about --features cli"
+}
 
 # Strip absolute build-machine paths (user name etc.) from the shipped binaries.
 # Sets CARGO_ENCODED_RUSTFLAGS, inherited by the cargo build below and the
@@ -186,7 +198,7 @@ try {
 
     $forward = @{ DestDir = $staging }
     $forwardable = switch ($Variant) {
-        'windowsml' { @('FoundationVersion', 'BootstrapDll') }
+        'windowsml' { @('FoundationVersion', 'BootstrapDll', 'WindowsAppSdkLicense') }
         'tensorrt' { @('TensorRtBin', 'CudaBin', 'BuilderSm', 'RuntimeOnly', 'BuilderExe') }
     }
     foreach ($name in $forwardable) {
@@ -199,6 +211,25 @@ try {
 
     Write-Host "==> $((Split-Path $populateScript -Leaf))" -ForegroundColor Cyan
     & $populateScript @forward
+
+    # vc-rs.exe and vc-gui.exe have different direct dependencies even though
+    # they use the same backend feature. Keep separate notices so each generated
+    # dependency graph is exact and auditable.
+    $licenseDir = Join-Path $staging 'licenses'
+    $licenseGenerator = Join-Path $repoRoot 'scripts\generate-rust-licenses.ps1'
+    & $licenseGenerator `
+        -ManifestPath (Join-Path $PSScriptRoot 'Cargo.toml') `
+        -OutputPath (Join-Path $licenseDir 'THIRD-PARTY-LICENSES-vc-rs.md') `
+        -FeatureArgs $buildFeatureArgs
+    & $licenseGenerator `
+        -ManifestPath (Join-Path $repoRoot 'crates\vc-gui\Cargo.toml') `
+        -OutputPath (Join-Path $licenseDir 'THIRD-PARTY-LICENSES-vc-gui.md') `
+        -FeatureArgs $buildFeatureArgs
+    if ($Variant -eq 'tensorrt' -and -not $RuntimeOnly) {
+        & $licenseGenerator `
+            -ManifestPath (Join-Path $repoRoot 'tools\tensorrt_builder\Cargo.toml') `
+            -OutputPath (Join-Path $licenseDir 'THIRD-PARTY-LICENSES-vc-tensorrt-builder.md')
+    }
 
     # 4. License + a short install/usage note. Also ship the optional model
     #    downloader beside the executables; it fetches the shared embedder + F0 models
