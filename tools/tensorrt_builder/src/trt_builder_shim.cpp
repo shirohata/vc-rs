@@ -299,6 +299,12 @@ extern "C" int trt_build_engine(
         msg.append("createInferBuilder failed\n");
         return 1;
     }
+    // TensorRT defaults to one builder thread. Keep this fixed and conservative:
+    // increasing it changes build-time CPU parallelism, not the tactic search
+    // space, while avoiding oversubscribing hosts that build engines in-process.
+    if (!builder->setMaxThreads(4)) {
+        msg.append("warning: failed to set TensorRT builder max threads to 4\n");
+    }
 #if NV_TENSORRT_MAJOR >= 11
     // TensorRT 11 removed NetworkDefinitionCreationFlag::kEXPLICIT_BATCH: every
     // network is explicit-batch (and strongly typed) by default.
