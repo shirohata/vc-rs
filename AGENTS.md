@@ -13,6 +13,13 @@ Windows, CUDA 13 / TensorRT 11. Day-to-day:
 - Prefer preallocated buffers and message passing to background workers.
 - Any change to chunking, buffering, or latency-sensitive code should be reviewed for real-time safety.
 
+## Distribution safety
+- Do not embed or ship machine-specific paths, developer-machine user names,
+  secrets, local models, caches, logs, debug artifacts, or other local state.
+- Build distributable archives only through the repository packaging scripts;
+  keep backend variants isolated and include all required third-party licenses.
+- Before publishing a package, follow [`docs/distribution.md`](docs/distribution.md).
+
 ## Comments for future coding agents
 
 When modifying non-trivial code, leave comments that help future AI agents
