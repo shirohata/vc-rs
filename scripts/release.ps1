@@ -13,12 +13,12 @@
       4. Scan each ZIP for release blockers: prohibited files, backend
          cross-contamination, build-machine paths / user names leaked into our
          own binaries, and missing required files (LICENSE, notices, binaries).
-      5. Generate a SHA-256 sidecar (<zip>.sha256) for each ZIP.
-      6. (optional, -Publish) create the annotated tag v<version> and a GitHub
-         release with all four ZIPs + their checksums attached.
+      5. (optional, -Publish) create the annotated tag v<version> and a GitHub
+         release with all four ZIPs attached. GitHub shows a SHA-256 digest for
+         each uploaded asset, so no separate checksum files are produced.
 
-    Steps 1, 3, 4, 5 are read-only / local and run by default. Step 6 is the
-    only outward-facing action and is gated behind -Publish.
+    Steps 1, 3, 4 are read-only / local and run by default. Step 5 is the only
+    outward-facing action and is gated behind -Publish.
 
     Judgement still lives with you: bumping [workspace.package].version and
     curating CHANGELOG.md are deliberately NOT automated (see docs\distribution.md
@@ -37,7 +37,7 @@
 
 .PARAMETER Publish
     Create the annotated git tag and the GitHub release. Without this switch the
-    script only verifies and checksums locally. Requires the `gh` CLI.
+    script only verifies locally. Requires the `gh` CLI.
 
 .PARAMETER Tag
     Tag name to create when publishing. Default: v<version>.
@@ -54,11 +54,11 @@
     addition to the build-machine home path and the current user name).
 
 .EXAMPLE
-    # Verify the already-built ZIPs and write checksums (no publish):
+    # Verify the already-built ZIPs (no publish):
     pwsh -File scripts/release.ps1
 
 .EXAMPLE
-    # Build everything, verify, checksum, then publish a draft release:
+    # Build everything, verify, then publish a draft release:
     . scripts/activate.ps1
     pwsh -File scripts/release.ps1 -Build -Publish -Draft
 #>
@@ -244,23 +244,11 @@ if ($allViolations.Count -gt 0) {
 }
 Write-Host "==> Scan clean (no prohibited files, cross-contamination, or leaked paths)" -ForegroundColor Green
 
-# ---- 5. checksums ----------------------------------------------------------
-
-$checksums = foreach ($zip in $zips) {
-    $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
-    $sidecar = "$zip.sha256"
-    # Standard `sha256sum` format: "<hash>  <filename>" so external tools can verify.
-    "$hash  $([System.IO.Path]::GetFileName($zip))" | Set-Content -LiteralPath $sidecar -Encoding ASCII
-    Write-Host ("    {0}  {1}" -f $hash, [System.IO.Path]::GetFileName($zip))
-    [pscustomobject]@{ Zip = $zip; Sha256 = $sidecar }
-}
-Write-Host "==> Wrote SHA-256 sidecars" -ForegroundColor Green
-
-# ---- 6. optional publish ---------------------------------------------------
+# ---- 5. optional publish ---------------------------------------------------
 
 if (-not $Publish) {
     Write-Host ''
-    Write-Host "==> Verified and checksummed. Re-run with -Publish to tag and create the GitHub release." -ForegroundColor Cyan
+    Write-Host "==> Verified. Re-run with -Publish to tag and create the GitHub release." -ForegroundColor Cyan
     return
 }
 
@@ -283,8 +271,9 @@ Write-Host "==> Pushing tag $Tag to $Remote" -ForegroundColor Cyan
 git -C $repoRoot push $Remote $Tag
 if ($LASTEXITCODE -ne 0) { throw "git push tag failed (exit $LASTEXITCODE)" }
 
-$assets = @()
-foreach ($c in $checksums) { $assets += $c.Zip; $assets += $c.Sha256 }
+# GitHub shows a SHA-256 digest for each uploaded asset, so only the ZIPs are
+# attached — no separate checksum sidecars.
+$assets = @($zips)
 
 $notesArgs = @()
 $changelog = Join-Path $repoRoot 'CHANGELOG.md'

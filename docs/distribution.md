@@ -104,12 +104,12 @@ To prepare a release:
 ## Pre-Publish Check
 
 [`../scripts/release.ps1`](../scripts/release.ps1) (`just release`) automates the
-mechanical gate — steps 1, 3, 4, and 7 below — across all four ZIPs: it confirms
-the canonical archives exist (or builds them with `-Build`), scans each for
+mechanical gate — steps 1, 3, and 4 below — across all four ZIPs: it confirms the
+canonical archives exist (or builds them with `-Build`) and scans each for
 prohibited files, backend cross-contamination, missing required files, and
-build-machine paths/user names leaked into our own binaries, then writes a
-`.sha256` sidecar per ZIP. It treats any finding as a blocker and refuses to
-continue. The remaining steps (2, 5, 6) are manual judgement/runtime checks.
+build-machine paths/user names leaked into our own binaries. It treats any
+finding as a blocker and refuses to continue. The remaining steps (2, 5, 6) are
+manual judgement/runtime checks.
 
 Before publishing each final ZIP:
 
@@ -129,8 +129,9 @@ Before publishing each final ZIP:
    environment.
 6. Test on a machine or environment that does not rely on the build machine's
    SDK paths, caches, or environment variables.
-7. Generate and publish a SHA-256 checksum for the final ZIP. (Automated by
-   `release.ps1`.)
+
+GitHub shows a SHA-256 digest for each uploaded release asset, so no separate
+checksum files are produced or attached.
 
 ## Publish
 
@@ -140,9 +141,9 @@ Once every variant's ZIP has passed the Pre-Publish Check:
    [`../CHANGELOG.md`](../CHANGELOG.md) entry for this version is finalized and
    committed (see [Versioning](#versioning)).
 2. Run `scripts/release.ps1 -Publish` (`just release -Publish`). It re-runs the
-   scan and checksums, creates the annotated tag `v<version>` on the current
-   commit, pushes it, and creates the GitHub release with all four ZIPs and their
-   `.sha256` files attached. The tag matches the `v<version>` in the archive
+   scan, creates the annotated tag `v<version>` on the current commit, pushes it,
+   and creates the GitHub release with all four ZIPs attached (GitHub displays a
+   SHA-256 digest per asset). The tag matches the `v<version>` in the archive
    names. Use `-Draft` to review the release before it goes public.
 3. Trim the release notes to this version's `CHANGELOG.md` section (the script
    seeds them from the whole file) and confirm the not-code-signed Windows
@@ -157,8 +158,8 @@ introduced.
 The packaging scripts provide important safeguards, including release stripping,
 Rust path remapping, fresh VST3 staging, variant-specific population, exact
 per-binary Rust license generation, and required redistributable license
-collection. `release.ps1` adds the publish gate: scanning the final ZIPs and
-generating checksums before tagging and releasing.
+collection. `release.ps1` adds the publish gate: scanning the final ZIPs before
+tagging and releasing.
 
 Review these known limitations before release:
 
