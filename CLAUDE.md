@@ -6,17 +6,23 @@ rules — those apply in full and are not repeated here).
 
 ## What this project is
 
-`vc-rs` is a Rust **RVC (Retrieval-based Voice Conversion)** voice changer. It
-converts microphone input or WAV files into another voice using ONNX-format RVC
-models. Two front-ends share one inference pipeline:
+`vc-rs` is a Rust **RVC (Retrieval-based Voice Conversion)** voice changer (ONNX
+models; mic or WAV → another voice). The user-facing overview, downloads, and
+end-user usage live in [`README.md`](README.md) / [`README.en.md`](README.en.md)
+— this file is AI-specific build & architecture guidance and does not repeat
+them.
 
+Three front-ends share one inference pipeline (`vc-core`), Windows-first (x64):
+
+- **GUI** (`vc-gui.exe`, crate `vc-gui`) — standalone desktop app (eframe/egui).
 - **CLI** (`vc-rs.exe`, crate `vc-cli`) — real-time mic→speaker and WAV→WAV.
 - **VST3 plugin** (`vc-vst3.vst3`, crate `vc-vst3`) — loads into a DAW.
 
-The project is Windows-first (x64). Distribution targets two GPU/inference
-backends: **Windows ML** (via Windows App SDK Runtime, broad GPU support incl.
-DirectML) and **native TensorRT** (NVIDIA-only, self-contained runtime). A
-`cuda` ONNX Runtime EP feature exists for local dev but is no longer packaged.
+The two standalone front-ends (GUI + CLI) share `vc-app` for device I/O and the
+realtime worker. Inference backends: **Windows ML** (Windows App SDK Runtime,
+broad GPU support incl. DirectML) and **native TensorRT** (NVIDIA-only,
+self-contained); ORT and native TensorRT never share a process. A `cuda` ONNX
+Runtime EP feature exists for local dev but is no longer packaged.
 
 ## Workspace layout
 
@@ -24,8 +30,10 @@ Cargo workspace (`resolver = "2"`); `tools/tensorrt_builder` is excluded.
 
 | Crate | Path | Role |
 | --- | --- | --- |
-| `vc-core` | `crates/vc-core` | Audio-I/O-agnostic engine: RVC pipeline, DSP, SOLA/PSOLA, providers. Both front-ends depend on it. |
-| `vc-cli` | `crates/vc-cli` | CLI binary `vc-rs`; owns CPAL/WASAPI device I/O and the real-time engine worker. |
+| `vc-core` | `crates/vc-core` | Audio-I/O-agnostic engine: RVC pipeline, DSP, SOLA/PSOLA, providers. Every front-end depends on it. |
+| `vc-app` | `crates/vc-app` | Shared realtime runtime for the standalone front-ends: CPAL/WASAPI device I/O + the engine worker thread (`EngineController` / `RealtimeConfig` in `realtime.rs`). |
+| `vc-cli` | `crates/vc-cli` | CLI binary `vc-rs` (clap); diagnostics, realtime, and WAV conversion driving `vc-app`. |
+| `vc-gui` | `crates/vc-gui` | Standalone desktop GUI (`vc-gui.exe`, eframe/egui) driving `vc-app`. |
 | `vc-vst3` | `crates/vc-vst3` | VST3 plugin (nice-plug + egui); feeds the pipeline from the host `process()` callback. |
 | `xtask` | `xtask` | `cargo xtask bundle …` plugin bundler (nice-plug-xtask). |
 
@@ -43,9 +51,10 @@ Cargo workspace (`resolver = "2"`); `tools/tensorrt_builder` is excluded.
 - `windows_ml` — Windows ML catalog EP support (Windows + `windowsml` only).
 
 Changes to chunk sizing, model context, smoothing, or output latency usually
-cross `engine` (in `vc-cli`), `model_rvc`, `sola`, and `dsp` — review together.
-See [`docs/architecture.md`](docs/architecture.md) for the full data-flow and
-the realtime/worker boundary (the canonical design doc).
+cross the realtime worker (`EngineController`/`realtime.rs` in `vc-app`),
+`model_rvc`, `sola`, and `dsp` — review together. See
+[`docs/architecture.md`](docs/architecture.md) for the full data-flow and the
+realtime/worker boundary (the canonical design doc).
 
 ## Feature flags (inference backends)
 
@@ -60,10 +69,11 @@ TensorRT never share a process:
   engines via TensorRT's builder API (not the ORT TensorRT EP).
 - `vc-core/clap` — derives `clap::ValueEnum` on shared enums (CLI only).
 
-Front-end defaults: `vc-cli` defaults to `["windowsml","tensorrt"]` (one dev
-binary covers both; default provider falls back to `cpu`). `vc-vst3` defaults to
-`["windowsml"]`. Distribution packages build single-provider variants with
-`--no-default-features --features windowsml|tensorrt`.
+Front-end defaults: `vc-app`, `vc-cli`, and `vc-gui` default to
+`["windowsml","tensorrt"]` (one dev binary covers both; the CLI's default
+provider falls back to `cpu`). `vc-vst3` defaults to `["windowsml"]`.
+Distribution packages build single-provider variants with `--no-default-features
+--features windowsml|tensorrt`.
 
 > ⚠️ Build the plugin **package-scoped**: `cargo xtask bundle vc-vst3 …`, not
 > `cargo build --workspace`. A whole-workspace build unifies features and would
@@ -84,7 +94,7 @@ bootstrap it directly with `pwsh -File scripts/bootstrap.ps1`.)
 just setup              # one-time: Rust, Git, MSVC C++, just (winget scope)
 just test               # full workspace tests (activates GPU stack)
 just test-cpu           # fast tests, no GPU stack (VC_RS_ENABLE_NATIVE_TENSORRT=0)
-just build              # dev CLI (both backends)
+just build              # dev CLI + GUI, whole workspace (both backends)
 just bundle             # VST3, Windows ML   (just bundle tensorrt for the TRT variant)
 just verify             # tests + bundle smoke test
 just package            # build the shipped distribution zips
@@ -94,7 +104,7 @@ Underlying raw commands (what the recipes run):
 
 ```powershell
 . scripts/activate.ps1          # per shell session: CUDA/cuDNN/TensorRT on PATH
-cargo build --release           # CLI (vc-rs.exe)
+cargo build --release           # whole workspace: CLI (vc-rs.exe) + GUI (vc-gui.exe)
 cargo xtask bundle vc-vst3 --release                                   # VST3, Windows ML
 cargo xtask bundle vc-vst3 --release --no-default-features --features tensorrt
 cargo test --workspace
@@ -107,16 +117,6 @@ pwsh -File scripts/verify.ps1   # cargo test + bundle smoke test
 
 First-time SDK setup, packaging, and env details: [`scripts/README.md`](scripts/README.md)
 and [`docs/development_ja.md`](docs/development_ja.md).
-
-## CLI commands
-
-`devices` (list audio devices), `inspect --model x.onnx` (ONNX I/O + metadata,
-backend-independent), `windowsml-eps list|install` (Windows + windowsml only),
-`engine-cache info|clear` (size/clear the shared TensorRT + WinML-TensorRT-RTX
-engine cache at `%LOCALAPPDATA%\vc-rs\tensorrt-cache`), `run` (real-time
-mic→speaker), `wav` (file→file, same pipeline for deterministic testing). Key params: `--provider`, `--chunk-ms`, `--extra-convert-ms`,
-`--speaker-id`, `--pitch-shift`, `--input/output-gain`, `--rms-mix-rate`.
-Full usage is in [`README.md`](README.md).
 
 ## VST3 plugin notes
 

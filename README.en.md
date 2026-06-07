@@ -6,9 +6,12 @@
 WAV files into another voice using an ONNX-format RVC model. There are three ways
 to use it:
 
-- **GUI (`vc-gui.exe`)** — the desktop app for standalone use.
-- **Bundled CLI (`vc-rs.exe`)** — for diagnostics, automation, real-time
-  conversion, and WAV file conversion.
+- **GUI (`vc-gui.exe`)** — the desktop app for standalone use. **Most people only
+  need this.**
+- **Bundled CLI (`vc-rs.exe`)** — a command-line tool shipped with the GUI
+  package, for batch WAV conversion, diagnostics, Windows ML EP management,
+  automation, and other things the GUI doesn't do. See
+  [`docs/cli.md`](docs/cli.md).
 - **VST3 plugin (`vc-vst3.vst3`)** — a plugin you load into your DAW.
 
 Prebuilt Windows packages are distributed. **You do not need to build from
@@ -67,16 +70,16 @@ Windows (x64). There are four, depending on your front-end and hardware:
 
 Items 2 and 3 can be fetched with the bundled `download-models.ps1` (see below).
 
-## Usage (GUI + CLI)
+## Usage (GUI)
 
 1. Extract the downloaded zip (**keep the DLLs in the same folder as
-   `vc-gui.exe` and `vc-rs.exe`**).
-2. Launch `vc-gui.exe` for normal use. To use the CLI, open PowerShell in that
-   folder.
+   `vc-gui.exe`**).
+2. Fetch the embedder and F0 models (see *Prepare models* below).
+3. Launch `vc-gui.exe`.
 
 ### Prepare models
 
-Fetch the embedder and F0 models (run from this folder):
+Fetch the embedder and F0 models (run from the extracted folder):
 
 ```powershell
 pwsh .\download-models.ps1
@@ -90,44 +93,58 @@ still supply your own RVC voice model (`.onnx`).
 > before using, modifying, or redistributing them. See the notes inside
 > `download-models.ps1`.
 
-### List devices
+### Working in the window
 
-```powershell
-.\vc-rs.exe devices
-```
+1. **Models** — **Browse** for the RVC model, embedder (ContentVec), and F0
+   (RMVPE) `.onnx` files.
+2. **Provider** — choose the backend (windowsml package: `windowsml` /
+   `windowsml-directml` / `windowsml-nvtrtx` / `windowsml-cpu` / `cpu`; tensorrt
+   package: `tensorrt`). **GPU Priority** is selectable too.
+3. **Audio** — pick the input/output devices (**Refresh devices** to re-scan).
+   Leave blank to use "System default".
+4. **Engine configuration** — set **Chunk ms** / **Extra convert ms** (see
+   *Tuning real-time settings*).
+5. Press **Apply / Start** to apply and start. **Model / Provider / device /
+   Chunk edits do not take effect until you press it.** **Stop** stops the
+   engine.
+6. **Live parameters** (Pitch shift / Speaker ID / Input gain / Output gain)
+   apply in real time.
+7. **Telemetry** shows inference time, input/output RMS, and overruns/underruns
+   so you can watch for dropouts and load (inference time is color-flagged when
+   it exceeds the chunk budget).
 
-### Real-time conversion
+Settings are saved automatically (`%APPDATA%\vc-rs\gui.toml`) and restored on the
+next launch. A **Passthrough** toggle (no conversion) is available for checking
+the signal path.
 
-```powershell
-.\vc-rs.exe run --model <your-rvc-model>.onnx `
-    --embedder .\assets\content_vec_500.onnx `
-    --f0-model .\assets\rmvpe.onnx `
-    --input "Microphone" --output "Speakers" `
-    --chunk-ms 500 --extra-convert-ms 100 `
-    --provider windowsml --speaker-id 0
-```
+## Tuning real-time settings
 
-For `--input` / `--output`, pass a substring of a device name shown by
-`devices`. On a tensorrt package, use `--provider tensorrt`.
+Balance dropouts, latency, and CPU/GPU load with **Chunk ms** and **Extra convert
+ms**.
 
-### WAV file conversion
+- **Chunk ms**: how much audio is processed per pass. Increase it if you hear
+  dropouts or see sustained load (`500` → `750` → `1000`). Larger is more stable
+  but adds input-to-output latency. GPU execution can often use smaller values.
+- **Extra convert ms**: amount of surrounding context fed to conversion. Larger
+  can be more stable but costs more. Start around `100` ms.
 
-```powershell
-.\vc-rs.exe wav --model <your-rvc-model>.onnx `
-    --embedder .\assets\content_vec_500.onnx `
-    --f0-model .\assets\rmvpe.onnx `
-    --input input.wav --output out.wav `
-    --provider windowsml --speaker-id 0
-```
+When tuning, **first find a value with no dropouts, then lower Chunk ms** to
+reduce latency. Pitch / Speaker / Input·Output gain can be adjusted anytime under
+Live parameters.
 
-### Inspect a model
+## The bundled CLI (advanced)
 
-```powershell
-.\vc-rs.exe inspect --model <your-rvc-model>.onnx
-```
+The GUI + CLI packages bundle the `vc-rs.exe` CLI. Everyday conversion is fully
+covered by the GUI, but the CLI adds things the **GUI doesn't do**:
 
-`inspect` is backend-independent and shows a model's inputs, outputs, and
-metadata.
+- **Batch WAV-file conversion** (the GUI is real-time only).
+- **Diagnostics and model inspection** (`doctor` / `devices` / `inspect`).
+- **Listing/installing Windows ML execution providers (EPs)** and **engine-cache
+  management**.
+- **Automation/scripting** and the finer DSP/audio parameters the GUI keeps
+  pinned.
+
+For usage and the command list, see [`docs/cli.md`](docs/cli.md).
 
 ## Usage (VST3 plugin)
 
@@ -152,49 +169,7 @@ metadata.
 Model paths and settings are saved per project/preset. For details see
 [`crates/vc-vst3/README.md`](crates/vc-vst3/README.md).
 
-## Tuning real-time settings
-
-Balance dropouts, latency, and CPU/GPU load with `--chunk-ms` and
-`--extra-convert-ms` (chunk size in the VST3 GUI).
-
-- `--chunk-ms`: how much audio is processed per pass. Increase it if you hear
-  dropouts or see sustained load (`500` → `750` → `1000`). Larger is more
-  stable but adds input-to-output latency. GPU execution can often use smaller
-  values.
-- `--extra-convert-ms`: amount of surrounding context fed to conversion. Larger
-  can be more stable but costs more. Start around `100` ms.
-
-When tuning, **first find a value with no dropouts, then lower `--chunk-ms`** to
-reduce latency.
-
-Key conversion parameters:
-
-- `--speaker-id 0`: speaker ID for multi-speaker models (default: 0).
-- `--pitch-shift 0.0`: shift F0 in semitones (default: 0.0). `12.0` is one
-  octave up, `-12.0` one octave down.
-- `--input-gain 1.0` / `--output-gain 1.0`: gain applied to input/output
-  (default: 1.0). Raise if too quiet; raising too much clips.
-- `--silence-threshold 0.0001`: threshold below which input is treated as
-  silence.
-- `--rms-mix-rate <0.0-1.0>`: closer to 0.0 follows the input loudness contour;
-  closer to 1.0 keeps the model output loudness (default: 0.0).
-
-## Windows ML execution providers (windowsml packages)
-
-With `--provider windowsml`, vc-rs prefers Windows ML catalog EPs, then falls
-back to DirectML, then CPU. To force a specific EP use `windowsml-nvtrtx` /
-`windowsml-qnn` / `windowsml-openvino` / `windowsml-migraphx` /
-`windowsml-vitisai` (no fallback — fails if the EP is absent or not ready).
-
-You can inspect and install catalog EPs from the CLI:
-
-```powershell
-.\vc-rs.exe windowsml-eps list
-.\vc-rs.exe windowsml-eps install            # auto-select the best EP
-.\vc-rs.exe windowsml-eps install --provider nvtrtx --yes
-```
-
-## TensorRT execution (tensorrt packages)
+## TensorRT notes (tensorrt packages)
 
 The tensorrt packages run on the **bundled TensorRT runtime**, so no extra
 install beyond the NVIDIA driver is needed.
@@ -203,14 +178,16 @@ install beyond the NVIDIA driver is needed.
 > shape changes**, which can make startup very slow. Later runs reuse the engine
 > cache and start faster.
 
-For detailed performance characteristics see
+For engine-cache location/size and clearing (the CLI `engine-cache` command) and
+detailed performance characteristics, see [`docs/cli.md`](docs/cli.md) and
 [`docs/tensorrt_performance_ja.md`](docs/tensorrt_performance_ja.md).
 
 ## Troubleshooting / FAQ
 
 **Q. A windowsml package won't start / model loading fails.**
 A. Confirm the **Windows App SDK Runtime (2.x)** is installed (see
-*Requirements*).
+*Requirements*). The bundled CLI's `.\vc-rs.exe doctor` diagnoses the runtime
+dependencies needed to run.
 
 **Q. Running the exe triggers a SmartScreen warning.**
 A. The distributed binaries are not code-signed, so Windows may warn. Review,
@@ -228,7 +205,7 @@ A. RVC voice models must be **`.onnx`**. Convert with RVC tools or VCClient
 first.
 
 **Q. Real-time audio drops out or latency is high.**
-A. See *Tuning real-time settings*. Raise `--chunk-ms` until dropouts stop, then
+A. See *Tuning real-time settings*. Raise Chunk ms until dropouts stop, then
 reduce latency.
 
 ## Helper script

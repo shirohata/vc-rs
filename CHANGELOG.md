@@ -12,6 +12,8 @@ versioning and publishing procedure.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-06-07
+
 ### Added
 
 - Standalone GUI app (`vc-gui.exe`) backed by a shared realtime runtime, shipped
@@ -25,6 +27,8 @@ versioning and publishing procedure.
 - Refined GUI runtime controls and diagnostics.
 - Capped the TensorRT builder at 4 max threads.
 - Distribution packaging now generates exact per-binary Rust license notices.
+- TensorRT packages always bundle every GPU builder resource for full
+  compatibility (removed the `-BuilderSm` packaging option).
 
 ### Fixed
 
@@ -32,7 +36,10 @@ versioning and publishing procedure.
 
 ### Docs
 
-- Added distribution safety guidance ([`docs/distribution.md`](docs/distribution.md)).
+- Added distribution safety guidance, versioning, and publishing procedure
+  ([`docs/distribution.md`](docs/distribution.md)).
+- Added a release verification/publish script (`scripts/release.ps1`) and this
+  changelog.
 
 ## [0.1.0] - 2026-06-05
 
@@ -50,5 +57,6 @@ Initial release.
 - One-shot distribution packaging scripts for all four Windows x64 variants.
 - Auto-generated bundled third-party license notices during packaging.
 
-[Unreleased]: https://github.com/shirohata/vc-rs/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/shirohata/vc-rs/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/shirohata/vc-rs/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/shirohata/vc-rs/releases/tag/v0.1.0
