@@ -26,13 +26,15 @@ TensorRT install.
 
 | Component | DLLs | License |
 |---|---|---|
-| NVIDIA TensorRT | `nvinfer_<N>.dll`, `nvinfer_plugin_<N>.dll`, `nvonnxparser_<N>.dll`, `nvinfer_builder_resource_sm*_<N>.dll` | NVIDIA TensorRT license — see `TensorRT-LICENSE.txt` |
+| NVIDIA TensorRT | `nvinfer_<N>.dll`, `nvinfer_plugin_<N>.dll`, `nvonnxparser_<N>.dll`, `nvinfer_builder_resource_sm*_<N>.dll` | [NVIDIA TensorRT SDK License Agreement](https://docs.nvidia.com/deeplearning/tensorrt/latest/reference/sla.html) |
 | NVIDIA CUDA Runtime | `cudart64_<M>.dll` | NVIDIA CUDA Toolkit EULA (redistributable runtime) — see `CUDA-EULA.txt` |
 
 Notes:
 
-- `TensorRT-LICENSE.txt` and `CUDA-EULA.txt` are copied from the matching local
-  installs by `package-tensorrt.ps1`; packaging fails if either is unavailable.
+- `CUDA-EULA.txt` is copied from the matching local CUDA install by
+  `package-tensorrt.ps1`; packaging fails if it is unavailable.
+- The TensorRT SDK agreement permits redistribution of runtime `.dll` files
+  under its distribution requirements; review the linked terms before shipping.
 - The NVIDIA runtime libraries are redistributable under the terms of those
   agreements. Review them before redistributing this build.
 - An up-to-date NVIDIA GPU **driver** is still required on the end-user machine

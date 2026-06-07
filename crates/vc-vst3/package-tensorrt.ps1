@@ -189,6 +189,14 @@ if (-not $CudaBin) {
 }
 $CudaBin = Resolve-Required $CudaBin 'CudaBin (set CUDA_PATH or pass -CudaBin)'
 
+# CUDA's local EULA is copied into the package. TensorRT's SDK distribution
+# terms are linked from THIRD-PARTY-NOTICES.md because NVIDIA's zip packages do
+# not consistently include a standalone license file.
+$cudaRoot = Split-Path $CudaBin -Parent
+if ((Split-Path $CudaBin -Leaf) -eq 'x64') { $cudaRoot = Split-Path $cudaRoot -Parent }
+$cudaLic = Find-LicenseText $cudaRoot
+if (-not $cudaLic) { throw "CUDA license/EULA not found under $cudaRoot." }
+
 # CUDA 13 moved the redistributable runtime DLLs from <toolkit>\bin into
 # <toolkit>\bin\x64; CUDA 12 keeps them directly in bin. Search both.
 $cudartDll = @($CudaBin, (Join-Path $CudaBin 'x64')) |
@@ -277,16 +285,6 @@ foreach ($dest in $dests) {
         Copy-Item -Path (Join-Path $licenseSrc 'THIRD-PARTY-NOTICES.md') -Destination $licDest -Force
     }
 
-    # The redistributed TensorRT and CUDA runtime DLLs must travel with their
-    # matching license/EULA texts. Missing material is a packaging failure.
-    $trtRoot = Split-Path $TensorRtBin -Parent
-    $trtLic = Find-LicenseText $trtRoot
-    if (-not $trtLic) { throw "TensorRT license/EULA not found under $trtRoot." }
-    $cudaRoot = Split-Path $CudaBin -Parent
-    if ((Split-Path $CudaBin -Leaf) -eq 'x64') { $cudaRoot = Split-Path $cudaRoot -Parent }
-    $cudaLic = Find-LicenseText $cudaRoot
-    if (-not $cudaLic) { throw "CUDA license/EULA not found under $cudaRoot." }
-    Copy-Item $trtLic.FullName (Join-Path $licDest 'TensorRT-LICENSE.txt') -Force
     Copy-Item $cudaLic.FullName (Join-Path $licDest 'CUDA-EULA.txt') -Force
 }
 

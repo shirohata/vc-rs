@@ -71,7 +71,8 @@ In particular, verify:
   `vc-tensorrt-builder.exe`.
 - Windows ML packages include the license matching the redistributed Windows
   App SDK bootstrapper.
-- TensorRT packages include the applicable NVIDIA license or EULA text.
+- TensorRT packages link the official NVIDIA TensorRT SDK License Agreement and
+  include the CUDA EULA copied from the selected CUDA install.
 
 ## Pre-Publish Check
 

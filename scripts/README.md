@@ -126,6 +126,10 @@ Packaging requires `cargo-about` so each staged binary receives a notice for its
 exact package and backend feature set. Ordinary builds, tests, validation, and
 local install workflows do not require it.
 
+TensorRT packages link the official NVIDIA TensorRT SDK License Agreement from
+their third-party notice because NVIDIA's SDK archives do not consistently
+include a standalone agreement file.
+
 Alongside each `.zip`, a populated, ready-to-run `dist\<stem>\` folder (binary +
 DLLs + licenses) is left in place for quick local testing — kept by default for
 the windowsml variants and removed for tensorrt (which can be multiple GB). All
