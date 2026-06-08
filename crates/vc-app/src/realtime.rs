@@ -282,6 +282,10 @@ pub struct EngineController {
 
 impl EngineController {
     pub fn new(initial_live: LiveParams) -> Self {
+        // Standalone front-ends (GUI/CLI) may auto-download a missing Windows ML
+        // catalog EP during model load; the VST3 plugin does not opt in.
+        #[cfg(all(windows, feature = "windowsml"))]
+        vc_core::windows_ml::set_ep_download_allowed(true);
         let (tx, rx) = mpsc::sync_channel(COMMAND_CAPACITY);
         let status = Arc::new(Mutex::new(EngineStatusSnapshot::default()));
         let devices = Arc::new(Mutex::new(DeviceList::default()));
@@ -366,6 +370,18 @@ fn control_loop(
                     EngineState::Starting,
                     "Loading model and audio devices",
                 );
+                // Surface a distinct status while a Windows ML EP downloads on
+                // first use: the registration that triggers the (blocking,
+                // possibly multi-minute) download happens inside the model load
+                // below, so detect it here and update the message beforehand.
+                #[cfg(all(windows, feature = "windowsml"))]
+                if vc_core::windows_ml::provider_download_pending(config.provider) {
+                    set_status(
+                        &status,
+                        EngineState::Starting,
+                        "Downloading execution provider… first run can take a few minutes",
+                    );
+                }
                 telemetry.reset();
                 match RealtimeSession::start(config, Arc::clone(&telemetry), Arc::clone(&live)) {
                     Ok(new_session) => {

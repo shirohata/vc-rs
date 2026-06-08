@@ -7,6 +7,7 @@
 
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -74,12 +75,31 @@ unsafe impl Send for BootstrapState {}
 unsafe impl Sync for BootstrapState {}
 
 static WINDOWS_ML_BOOTSTRAP: OnceLock<Result<BootstrapState, String>> = OnceLock::new();
-static CATALOG_EP: OnceLock<Result<Option<CatalogExecutionProvider>, String>> = OnceLock::new();
-static CATALOG_NV_TENSORRT_RTX_EP: OnceLock<Result<bool, String>> = OnceLock::new();
-static CATALOG_QNN_EP: OnceLock<Result<bool, String>> = OnceLock::new();
-static CATALOG_OPENVINO_EP: OnceLock<Result<bool, String>> = OnceLock::new();
-static CATALOG_MIGRAPHX_EP: OnceLock<Result<bool, String>> = OnceLock::new();
-static CATALOG_VITISAI_EP: OnceLock<Result<bool, String>> = OnceLock::new();
+// Cache only *successful* registration. Negative results (NotPresent / errors)
+// must never be memoized: an explicit windowsml-* provider can trigger an EP
+// download, after which a later load in the same process must be able to
+// register the now-Ready EP instead of seeing a stale failure. (A populated cell
+// therefore means "already registered" and short-circuits.)
+static BEST_CATALOG_EP: OnceLock<CatalogExecutionProvider> = OnceLock::new();
+static CATALOG_NV_TENSORRT_RTX_EP: OnceLock<()> = OnceLock::new();
+static CATALOG_QNN_EP: OnceLock<()> = OnceLock::new();
+static CATALOG_OPENVINO_EP: OnceLock<()> = OnceLock::new();
+static CATALOG_MIGRAPHX_EP: OnceLock<()> = OnceLock::new();
+static CATALOG_VITISAI_EP: OnceLock<()> = OnceLock::new();
+
+// Process-wide policy: may a model load download a missing Windows ML catalog EP
+// on demand? Default off so the VST3 plugin keeps its report-only behavior
+// (a multi-minute blocking download triggered from a DAW is undesirable). The
+// standalone front-ends (GUI/CLI via vc-app) opt in with `set_ep_download_allowed`.
+static EP_DOWNLOAD_ALLOWED: AtomicBool = AtomicBool::new(false);
+
+/// Allow (or forbid) on-demand download of a missing Windows ML catalog EP
+/// during model load for an explicit `windowsml-*` provider. Set once at
+/// front-end startup; the explicit CLI `windows-ml-eps install` command downloads
+/// regardless of this flag.
+pub fn set_ep_download_allowed(allowed: bool) {
+    EP_DOWNLOAD_ALLOWED.store(allowed, Ordering::Relaxed);
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CatalogExecutionProvider {
@@ -169,17 +189,31 @@ pub(crate) fn ensure_initialized() -> Result<()> {
 
 pub(crate) fn try_register_best_catalog_ep() -> Result<Option<CatalogExecutionProvider>> {
     ensure_initialized()?;
-    let ep = CATALOG_EP.get_or_init(register_best_catalog_ep);
-    ep.as_ref().copied().map_err(|err| anyhow!(err.clone()))
+    if let Some(ep) = BEST_CATALOG_EP.get() {
+        return Ok(Some(*ep));
+    }
+    // Auto never downloads: it registers a catalog EP only if the platform
+    // already has one ready, otherwise it falls back to DirectML/CPU. Explicit
+    // windowsml-* providers (try_register_catalog_ep) own the download path.
+    let selected = register_best_catalog_ep_inner()?;
+    if let Some(ep) = selected {
+        let _ = BEST_CATALOG_EP.set(ep);
+    }
+    Ok(selected)
 }
 
 pub(crate) fn try_register_catalog_ep(provider: CatalogExecutionProvider) -> Result<bool> {
     ensure_initialized()?;
-    let registered = catalog_ep_cache(provider).get_or_init(|| register_catalog_ep(provider));
-    registered
-        .as_ref()
-        .copied()
-        .map_err(|err| anyhow!(err.clone()))
+    if catalog_ep_cache(provider).get().is_some() {
+        return Ok(true);
+    }
+    // Explicit provider: download/prepare the EP when the catalog lists it but it
+    // is not yet Ready. Only a successful registration is cached.
+    let registered = register_catalog_ep_inner(provider)?;
+    if registered {
+        let _ = catalog_ep_cache(provider).set(());
+    }
+    Ok(registered)
 }
 
 pub fn list_catalog_providers() -> Result<Vec<CatalogProviderInfo>> {
@@ -233,6 +267,50 @@ pub fn ensure_catalog_provider_ready(
     })
 }
 
+/// Read a catalog EP's ready state without downloading or registering anything.
+///
+/// Front-ends call this to decide whether a model load will block on a
+/// (possibly multi-minute) EP download, so they can surface a "downloading"
+/// status before the blocking registration. Returns `NotPresent` when the EP is
+/// not listed for this device.
+pub fn catalog_provider_ready_state(
+    provider: CatalogExecutionProvider,
+) -> Result<CatalogReadyState> {
+    ensure_initialized()?;
+    with_catalog(|api, catalog| {
+        match find_catalog_candidate(api, catalog, provider)? {
+            Some(found) => {
+                let mut state = 0;
+                check_hr(
+                    unsafe { (api.get_ready_state)(found.handle, &mut state) },
+                    "WinMLEpGetReadyState",
+                )?;
+                Ok(CatalogReadyState::from_raw(state))
+            }
+            None => Ok(CatalogReadyState::NotPresent),
+        }
+    })
+}
+
+/// Best-effort: true if loading `provider` will trigger a Windows ML catalog EP
+/// download/preparation because its EP is listed but not yet `Ready`. Returns
+/// false for providers without a catalog EP, or when the state cannot be read
+/// (the load path will surface the real error).
+pub fn provider_download_pending(provider: crate::Provider) -> bool {
+    let ep = match provider {
+        crate::Provider::WindowsMlNvTensorRtRtx => CatalogExecutionProvider::NvTensorRtRtx,
+        crate::Provider::WindowsMlOpenVino => CatalogExecutionProvider::OpenVino,
+        crate::Provider::WindowsMlQnn => CatalogExecutionProvider::Qnn,
+        crate::Provider::WindowsMlMiGraphX => CatalogExecutionProvider::MiGraphX,
+        crate::Provider::WindowsMlVitisAi => CatalogExecutionProvider::VitisAi,
+        _ => return false,
+    };
+    matches!(
+        catalog_provider_ready_state(ep),
+        Ok(CatalogReadyState::NotPresent | CatalogReadyState::NotReady)
+    )
+}
+
 fn initialize() -> Result<BootstrapState, String> {
     initialize_inner().map_err(|err| format!("{err:#}"))
 }
@@ -272,14 +350,11 @@ fn initialize_inner() -> Result<BootstrapState> {
     Ok(BootstrapState { _module: module })
 }
 
-fn register_best_catalog_ep() -> Result<Option<CatalogExecutionProvider>, String> {
-    register_best_catalog_ep_inner().map_err(|err| format!("{err:#}"))
-}
-
 fn register_best_catalog_ep_inner() -> Result<Option<CatalogExecutionProvider>> {
     with_catalog(|catalog_api, catalog| {
         for candidate in CATALOG_PRIORITY {
-            match try_register_candidate(catalog_api, catalog, candidate) {
+            // Auto path: allow_download = false (use only already-ready EPs).
+            match try_register_candidate(catalog_api, catalog, candidate, false) {
                 Ok(true) => {
                     info!(
                         "registered Windows ML catalog EP {}",
@@ -300,10 +375,6 @@ fn register_best_catalog_ep_inner() -> Result<Option<CatalogExecutionProvider>> 
     })
 }
 
-fn register_catalog_ep(provider: CatalogExecutionProvider) -> Result<bool, String> {
-    register_catalog_ep_inner(provider).map_err(|err| format!("{err:#}"))
-}
-
 fn register_catalog_ep_inner(provider: CatalogExecutionProvider) -> Result<bool> {
     with_catalog(|catalog_api, catalog| {
         let mut saw_candidate = false;
@@ -312,7 +383,11 @@ fn register_catalog_ep_inner(provider: CatalogExecutionProvider) -> Result<bool>
             .filter(|candidate| candidate.provider == provider)
         {
             saw_candidate = true;
-            match try_register_candidate(catalog_api, catalog, candidate) {
+            // Explicit path: download a listed-but-absent EP only if the
+            // front-end opted in (GUI/CLI). VST3 leaves the flag off and gets
+            // the report-only "not present" error instead.
+            let allow_download = EP_DOWNLOAD_ALLOWED.load(Ordering::Relaxed);
+            match try_register_candidate(catalog_api, catalog, candidate, allow_download) {
                 Ok(true) => {
                     info!(
                         "registered Windows ML catalog EP {}",
@@ -351,7 +426,7 @@ fn with_catalog<T>(f: impl FnOnce(&CatalogApi, WinMLEpCatalogHandle) -> Result<T
     f(&catalog_api, catalog)
 }
 
-fn catalog_ep_cache(provider: CatalogExecutionProvider) -> &'static OnceLock<Result<bool, String>> {
+fn catalog_ep_cache(provider: CatalogExecutionProvider) -> &'static OnceLock<()> {
     match provider {
         CatalogExecutionProvider::NvTensorRtRtx => &CATALOG_NV_TENSORRT_RTX_EP,
         CatalogExecutionProvider::Qnn => &CATALOG_QNN_EP,
@@ -444,6 +519,7 @@ fn try_register_candidate(
     api: &CatalogApi,
     catalog: WinMLEpCatalogHandle,
     candidate: &CatalogCandidate,
+    allow_download: bool,
 ) -> Result<bool> {
     let catalog_name = CString::new(candidate.catalog_name)?;
     let mut ep = ptr::null_mut();
@@ -457,7 +533,11 @@ fn try_register_candidate(
         unsafe { (api.get_ready_state)(ep, &mut state) },
         "WinMLEpGetReadyState",
     )?;
-    if state == 2 {
+    // NotPresent (2): the EP is listed for this device but not installed. Auto
+    // (allow_download = false) skips it so startup stays fast and falls back to
+    // DirectML; an explicit provider downloads it below via EnsureReady (which
+    // can take minutes the first time).
+    if state == 2 && !allow_download {
         return Ok(false);
     }
     check_hr(unsafe { (api.ensure_ready)(ep) }, "WinMLEpEnsureReady")?;
