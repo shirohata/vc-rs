@@ -1,5 +1,6 @@
 mod api;
 mod cache;
+mod f0_postprocess;
 mod feature;
 mod inspect;
 mod native_tensorrt;
@@ -27,6 +28,9 @@ pub use cache::{
     clear_engine_cache, engine_cache_info, engine_cache_root, ClearedEngineCache, EngineCacheEntry,
     EngineCacheInfo, ENGINE_CACHE_DIR_ENV,
 };
+// Re-exported so the standalone front-ends can name the config when building
+// `RvcPipelineConfig`; the processor itself stays private to the engine.
+pub use f0_postprocess::F0PostprocessConfig;
 pub use inspect::inspect_model;
 pub use pipeline::{RvcPipeline, RvcPipelineConfig};
 

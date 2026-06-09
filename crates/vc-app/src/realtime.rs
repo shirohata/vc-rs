@@ -10,7 +10,7 @@ use rtrb::RingBuffer;
 use thread_priority::{set_current_thread_priority, ThreadPriority};
 use vc_core::dsp;
 use vc_core::model_rvc::{
-    GpuPriority, PassthroughModel, RvcPipeline, RvcPipelineConfig, VoiceModel,
+    F0PostprocessConfig, GpuPriority, PassthroughModel, RvcPipeline, RvcPipelineConfig, VoiceModel,
 };
 use vc_core::sola::{self, ChunkSmootherConfig, SmoothingKind};
 use vc_core::Provider;
@@ -561,6 +561,9 @@ impl RealtimeSession {
                 auto_output_gain: config.auto_output_gain,
                 target_output_rms: config.target_output_rms,
                 max_output_gain: config.max_output_gain,
+                // F0 post-processing is disabled by default; GUI/CLI wiring is a
+                // separate task.
+                f0_postprocess: F0PostprocessConfig::default(),
             })?)
         };
 

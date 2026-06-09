@@ -8,7 +8,7 @@ use anyhow::{anyhow, Context, Result};
 use tracing::{debug, info};
 use vc_app::{EngineController, EngineState, LiveParams, RealtimeConfig};
 use vc_core::dsp;
-use vc_core::model_rvc::{RvcPipeline, RvcPipelineConfig, VoiceModel};
+use vc_core::model_rvc::{F0PostprocessConfig, RvcPipeline, RvcPipelineConfig, VoiceModel};
 use vc_core::sola::{self, ChunkSmootherConfig, SmoothingKind};
 
 use crate::cli::{RunArgs, Smoother, WavArgs, DEFAULT_CROSSFADE_MS, DEFAULT_SOLA_SEARCH_MS};
@@ -132,6 +132,9 @@ pub fn run_wav(args: WavArgs) -> Result<()> {
         auto_output_gain: args.auto_output_gain,
         target_output_rms: args.target_output_rms,
         max_output_gain: args.max_output_gain,
+        // F0 post-processing is disabled by default; CLI/preset wiring is a
+        // separate task.
+        f0_postprocess: F0PostprocessConfig::default(),
     })?;
     let mut output = Vec::with_capacity(samples.len());
     let mut chunks = 0usize;

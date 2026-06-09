@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use nice_plug::prelude::util;
 use rtrb::{Consumer, Producer, RingBuffer};
-use vc_core::model_rvc::{RvcPipeline, RvcPipelineConfig, VoiceModel};
+use vc_core::model_rvc::{F0PostprocessConfig, RvcPipeline, RvcPipelineConfig, VoiceModel};
 use vc_core::sola::{self, ChunkSmoother, ChunkSmootherConfig, SmoothingKind};
 
 use crate::config::PluginConfig;
@@ -493,6 +493,8 @@ impl WorkerCtx {
             auto_output_gain: settings.auto_output_gain,
             target_output_rms: settings.target_output_rms,
             max_output_gain: settings.max_output_gain,
+            // F0 post-processing is disabled by default; UI wiring is a separate task.
+            f0_postprocess: F0PostprocessConfig::default(),
         })
     }
 }

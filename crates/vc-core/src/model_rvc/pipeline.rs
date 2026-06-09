@@ -9,6 +9,7 @@ use crate::dsp;
 use crate::Provider;
 
 use super::api::{ModelOutput, VoiceModel};
+use super::f0_postprocess::{F0PostprocessConfig, F0Postprocessor};
 use super::inspect::{inspect_contentvec_input_name, inspect_rvc_model};
 use super::pitch::{
     align_pitchf_to_features_into, center_crop_pitchf_to_features_into, coarse_pitch_into,
@@ -55,6 +56,10 @@ pub struct RvcPipeline {
     pitchf_untrimmed_scratch: Vec<f32>,
     pitchf_scratch: Vec<f32>,
     pitch_scratch: Vec<i64>,
+    f0_postprocess: F0Postprocessor,
+    // Non-destructive output of `process_pitchf_into`: `pitchf_scratch` holds the
+    // aligned raw F0 input, so the post-processed result needs its own buffer.
+    pitchf_postprocessed_scratch: Vec<f32>,
 }
 
 pub struct RvcPipelineConfig<'a> {
@@ -80,6 +85,7 @@ pub struct RvcPipelineConfig<'a> {
     pub auto_output_gain: bool,
     pub target_output_rms: f32,
     pub max_output_gain: f32,
+    pub f0_postprocess: F0PostprocessConfig,
 }
 
 impl RvcPipeline {
@@ -141,6 +147,8 @@ impl RvcPipeline {
             pitchf_untrimmed_scratch: Vec::new(),
             pitchf_scratch: Vec::new(),
             pitch_scratch: Vec::new(),
+            f0_postprocess: F0Postprocessor::new(config.f0_postprocess.clone()),
+            pitchf_postprocessed_scratch: Vec::new(),
         })
     }
 
@@ -500,6 +508,8 @@ impl RvcPipeline {
             pitchf_untrimmed_scratch: Vec::new(),
             pitchf_scratch: Vec::new(),
             pitch_scratch: Vec::new(),
+            f0_postprocess: F0Postprocessor::new(config.f0_postprocess.clone()),
+            pitchf_postprocessed_scratch: Vec::new(),
         })
     }
 
@@ -608,9 +618,13 @@ impl VoiceModel for RvcPipeline {
             .context("trimmed embedder frame length does not fit in usize")?;
         // Pitch
         let pitch_start = Instant::now();
+        // Extract raw (natural) F0: pass 0.0 so RMVPE does not pre-apply pitch
+        // shift. pitch_shift is applied once in f0_postprocess after smoothing,
+        // so clamp/octave/median act on natural F0. pitchf_buffer therefore
+        // accumulates raw F0 (see the guardrail above the post-process call).
         let pitchf_raw = self.pitch.extract(
             &self.stream_state.audio_16k_buffer,
-            self.pitch_shift,
+            0.0,
             self.f0_threshold,
         )?;
         self.stream_state
@@ -631,7 +645,20 @@ impl VoiceModel for RvcPipeline {
             feature_len,
             &mut self.pitchf_scratch,
         );
-        let pitchf = self.pitchf_scratch.as_slice();
+        // Guardrail: pitchf_buffer / pitchf_scratch hold raw (un-transposed) F0
+        // because extract() above is called with 0.0 shift. Post-process the
+        // RVC-aligned natural F0 and apply pitch_shift exactly once at the end.
+        // Always run this, even when post-processing is disabled: the shift is
+        // applied here, so skipping it would drop pitch shift entirely.
+        // voiced_ratio and coarse_pitch_into below must use this post-processed
+        // pitchf so the RVC inputs stay consistent (island/gap edits change the
+        // voiced frame count).
+        self.f0_postprocess.process_pitchf_into(
+            &self.pitchf_scratch,
+            self.pitch_shift,
+            &mut self.pitchf_postprocessed_scratch,
+        );
+        let pitchf = self.pitchf_postprocessed_scratch.as_slice();
         debug!(
             "pitch update: audio_16k_samples={}, pitchf_raw_len={}, pitchf_buffer_len={}, feature_len={}",
             self.stream_state.audio_16k_buffer.len(),
