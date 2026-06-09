@@ -10,6 +10,10 @@ default = ["windowsml", "tensorrt"]
 windowsml = ["vc-core/windowsml"]
 tensorrt = ["vc-core/tensorrt"]
 cuda = ["vc-core/cuda"]
+# Static ORT CPU only (Provider::Cpu), no Windows App SDK / GPU dependency. Gives
+# a self-contained, deterministic build for benchmarking and A/B audio comparison
+# (the CPU EP is reproducible run-to-run, unlike the GPU EPs).
+cpu = ["vc-core/ort"]
 
 [dependencies]
 vc-core = { path = "../vc-core" }

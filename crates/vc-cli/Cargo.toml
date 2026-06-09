@@ -19,6 +19,10 @@ default = ["windowsml", "tensorrt"]
 windowsml = ["vc-core/windowsml", "vc-app/windowsml"]
 tensorrt = ["vc-core/tensorrt", "vc-app/tensorrt"]
 cuda = ["vc-core/cuda", "vc-app/cuda"]
+# Static ORT CPU only: a self-contained, deterministic `vc-rs.exe` for the A/B
+# audio comparison workflow (see scripts/compare-audio.ps1). Build with
+# `--no-default-features --features cpu`.
+cpu = ["vc-core/ort", "vc-app/cpu"]
 
 [dependencies]
 # `clap` is always on (the CLI derives `value_enum` from vc-core's `Provider`);

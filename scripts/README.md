@@ -148,6 +148,32 @@ Flags:
 - `-OutDir <dir>` — where the `.zip` files (and kept folders) land (default `dist\`).
 - `-ContinueOnError` — keep building after a failure and report a summary.
 
+## A/B audio-quality comparison
+
+To check whether a change altered the converted audio, compare two
+versions/builds on the same clip through the **deterministic CPU `wav` path**
+(the CPU execution provider is reproducible run-to-run, unlike the GPU EPs):
+
+```powershell
+$env:VC_RS_TEST_RVC_MODEL = 'C:\models\voice.onnx'   # RVC model is not shipped
+just models                                           # fetch ContentVec / RMVPE
+just compare-audio -RefA main -RefB dev -InputWav clip.wav
+```
+
+Each `-RefA` / `-RefB` may be a **git ref** (built in a temp worktree with
+`--features cpu` and run), a **built `vc-rs.exe`**, or an **existing `.wav`**
+(used as-is — comparing two finished outputs needs no model). Both conversions
+force `--provider cpu`. The outputs are scored by `tools/audio_compare`
+(max abs diff, relative RMS, log-spectral distance in dB); the script exits
+non-zero if any metric exceeds its threshold (`-MaxAbs` / `-MaxRelRms` /
+`-MaxLsdDb`).
+
+Comparing against a commit older than the `cpu` feature: build that side with a
+feature it has, e.g. `-FeaturesA windowsml` (it still runs with `--provider cpu`).
+
+`tools/audio_compare` is a workspace-excluded dev tool; test it on its own with
+`cargo test --manifest-path tools/audio_compare/Cargo.toml`.
+
 ## Gotcha: STATUS_DLL_NOT_FOUND
 
 Test exes link the native TensorRT shim, so the TensorRT bin must be on PATH

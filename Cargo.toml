@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/vc-core", "crates/vc-app", "crates/vc-cli", "crates/vc-gui", "crates/vc-vst3", "xtask"]
-exclude = ["tools/tensorrt_builder"]
+exclude = ["tools/tensorrt_builder", "tools/audio_compare"]
 
 [workspace.package]
 version = "0.2.0"

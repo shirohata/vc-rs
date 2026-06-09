@@ -24,6 +24,12 @@ setup:
 models:
     ./download-models.ps1
 
+# A/B compare two versions' audio output on one clip (deterministic CPU path),
+# e.g. `just compare-audio -RefA main -RefB dev -InputWav clip.wav`. Needs an RVC
+# model via -Model or $env:VC_RS_TEST_RVC_MODEL; reference models from `just models`.
+compare-audio *args:
+    ./scripts/compare-audio.ps1 {{args}}
+
 # Fast workspace tests, no GPU stack (TensorRT shim disabled).
 test-cpu:
     . ./scripts/rustflags.ps1; $env:VC_RS_ENABLE_NATIVE_TENSORRT = "0"; cargo test --workspace

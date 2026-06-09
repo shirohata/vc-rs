@@ -1,0 +1,18 @@
+[package]
+name = "audio-compare"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Dev tool: compare two mono WAV files with time- and frequency-domain metrics for A/B audio-quality checks"
+
+[[bin]]
+name = "audio_compare"
+path = "src/main.rs"
+
+# Excluded from the workspace (see root Cargo.toml `exclude`): a dev-only tool
+# that is never shipped, so it keeps its own minimal dependency set and lockfile.
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+hound = "3.5"
+realfft = "3"
