@@ -198,7 +198,42 @@ fn draw_contents(ui: &mut egui::Ui, setter: &ParamSetter, state: &mut EditorStat
             setter,
         ));
         ui.end_row();
+        ui.label("Noise gate");
+        ui.add(widgets::ParamSlider::for_param(
+            &state.params.noise_gate,
+            setter,
+        ));
+        ui.end_row();
+        ui.label("Gate threshold");
+        ui.add(widgets::ParamSlider::for_param(
+            &state.params.noise_gate_threshold_db,
+            setter,
+        ));
+        ui.end_row();
     });
+
+    // Gate attack/release/floor are static (applied on Load / Reload), so they
+    // sit with the other staged settings rather than the live DAW parameters.
+    let (gate_attack_ms, gate_release_ms, gate_floor) = {
+        let s = state.params.settings.read().unwrap();
+        (
+            s.noise_gate_attack_ms,
+            s.noise_gate_release_ms,
+            s.noise_gate_floor,
+        )
+    };
+    if let Some(v) = f32_slider(ui, "Gate attack", gate_attack_ms, 0.0, 200.0, " ms") {
+        state.params.settings.write().unwrap().noise_gate_attack_ms = v;
+        mark_dirty(state);
+    }
+    if let Some(v) = f32_slider(ui, "Gate release", gate_release_ms, 0.0, 1000.0, " ms") {
+        state.params.settings.write().unwrap().noise_gate_release_ms = v;
+        mark_dirty(state);
+    }
+    if let Some(v) = f32_slider(ui, "Gate floor", gate_floor, 0.0, 1.0, "") {
+        state.params.settings.write().unwrap().noise_gate_floor = v;
+        mark_dirty(state);
+    }
 
     ui.separator();
     ui.small("Model / backend / chunk edits apply when you click Load / Reload. Other latency settings (crossfade, SOLA, extra-convert) come from the config file and apply on reinstantiation.");
@@ -236,6 +271,26 @@ fn ms_slider(ui: &mut egui::Ui, label: &str, current: u32, min: u32, max: u32) -
                     .step_by(MS_STEP as f64)
                     .suffix(" ms"),
             )
+            .changed();
+        changed.then_some(v)
+    })
+    .inner
+}
+
+/// A labelled `f32` slider. Returns the new value when the user changes it.
+fn f32_slider(
+    ui: &mut egui::Ui,
+    label: &str,
+    current: f32,
+    min: f32,
+    max: f32,
+    suffix: &str,
+) -> Option<f32> {
+    ui.horizontal(|ui| {
+        ui.label(label);
+        let mut v = current.clamp(min, max);
+        let changed = ui
+            .add(egui::Slider::new(&mut v, min..=max).suffix(suffix))
             .changed();
         changed.then_some(v)
     })

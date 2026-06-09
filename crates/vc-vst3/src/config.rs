@@ -39,6 +39,11 @@ pub struct PluginConfig {
     pub gpu_priority: String,
     pub f0_threshold: f32,
     pub silence_threshold: f32,
+    /// Noise gate attack/release/floor. Static (applied at Load/Reload); the
+    /// gate's on/off and threshold are DAW parameters (see `VcRvcParams`).
+    pub noise_gate_attack_ms: f32,
+    pub noise_gate_release_ms: f32,
+    pub noise_gate_floor: f32,
     pub chunk_ms: u32,
     pub crossfade_ms: u32,
     pub sola_search_ms: u32,
@@ -66,6 +71,9 @@ impl Default for PluginConfig {
             gpu_priority: "high".to_string(),
             f0_threshold: 0.3,
             silence_threshold: 0.0001,
+            noise_gate_attack_ms: 5.0,
+            noise_gate_release_ms: 50.0,
+            noise_gate_floor: 0.0,
             chunk_ms: 500,
             crossfade_ms: 85,
             sola_search_ms: 12,

@@ -66,6 +66,11 @@ pub struct RealtimeConfig {
     pub extra_convert_ms: u32,
     pub f0_threshold: f32,
     pub silence_threshold: f32,
+    // Noise gate attack/release/floor are static (set at load); the gate's
+    // enabled flag and threshold are live (see `LiveParams`).
+    pub noise_gate_attack_ms: f32,
+    pub noise_gate_release_ms: f32,
+    pub noise_gate_floor: f32,
     pub volume_envelope: bool,
     pub rms_mix_rate: f32,
     pub auto_output_gain: bool,
@@ -99,6 +104,9 @@ impl Default for RealtimeConfig {
             extra_convert_ms: 100,
             f0_threshold: 0.3,
             silence_threshold: 0.0001,
+            noise_gate_attack_ms: 5.0,
+            noise_gate_release_ms: 50.0,
+            noise_gate_floor: 0.0,
             volume_envelope: false,
             rms_mix_rate: 0.0,
             auto_output_gain: false,
@@ -124,6 +132,15 @@ impl RealtimeConfig {
         if !(0.0..=1.0).contains(&self.rms_mix_rate) || !self.rms_mix_rate.is_finite() {
             bail!("RMS mix rate must be a finite value in 0.0..=1.0");
         }
+        if !self.noise_gate_attack_ms.is_finite() || self.noise_gate_attack_ms < 0.0 {
+            bail!("noise gate attack must be a finite, non-negative value (ms)");
+        }
+        if !self.noise_gate_release_ms.is_finite() || self.noise_gate_release_ms < 0.0 {
+            bail!("noise gate release must be a finite, non-negative value (ms)");
+        }
+        if !(0.0..=1.0).contains(&self.noise_gate_floor) {
+            bail!("noise gate floor must be in 0.0..=1.0");
+        }
         if !self.passthrough {
             if self.model.is_none() || self.embedder.is_none() || self.f0_model.is_none() {
                 bail!("model, embedder, and F0 model are required");
@@ -139,6 +156,8 @@ pub struct LiveParams {
     pub speaker_id: i64,
     pub input_gain: f32,
     pub output_gain: f32,
+    pub noise_gate_enabled: bool,
+    pub noise_gate_threshold: f32,
 }
 
 impl Default for LiveParams {
@@ -148,6 +167,8 @@ impl Default for LiveParams {
             speaker_id: 0,
             input_gain: 1.0,
             output_gain: 1.0,
+            noise_gate_enabled: false,
+            noise_gate_threshold: 0.01,
         }
     }
 }
@@ -158,6 +179,8 @@ struct AtomicLiveParams {
     speaker_id: AtomicI64,
     input_gain: AtomicU32,
     output_gain: AtomicU32,
+    noise_gate_enabled: AtomicBool,
+    noise_gate_threshold: AtomicU32,
 }
 
 impl AtomicLiveParams {
@@ -175,6 +198,10 @@ impl AtomicLiveParams {
             .store(value.input_gain.to_bits(), Ordering::Relaxed);
         self.output_gain
             .store(value.output_gain.to_bits(), Ordering::Relaxed);
+        self.noise_gate_enabled
+            .store(value.noise_gate_enabled, Ordering::Relaxed);
+        self.noise_gate_threshold
+            .store(value.noise_gate_threshold.to_bits(), Ordering::Relaxed);
     }
 
     fn load(&self) -> LiveParams {
@@ -183,6 +210,8 @@ impl AtomicLiveParams {
             speaker_id: self.speaker_id.load(Ordering::Relaxed),
             input_gain: f32::from_bits(self.input_gain.load(Ordering::Relaxed)),
             output_gain: f32::from_bits(self.output_gain.load(Ordering::Relaxed)),
+            noise_gate_enabled: self.noise_gate_enabled.load(Ordering::Relaxed),
+            noise_gate_threshold: f32::from_bits(self.noise_gate_threshold.load(Ordering::Relaxed)),
         }
     }
 }
@@ -475,6 +504,7 @@ impl RuntimeModel {
             model.set_speaker_id(live.speaker_id);
             model.set_input_gain(live.input_gain);
             model.set_output_gain(live.output_gain);
+            model.set_noise_gate(live.noise_gate_enabled, live.noise_gate_threshold);
         }
     }
 }
@@ -552,6 +582,11 @@ impl RealtimeSession {
                 f0_threshold: config.f0_threshold,
                 silence_threshold: config.silence_threshold,
                 input_gain: current_live.input_gain,
+                noise_gate_enabled: current_live.noise_gate_enabled,
+                noise_gate_threshold: current_live.noise_gate_threshold,
+                noise_gate_attack_ms: config.noise_gate_attack_ms,
+                noise_gate_release_ms: config.noise_gate_release_ms,
+                noise_gate_floor: config.noise_gate_floor,
                 output_extra_ms,
                 volume_excluded_ms: config.crossfade_ms,
                 extra_convert_ms: config.extra_convert_ms,
@@ -846,6 +881,8 @@ mod tests {
             speaker_id: 7,
             input_gain: 0.5,
             output_gain: 2.0,
+            noise_gate_enabled: true,
+            noise_gate_threshold: 0.025,
         };
         let atomic = AtomicLiveParams::new(params);
         let out = atomic.load();
@@ -853,6 +890,8 @@ mod tests {
         assert_eq!(out.speaker_id, params.speaker_id);
         assert_eq!(out.input_gain, params.input_gain);
         assert_eq!(out.output_gain, params.output_gain);
+        assert_eq!(out.noise_gate_enabled, params.noise_gate_enabled);
+        assert_eq!(out.noise_gate_threshold, params.noise_gate_threshold);
     }
 
     #[test]

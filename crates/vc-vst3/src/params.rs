@@ -23,6 +23,12 @@ pub struct VcRvcParams {
     pub input_gain_db: FloatParam,
     #[id = "outgain"]
     pub output_gain_db: FloatParam,
+    #[id = "ngate"]
+    pub noise_gate: BoolParam,
+    /// Gate threshold in dB; converted to a linear amplitude before it reaches
+    /// the core gate (`util::db_to_gain`).
+    #[id = "ngthr"]
+    pub noise_gate_threshold_db: FloatParam,
 
     /// Model paths and conversion settings. Set via the GUI / config seed and
     /// persisted with the project.
@@ -63,6 +69,16 @@ impl Default for VcRvcParams {
                 FloatRange::Linear {
                     min: -36.0,
                     max: 36.0,
+                },
+            )
+            .with_unit(" dB"),
+            noise_gate: BoolParam::new("Noise Gate", false),
+            noise_gate_threshold_db: FloatParam::new(
+                "Gate Threshold",
+                -40.0,
+                FloatRange::Linear {
+                    min: -80.0,
+                    max: 0.0,
                 },
             )
             .with_unit(" dB"),

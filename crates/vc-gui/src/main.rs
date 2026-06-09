@@ -139,6 +139,11 @@ struct GuiSettings {
     speaker_id: i64,
     input_gain: f32,
     output_gain: f32,
+    noise_gate_enabled: bool,
+    noise_gate_threshold: f32,
+    noise_gate_attack_ms: f32,
+    noise_gate_release_ms: f32,
+    noise_gate_floor: f32,
     volume_envelope: bool,
     rms_mix_rate: f32,
     auto_output_gain: bool,
@@ -173,6 +178,11 @@ impl Default for GuiSettings {
             speaker_id: 0,
             input_gain: 1.0,
             output_gain: 1.0,
+            noise_gate_enabled: false,
+            noise_gate_threshold: 0.01,
+            noise_gate_attack_ms: 5.0,
+            noise_gate_release_ms: 50.0,
+            noise_gate_floor: 0.0,
             volume_envelope: false,
             rms_mix_rate: 0.0,
             auto_output_gain: false,
@@ -208,6 +218,8 @@ impl GuiSettings {
             speaker_id: self.speaker_id,
             input_gain: self.input_gain,
             output_gain: self.output_gain,
+            noise_gate_enabled: self.noise_gate_enabled,
+            noise_gate_threshold: self.noise_gate_threshold,
         }
     }
 
@@ -237,6 +249,9 @@ impl GuiSettings {
             extra_convert_ms: self.extra_convert_ms,
             f0_threshold: self.f0_threshold,
             silence_threshold: self.silence_threshold,
+            noise_gate_attack_ms: self.noise_gate_attack_ms,
+            noise_gate_release_ms: self.noise_gate_release_ms,
+            noise_gate_floor: self.noise_gate_floor,
             volume_envelope: self.volume_envelope,
             rms_mix_rate: self.rms_mix_rate,
             auto_output_gain: self.auto_output_gain,
@@ -481,6 +496,39 @@ impl eframe::App for VcGui {
                         .text("Output gain"),
                 )
                 .changed();
+            // Noise gate: enabled + threshold apply live; attack/release/floor
+            // are baked into the gate at (re)load, so they take effect on the
+            // next Apply/Start.
+            changed |= ui
+                .checkbox(&mut self.settings.noise_gate_enabled, "Noise gate")
+                .changed();
+            ui.add_enabled_ui(self.settings.noise_gate_enabled, |ui| {
+                changed |= ui
+                    .add(
+                        egui::Slider::new(&mut self.settings.noise_gate_threshold, 0.0001..=0.5)
+                            .logarithmic(true)
+                            .text("Gate threshold"),
+                    )
+                    .changed();
+                changed |= ui
+                    .add(
+                        egui::Slider::new(&mut self.settings.noise_gate_attack_ms, 0.0..=200.0)
+                            .text("Gate attack (ms)"),
+                    )
+                    .changed();
+                changed |= ui
+                    .add(
+                        egui::Slider::new(&mut self.settings.noise_gate_release_ms, 0.0..=1000.0)
+                            .text("Gate release (ms)"),
+                    )
+                    .changed();
+                changed |= ui
+                    .add(
+                        egui::Slider::new(&mut self.settings.noise_gate_floor, 0.0..=1.0)
+                            .text("Gate floor"),
+                    )
+                    .changed();
+            });
             if changed {
                 self.changed();
             }

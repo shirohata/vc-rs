@@ -307,6 +307,10 @@ impl WorkerCtx {
             pipeline.set_speaker_id(self.params.speaker_id.value() as i64);
             pipeline.set_input_gain(util::db_to_gain(self.params.input_gain_db.value()));
             pipeline.set_output_gain(util::db_to_gain(self.params.output_gain_db.value()));
+            pipeline.set_noise_gate(
+                self.params.noise_gate.value(),
+                util::db_to_gain(self.params.noise_gate_threshold_db.value()),
+            );
 
             let out = match pipeline.process(chunk, self.sample_rate) {
                 Ok(out) => out,
@@ -484,6 +488,14 @@ impl WorkerCtx {
             f0_threshold: settings.f0_threshold,
             silence_threshold: settings.silence_threshold,
             input_gain: 1.0,
+            // Gate on/off + threshold are DAW parameters applied per chunk
+            // (overwriting these load-time placeholders); attack/release/floor
+            // are static and shape the gate built here.
+            noise_gate_enabled: false,
+            noise_gate_threshold: 0.01,
+            noise_gate_attack_ms: settings.noise_gate_attack_ms,
+            noise_gate_release_ms: settings.noise_gate_release_ms,
+            noise_gate_floor: settings.noise_gate_floor,
             output_extra_ms: self.output_extra_ms(),
             volume_excluded_ms: self.crossfade_ms,
             extra_convert_ms: settings.extra_convert_ms,

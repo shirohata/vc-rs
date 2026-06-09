@@ -31,6 +31,10 @@ pub fn default_provider() -> Provider {
 pub const DEFAULT_CROSSFADE_MS: u32 = 85;
 pub const DEFAULT_EXTRA_CONVERT_MS: u32 = 100;
 pub const DEFAULT_INPUT_GAIN: f32 = 1.0;
+pub const DEFAULT_NOISE_GATE_THRESHOLD: f32 = 0.01;
+pub const DEFAULT_NOISE_GATE_ATTACK_MS: f32 = 5.0;
+pub const DEFAULT_NOISE_GATE_RELEASE_MS: f32 = 50.0;
+pub const DEFAULT_NOISE_GATE_FLOOR: f32 = 0.0;
 pub const DEFAULT_MAX_OUTPUT_GAIN: f32 = 512.0;
 pub const DEFAULT_OUTPUT_GAIN: f32 = 1.0;
 pub const DEFAULT_RMS_MIX_RATE: f32 = 0.0;
@@ -217,6 +221,20 @@ pub struct RunArgs {
     pub input_gain: f32,
     #[arg(long, default_value_t = DEFAULT_OUTPUT_GAIN)]
     pub output_gain: f32,
+    #[arg(long = "noise-gate", action = clap::ArgAction::SetTrue, help = "Enable the input noise gate")]
+    pub noise_gate: bool,
+    #[arg(
+        long,
+        default_value_t = DEFAULT_NOISE_GATE_THRESHOLD,
+        help = "Noise gate threshold (linear amplitude; signal below this is attenuated)"
+    )]
+    pub noise_gate_threshold: f32,
+    #[arg(long, default_value_t = DEFAULT_NOISE_GATE_ATTACK_MS, help = "Noise gate attack time (ms)")]
+    pub noise_gate_attack_ms: f32,
+    #[arg(long, default_value_t = DEFAULT_NOISE_GATE_RELEASE_MS, help = "Noise gate release time (ms)")]
+    pub noise_gate_release_ms: f32,
+    #[arg(long, default_value_t = DEFAULT_NOISE_GATE_FLOOR, help = "Noise gate floor gain when closed (0.0..=1.0)")]
+    pub noise_gate_floor: f32,
     #[arg(long = "volume-envelope", action = clap::ArgAction::SetTrue, default_value_t = DEFAULT_VOLUME_ENVELOPE)]
     pub volume_envelope: bool,
     #[arg(long, default_value_t = DEFAULT_RMS_MIX_RATE, value_parser = parse_unit_f32)]
@@ -271,6 +289,20 @@ pub struct WavArgs {
     pub input_gain: f32,
     #[arg(long, default_value_t = DEFAULT_OUTPUT_GAIN)]
     pub output_gain: f32,
+    #[arg(long = "noise-gate", action = clap::ArgAction::SetTrue, help = "Enable the input noise gate")]
+    pub noise_gate: bool,
+    #[arg(
+        long,
+        default_value_t = DEFAULT_NOISE_GATE_THRESHOLD,
+        help = "Noise gate threshold (linear amplitude; signal below this is attenuated)"
+    )]
+    pub noise_gate_threshold: f32,
+    #[arg(long, default_value_t = DEFAULT_NOISE_GATE_ATTACK_MS, help = "Noise gate attack time (ms)")]
+    pub noise_gate_attack_ms: f32,
+    #[arg(long, default_value_t = DEFAULT_NOISE_GATE_RELEASE_MS, help = "Noise gate release time (ms)")]
+    pub noise_gate_release_ms: f32,
+    #[arg(long, default_value_t = DEFAULT_NOISE_GATE_FLOOR, help = "Noise gate floor gain when closed (0.0..=1.0)")]
+    pub noise_gate_floor: f32,
     #[arg(
         long,
         default_value_t = DEFAULT_EXTRA_CONVERT_MS,

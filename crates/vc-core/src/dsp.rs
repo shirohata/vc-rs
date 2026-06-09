@@ -376,6 +376,91 @@ fn dot(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
 
+/// One-pole smoothing coefficient for an exponential follower with the given
+/// time constant. `time_ms <= 0` yields `1.0` (instantaneous), so callers can
+/// request a zero-length attack/release without special-casing.
+fn one_pole_coef(time_ms: f32, sample_rate: f32) -> f32 {
+    if !(time_ms > 0.0) || !(sample_rate > 0.0) {
+        return 1.0;
+    }
+    let samples = time_ms * 0.001 * sample_rate;
+    1.0 - (-1.0 / samples).exp()
+}
+
+/// Streaming amplitude noise gate. Tracks a smoothed amplitude envelope of the
+/// input and ramps a per-sample gain between `1.0` (open, when the envelope is
+/// at/above `threshold`) and `floor` (closed) using attack/release smoothing,
+/// so level transitions do not click.
+///
+/// Operates at the input sample rate and only scales amplitude — it never
+/// touches timing or the frame grid, so it is safe to run ahead of the RVC
+/// feature/F0 extraction (audio-quality guardrail). State (`env`, `gain`)
+/// persists across calls so chunk boundaries are seamless; processing one
+/// buffer is identical to processing its concatenated halves.
+pub struct NoiseGate {
+    threshold: f32,
+    floor: f32,
+    attack_coef: f32,
+    release_coef: f32,
+    env: f32,
+    gain: f32,
+}
+
+impl NoiseGate {
+    pub fn new(
+        sample_rate: f32,
+        threshold: f32,
+        attack_ms: f32,
+        release_ms: f32,
+        floor: f32,
+    ) -> Self {
+        Self {
+            threshold: threshold.max(0.0),
+            floor: floor.clamp(0.0, 1.0),
+            attack_coef: one_pole_coef(attack_ms, sample_rate),
+            release_coef: one_pole_coef(release_ms, sample_rate),
+            // Start fully open so the first chunk after (re)load is not gated
+            // shut before the envelope has seen any signal.
+            env: 0.0,
+            gain: 1.0,
+        }
+    }
+
+    /// Update the live-adjustable threshold (linear amplitude). Attack/release
+    /// are baked into the smoothing coefficients at construction.
+    pub fn set_threshold(&mut self, threshold: f32) {
+        self.threshold = threshold.max(0.0);
+    }
+
+    pub fn process_in_place(&mut self, buf: &mut [f32]) {
+        for sample in buf.iter_mut() {
+            let level = sample.abs();
+            // Detector: fast on the way up, slower on the way down, so brief
+            // dips inside speech do not slam the gate shut.
+            let det_coef = if level > self.env {
+                self.attack_coef
+            } else {
+                self.release_coef
+            };
+            self.env += det_coef * (level - self.env);
+
+            let target = if self.env >= self.threshold {
+                1.0
+            } else {
+                self.floor
+            };
+            let gain_coef = if target > self.gain {
+                self.attack_coef
+            } else {
+                self.release_coef
+            };
+            self.gain += gain_coef * (target - self.gain);
+
+            *sample *= self.gain;
+        }
+    }
+}
+
 fn finite_nonnegative(value: f32) -> f32 {
     if value.is_finite() {
         value.max(0.0)
@@ -596,5 +681,82 @@ mod tests {
     fn sola_offset_handles_short_inputs() {
         assert_eq!(sola_offset(&[], &[1.0, 0.0], 4), 0);
         assert_eq!(sola_offset(&[1.0], &[1.0, 0.0], 4), 0);
+    }
+
+    #[test]
+    fn noise_gate_passes_loud_signal_through() {
+        // Loud, sustained tone stays open: after the attack ramp, amplitude is
+        // preserved.
+        let sr = 48_000.0;
+        let mut gate = NoiseGate::new(sr, 0.05, 1.0, 50.0, 0.0);
+        let mut buf: Vec<f32> = (0..4_800).map(|i| 0.5 * (i as f32 * 0.05).sin()).collect();
+        let before = buf.clone();
+        gate.process_in_place(&mut buf);
+
+        // Tail (well past the 1 ms attack) should match the input closely.
+        for (out, inp) in buf[2_400..].iter().zip(&before[2_400..]) {
+            assert_abs_diff_eq!(*out, *inp, epsilon = 1e-3);
+        }
+    }
+
+    #[test]
+    fn noise_gate_attenuates_quiet_noise_to_floor() {
+        let sr = 48_000.0;
+        let mut gate = NoiseGate::new(sr, 0.1, 1.0, 5.0, 0.0);
+        // Steady low-level noise below threshold.
+        let mut buf = vec![0.02f32; 4_800];
+        gate.process_in_place(&mut buf);
+
+        // After release, output should be driven toward the floor (~0).
+        assert!(rms(&buf[2_400..]) < 1e-3);
+    }
+
+    #[test]
+    fn noise_gate_opens_smoothly_without_click() {
+        let sr = 48_000.0;
+        let mut gate = NoiseGate::new(sr, 0.05, 10.0, 50.0, 0.0);
+        // Drive the gate fully closed first (well past several release time
+        // constants) so the step below exercises the opening ramp, not a gate
+        // that was still partly open.
+        let mut silence = vec![0.0f32; 24_000];
+        gate.process_in_place(&mut silence);
+
+        // Loud step into the closed gate. The onset is attenuated and the gain
+        // ramps rather than jumping (no click).
+        let mut buf = vec![0.5f32; 4_800];
+        gate.process_in_place(&mut buf);
+
+        assert!(
+            buf[0].abs() < 0.1,
+            "onset should be attenuated, got {}",
+            buf[0]
+        );
+        for w in buf.windows(2) {
+            assert!(
+                (w[1] - w[0]).abs() < 0.05,
+                "per-sample step too large (click)"
+            );
+        }
+        // The gate fully opens within the buffer: the tail recovers the input.
+        assert_abs_diff_eq!(buf[4_799], 0.5, epsilon = 1e-2);
+    }
+
+    #[test]
+    fn noise_gate_is_continuous_across_chunks() {
+        let sr = 48_000.0;
+        let signal: Vec<f32> = (0..2_000).map(|i| 0.3 * (i as f32 * 0.02).sin()).collect();
+
+        let mut whole = signal.clone();
+        NoiseGate::new(sr, 0.05, 5.0, 20.0, 0.0).process_in_place(&mut whole);
+
+        let mut split = signal.clone();
+        let mut gate = NoiseGate::new(sr, 0.05, 5.0, 20.0, 0.0);
+        let (head, tail) = split.split_at_mut(777);
+        gate.process_in_place(head);
+        gate.process_in_place(tail);
+
+        for (a, b) in whole.iter().zip(&split) {
+            assert_abs_diff_eq!(*a, *b, epsilon = 1e-6);
+        }
     }
 }

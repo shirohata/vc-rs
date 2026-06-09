@@ -30,6 +30,39 @@ use super::tensorrt::{tensor_rt_warmup_feature_len, TensorRtSharedWaveform};
 
 const SKIP_SILENT_CHUNKS: bool = false;
 
+/// Input-side denoising stage, applied to the raw input (after `input_gain`)
+/// before RMS/silence detection and feature/F0 extraction. Currently only a
+/// noise gate. Future denoisers (e.g. RNNoise) plug in by adding a variant
+/// here and a match arm in `process_in_place` — the call site in `process()`
+/// does not change.
+enum InputDenoiser {
+    Off,
+    Gate(dsp::NoiseGate),
+}
+
+impl InputDenoiser {
+    fn process_in_place(&mut self, buf: &mut [f32]) {
+        match self {
+            InputDenoiser::Off => {}
+            InputDenoiser::Gate(gate) => gate.process_in_place(buf),
+        }
+    }
+}
+
+fn build_input_denoiser(config: &RvcPipelineConfig<'_>) -> InputDenoiser {
+    if config.noise_gate_enabled {
+        InputDenoiser::Gate(dsp::NoiseGate::new(
+            config.sample_rate as f32,
+            config.noise_gate_threshold,
+            config.noise_gate_attack_ms,
+            config.noise_gate_release_ms,
+            config.noise_gate_floor,
+        ))
+    } else {
+        InputDenoiser::Off
+    }
+}
+
 pub struct RvcPipeline {
     embedder: HubertEmbedderSession,
     pitch: RmvpePitchSession,
@@ -41,6 +74,14 @@ pub struct RvcPipeline {
     f0_threshold: f32,
     silence_threshold: f32,
     input_gain: f32,
+    // Input noise reduction. `input_denoiser` is the active stage (Off when
+    // disabled); the remaining fields let `set_noise_gate` rebuild the gate
+    // when it is toggled back on without a full pipeline reload.
+    input_denoiser: InputDenoiser,
+    noise_gate_attack_ms: f32,
+    noise_gate_release_ms: f32,
+    noise_gate_floor: f32,
+    noise_gate_sample_rate: f32,
     output_extra_ms: u32,
     volume_excluded_ms: u32,
     extra_convert_samples: usize,
@@ -76,6 +117,11 @@ pub struct RvcPipelineConfig<'a> {
     pub f0_threshold: f32,
     pub silence_threshold: f32,
     pub input_gain: f32,
+    pub noise_gate_enabled: bool,
+    pub noise_gate_threshold: f32,
+    pub noise_gate_attack_ms: f32,
+    pub noise_gate_release_ms: f32,
+    pub noise_gate_floor: f32,
     pub output_extra_ms: u32,
     pub volume_excluded_ms: u32,
     pub extra_convert_ms: u32,
@@ -132,6 +178,11 @@ impl RvcPipeline {
             f0_threshold: config.f0_threshold,
             silence_threshold: config.silence_threshold,
             input_gain: config.input_gain,
+            input_denoiser: build_input_denoiser(&config),
+            noise_gate_attack_ms: config.noise_gate_attack_ms,
+            noise_gate_release_ms: config.noise_gate_release_ms,
+            noise_gate_floor: config.noise_gate_floor,
+            noise_gate_sample_rate: config.sample_rate as f32,
             output_extra_ms: config.output_extra_ms,
             volume_excluded_ms: config.volume_excluded_ms,
             extra_convert_samples,
@@ -493,6 +544,11 @@ impl RvcPipeline {
             f0_threshold: config.f0_threshold,
             silence_threshold: config.silence_threshold,
             input_gain: config.input_gain,
+            input_denoiser: build_input_denoiser(&config),
+            noise_gate_attack_ms: config.noise_gate_attack_ms,
+            noise_gate_release_ms: config.noise_gate_release_ms,
+            noise_gate_floor: config.noise_gate_floor,
+            noise_gate_sample_rate: config.sample_rate as f32,
             output_extra_ms: config.output_extra_ms,
             volume_excluded_ms: config.volume_excluded_ms,
             extra_convert_samples,
@@ -528,6 +584,30 @@ impl RvcPipeline {
         self.input_gain = input_gain;
     }
 
+    /// Live-update the input noise gate. Toggling on (re)builds the gate from
+    /// the stored attack/release/floor; while it stays on, only the threshold
+    /// changes so the envelope/gain state carries across chunks. Attack and
+    /// release are not live-adjustable (they shape the smoothing coefficients
+    /// fixed at construction).
+    pub fn set_noise_gate(&mut self, enabled: bool, threshold: f32) {
+        if !enabled {
+            self.input_denoiser = InputDenoiser::Off;
+            return;
+        }
+        match &mut self.input_denoiser {
+            InputDenoiser::Gate(gate) => gate.set_threshold(threshold),
+            _ => {
+                self.input_denoiser = InputDenoiser::Gate(dsp::NoiseGate::new(
+                    self.noise_gate_sample_rate,
+                    threshold,
+                    self.noise_gate_attack_ms,
+                    self.noise_gate_release_ms,
+                    self.noise_gate_floor,
+                ));
+            }
+        }
+    }
+
     pub fn set_output_gain(&mut self, output_gain: f32) {
         self.output_gain = output_gain;
     }
@@ -537,7 +617,7 @@ impl VoiceModel for RvcPipeline {
     fn process(&mut self, audio: &[f32], sample_rate: u32) -> Result<ModelOutput> {
         let total_start = Instant::now();
         let input_gain = self.input_gain.max(0.0);
-        let input_audio: Cow<'_, [f32]> = if (input_gain - 1.0).abs() > f32::EPSILON {
+        let mut input_audio: Cow<'_, [f32]> = if (input_gain - 1.0).abs() > f32::EPSILON {
             Cow::Owned(
                 audio
                     .iter()
@@ -547,6 +627,13 @@ impl VoiceModel for RvcPipeline {
         } else {
             Cow::Borrowed(audio)
         };
+        // Noise reduction runs before RMS/silence detection and feature/F0
+        // extraction so the model sees the cleaned signal. Only an active
+        // denoiser forces an owned buffer (`to_mut` clones a borrowed slice);
+        // the gain==1.0 + denoiser-off path stays zero-copy.
+        if !matches!(self.input_denoiser, InputDenoiser::Off) {
+            self.input_denoiser.process_in_place(input_audio.to_mut());
+        }
         let input_audio = input_audio.as_ref();
         let input_rms = dsp::rms(input_audio);
         let output_extra_len = ms_to_samples(RVC_SAMPLE_RATE, self.output_extra_ms);
@@ -622,11 +709,9 @@ impl VoiceModel for RvcPipeline {
         // shift. pitch_shift is applied once in f0_postprocess after smoothing,
         // so clamp/octave/median act on natural F0. pitchf_buffer therefore
         // accumulates raw F0 (see the guardrail above the post-process call).
-        let pitchf_raw = self.pitch.extract(
-            &self.stream_state.audio_16k_buffer,
-            0.0,
-            self.f0_threshold,
-        )?;
+        let pitchf_raw =
+            self.pitch
+                .extract(&self.stream_state.audio_16k_buffer, 0.0, self.f0_threshold)?;
         self.stream_state
             .update_pitchf_from_rmvpe_frames(&pitchf_raw);
         let pitch_frames = self.stream_state.pitchf_buffer.len();

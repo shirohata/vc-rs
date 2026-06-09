@@ -20,6 +20,8 @@ pub fn run_realtime(args: RunArgs) -> Result<()> {
         speaker_id: args.speaker_id,
         input_gain: args.input_gain,
         output_gain: args.output_gain,
+        noise_gate_enabled: args.noise_gate,
+        noise_gate_threshold: args.noise_gate_threshold,
     };
     let wasapi_input_exclusive = args.wasapi_input_exclusive();
     let wasapi_output_exclusive = args.wasapi_output_exclusive();
@@ -45,6 +47,9 @@ pub fn run_realtime(args: RunArgs) -> Result<()> {
         extra_convert_ms: args.extra_convert_ms,
         f0_threshold: args.f0_threshold,
         silence_threshold: args.silence_threshold,
+        noise_gate_attack_ms: args.noise_gate_attack_ms,
+        noise_gate_release_ms: args.noise_gate_release_ms,
+        noise_gate_floor: args.noise_gate_floor,
         volume_envelope: args.volume_envelope,
         rms_mix_rate: args.rms_mix_rate,
         auto_output_gain: args.auto_output_gain,
@@ -123,6 +128,11 @@ pub fn run_wav(args: WavArgs) -> Result<()> {
         f0_threshold: args.f0_threshold,
         silence_threshold: 0.0,
         input_gain: args.input_gain,
+        noise_gate_enabled: args.noise_gate,
+        noise_gate_threshold: args.noise_gate_threshold,
+        noise_gate_attack_ms: args.noise_gate_attack_ms,
+        noise_gate_release_ms: args.noise_gate_release_ms,
+        noise_gate_floor: args.noise_gate_floor,
         output_extra_ms,
         volume_excluded_ms: DEFAULT_CROSSFADE_MS,
         extra_convert_ms: args.extra_convert_ms,
