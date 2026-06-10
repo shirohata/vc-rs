@@ -12,6 +12,23 @@ versioning and publishing procedure.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-06-10
+
+### Added
+
+- Standalone RNNoise input denoising in the GUI and CLI.
+- Configurable input noise gate before RVC feature and F0 extraction, available
+  in the standalone apps and VST3 plugin.
+- Optional F0 post-processing support in the core RVC pipeline.
+- On-demand download of explicitly selected Windows ML catalog execution
+  providers during standalone GUI and CLI model loading.
+- Deterministic CPU-only A/B audio comparison tooling for regression analysis.
+
+### Changed
+
+- Release publishing now relies on GitHub's asset digests instead of generating
+  separate SHA-256 sidecar files.
+
 ## [0.2.0] - 2026-06-07
 
 ### Added
@@ -57,6 +74,7 @@ Initial release.
 - One-shot distribution packaging scripts for all four Windows x64 variants.
 - Auto-generated bundled third-party license notices during packaging.
 
-[Unreleased]: https://github.com/shirohata/vc-rs/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/shirohata/vc-rs/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/shirohata/vc-rs/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/shirohata/vc-rs/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/shirohata/vc-rs/releases/tag/v0.1.0
