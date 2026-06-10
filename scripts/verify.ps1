@@ -5,8 +5,9 @@
 
 .DESCRIPTION
     Activates the matched CUDA/cuDNN/TensorRT line (via scripts/activate.ps1),
-    then runs `cargo test` and `cargo xtask bundle vc-vst3`. A clean pass means
-    the toolchain, MSVC C++, and the GPU SDKs are wired up correctly.
+    then runs `cargo test`, checks the matching standalone package feature set
+    (including RNNoise), and bundles `vc-vst3`. A clean pass means the toolchain,
+    MSVC C++, and the GPU SDKs are wired up correctly.
 
     By default it builds the Windows ML plugin variant. Use -Variant tensorrt for
     the TensorRT-only build, or -SkipBundle to only run tests.
@@ -66,6 +67,11 @@ Push-Location $repoRoot
 try {
     # --- Tests --------------------------------------------------------------
     Invoke-Step "cargo test --workspace" { cargo test --workspace }
+
+    # --- Standalone package feature set ------------------------------------
+    Invoke-Step "cargo check standalone ($Variant + rnnoise)" {
+        cargo check -p vc-cli -p vc-gui --no-default-features --features "$Variant,rnnoise"
+    }
 
     # --- Bundle the plugin --------------------------------------------------
     if (-not $SkipBundle) {

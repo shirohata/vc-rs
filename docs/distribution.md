@@ -49,6 +49,9 @@ binary produced for another variant.
   contain the engine-builder helper and the selected GPU builder resources.
 - Build VST3 variants package-scoped. Do not use a whole-workspace build whose
   unified features can pull incompatible providers into the plugin.
+- Standalone packages enable the pure-Rust `rnnoise` feature. VST3 packages
+  must not enable or advertise RNNoise; inspect package-scoped dependency and
+  license output to catch accidental feature unification.
 
 Start packaging from clean per-variant staging directories. Stale sidecar DLLs
 from another package must never survive into a release.

@@ -6,10 +6,11 @@ license.workspace = true
 description = "Standalone GUI for vc-rs"
 
 [features]
-default = ["windowsml", "tensorrt"]
+default = ["windowsml", "tensorrt", "rnnoise"]
 windowsml = ["vc-app/windowsml", "vc-core/windowsml"]
 tensorrt = ["vc-app/tensorrt", "vc-core/tensorrt"]
 cuda = ["vc-app/cuda", "vc-core/cuda"]
+rnnoise = ["vc-app/rnnoise", "vc-core/rnnoise"]
 
 [dependencies]
 vc-app = { path = "../vc-app", default-features = false }

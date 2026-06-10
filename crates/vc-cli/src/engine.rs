@@ -6,21 +6,23 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use tracing::{debug, info};
-use vc_app::{EngineController, EngineState, LiveParams, RealtimeConfig};
+use vc_app::{DenoiserMode, EngineController, EngineState, LiveParams, RealtimeConfig};
 use vc_core::dsp;
 use vc_core::model_rvc::{F0PostprocessConfig, RvcPipeline, RvcPipelineConfig, VoiceModel};
 use vc_core::sola::{self, ChunkSmootherConfig, SmoothingKind};
 
-use crate::cli::{RunArgs, Smoother, WavArgs, DEFAULT_CROSSFADE_MS, DEFAULT_SOLA_SEARCH_MS};
+use crate::cli::{
+    Denoiser, RunArgs, Smoother, WavArgs, DEFAULT_CROSSFADE_MS, DEFAULT_SOLA_SEARCH_MS,
+};
 
 pub fn run_realtime(args: RunArgs) -> Result<()> {
     args.validate_audio_options().map_err(anyhow::Error::msg)?;
+    let denoiser_mode: DenoiserMode = args.denoiser_mode().into();
     let live = LiveParams {
         pitch_shift: args.pitch_shift,
         speaker_id: args.speaker_id,
         input_gain: args.input_gain,
         output_gain: args.output_gain,
-        noise_gate_enabled: args.noise_gate,
         noise_gate_threshold: args.noise_gate_threshold,
     };
     let wasapi_input_exclusive = args.wasapi_input_exclusive();
@@ -47,6 +49,7 @@ pub fn run_realtime(args: RunArgs) -> Result<()> {
         extra_convert_ms: args.extra_convert_ms,
         f0_threshold: args.f0_threshold,
         silence_threshold: args.silence_threshold,
+        denoiser_mode,
         noise_gate_attack_ms: args.noise_gate_attack_ms,
         noise_gate_release_ms: args.noise_gate_release_ms,
         noise_gate_floor: args.noise_gate_floor,
@@ -109,7 +112,17 @@ fn chunk_samples_for_rate(sample_rate: u32, chunk_ms: u32) -> usize {
 }
 
 pub fn run_wav(args: WavArgs) -> Result<()> {
-    let (samples, spec) = read_wav_mono(&args.input)?;
+    let (mut samples, spec) = read_wav_mono(&args.input)?;
+    let denoiser_mode = args.denoiser_mode();
+    let pipeline_input_gain = if denoiser_mode == Denoiser::Rnnoise {
+        for sample in &mut samples {
+            *sample = (*sample * args.input_gain.max(0.0)).clamp(-1.0, 1.0);
+        }
+        samples = process_rnnoise_finite(&samples, spec.sample_rate)?;
+        1.0
+    } else {
+        args.input_gain
+    };
     let chunk_samples = chunk_samples_for_rate(spec.sample_rate, args.chunk_ms);
     let output_extra_ms = DEFAULT_CROSSFADE_MS
         .saturating_add(DEFAULT_SOLA_SEARCH_MS)
@@ -127,8 +140,8 @@ pub fn run_wav(args: WavArgs) -> Result<()> {
         pitch_shift: args.pitch_shift,
         f0_threshold: args.f0_threshold,
         silence_threshold: 0.0,
-        input_gain: args.input_gain,
-        noise_gate_enabled: args.noise_gate,
+        input_gain: pipeline_input_gain,
+        noise_gate_enabled: denoiser_mode == Denoiser::NoiseGate,
         noise_gate_threshold: args.noise_gate_threshold,
         noise_gate_attack_ms: args.noise_gate_attack_ms,
         noise_gate_release_ms: args.noise_gate_release_ms,
@@ -197,6 +210,16 @@ pub fn run_wav(args: WavArgs) -> Result<()> {
         chunks
     );
     Ok(())
+}
+
+#[cfg(feature = "rnnoise")]
+fn process_rnnoise_finite(samples: &[f32], sample_rate: u32) -> Result<Vec<f32>> {
+    vc_core::rnnoise::RnnoiseDenoiser::process_finite(samples, sample_rate)
+}
+
+#[cfg(not(feature = "rnnoise"))]
+fn process_rnnoise_finite(_samples: &[f32], _sample_rate: u32) -> Result<Vec<f32>> {
+    anyhow::bail!("RNNoise support is not enabled in this build")
 }
 
 fn wav_model_input_chunk<'a>(

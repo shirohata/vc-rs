@@ -111,6 +111,10 @@ RVC 音声変換モデル（`.onnx`）は別途自分で用意してください
 設定は自動的に保存され（`%APPDATA%\vc-rs\gui.toml`）、次回起動時に復元されます。
 動作確認用に **Passthrough**（変換せず素通し）も使えます。
 
+入力ノイズ抑制は **Input denoiser** から `off` / `noise-gate` / `rnnoise` を選択
+できます。RNNoiseは組み込みモデルを使うため、追加モデルは不要です。デノイザの
+変更は **Apply / Start** で反映され、VST3版にはRNNoiseは含まれません。
+
 ## リアルタイム設定の調整
 
 音切れ・遅延・CPU/GPU 負荷のバランスは **Chunk ms** と **Extra convert ms** で

@@ -31,6 +31,9 @@ cuda = ["ort", "ort/cuda"]
 # Runtime 2.x and dynamically loads its shared ONNX Runtime + DirectML binaries,
 # reducing redistributed DLL size. The Windows ML 2.x runtime exposes ORT API 24.
 windowsml = ["ort", "ort/load-dynamic", "ort/api-24", "ort/directml"]
+# Pure-Rust RNNoise-compatible input denoising. Kept optional so package-scoped
+# VST3 builds do not compile or ship the standalone denoiser.
+rnnoise = ["dep:nnnoiseless"]
 
 [dependencies]
 anyhow.workspace = true
@@ -40,6 +43,7 @@ ort = { workspace = true, optional = true }
 audioadapter-buffers = "3"
 xxhash-rust = { version = "0.8.15", default-features = false, features = ["xxh3"] }
 clap = { version = "4.5", features = ["derive"], optional = true }
+nnnoiseless = { version = "0.5.2", default-features = false, optional = true }
 
 [build-dependencies]
 cc = "1"

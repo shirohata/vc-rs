@@ -8,6 +8,6 @@ pub mod audio;
 mod realtime;
 
 pub use realtime::{
-    AudioBackend, DeviceList, EngineController, EngineState, EngineStatusSnapshot, LiveParams,
-    RealtimeConfig, Smoother, TelemetrySnapshot,
+    AudioBackend, DenoiserMode, DeviceList, EngineController, EngineState, EngineStatusSnapshot,
+    LiveParams, RealtimeConfig, Smoother, TelemetrySnapshot,
 };

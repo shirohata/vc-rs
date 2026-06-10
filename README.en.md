@@ -117,6 +117,10 @@ Settings are saved automatically (`%APPDATA%\vc-rs\gui.toml`) and restored on th
 next launch. A **Passthrough** toggle (no conversion) is available for checking
 the signal path.
 
+Choose `off`, `noise-gate`, or `rnnoise` under **Input denoiser**. RNNoise uses
+an embedded model and needs no additional model download. Denoiser changes apply
+on **Apply / Start**. RNNoise is not included in VST3.
+
 ## Tuning real-time settings
 
 Balance dropouts, latency, and CPU/GPU load with **Chunk ms** and **Extra convert

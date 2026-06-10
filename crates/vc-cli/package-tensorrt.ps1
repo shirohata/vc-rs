@@ -7,7 +7,7 @@
 
 .DESCRIPTION
     Run AFTER:
-        cargo build --release -p vc-cli --no-default-features --features tensorrt
+        cargo build --release -p vc-cli --no-default-features --features tensorrt,rnnoise
 
     The GPU path runs through native TensorRT (no ONNX Runtime CUDA EP, no
     cuDNN/cuBLAS/cuFFT). vc-rs.exe links `nvinfer_<N>.dll` / `nvinfer_plugin_<N>.dll`
@@ -150,7 +150,7 @@ function Find-CudaBin([int]$cudaMajor) {
 if (-not $DestDir) { $DestDir = Join-Path $repoRoot 'target\release' }
 $DestDir = Resolve-Required $DestDir 'DestDir'
 if (-not (Test-Path (Join-Path $DestDir 'vc-rs.exe'))) {
-    throw "vc-rs.exe not found in $DestDir. Build it first: cargo build --release -p vc-cli --no-default-features --features tensorrt"
+    throw "vc-rs.exe not found in $DestDir. Build it first: cargo build --release -p vc-cli --no-default-features --features tensorrt,rnnoise"
 }
 
 if (-not $TensorRtBin) {

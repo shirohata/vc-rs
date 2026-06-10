@@ -120,6 +120,8 @@ lower `--chunk-ms`** to reduce latency.
   up, `-12.0` one octave down.
 - `--input-gain 1.0` / `--output-gain 1.0`: input/output gain (default: 1.0).
   Raise when too quiet; raising too far clips.
+- `--denoiser off|noise-gate|rnnoise`: exclusive input denoiser selection.
+  RNNoise uses an embedded model. The old `--noise-gate` flag remains as an alias.
 - `--silence-threshold 0.0001`: threshold below which input is treated as
   silence.
 - `--rms-mix-rate <0.0-1.0>`: closer to 0.0 follows the input's loudness
@@ -130,6 +132,10 @@ Other options the GUI keeps pinned are also available from the CLI:
 `--rvc-output-tail-discard-ms`, `--gpu-priority normal|high`, and the WASAPI
 controls (`--audio-backend wasapi`, `--wasapi-exclusive*`, `--wasapi-buffer-ms`).
 See `--help` for the full list and defaults.
+
+`wav --denoiser rnnoise` compensates RNNoise's fixed streaming delay and keeps
+the output WAV at the original sample count. RNNoise is available only in the
+standalone CLI/GUI packages, not VST3.
 
 ## Windows ML execution providers (windowsml package)
 

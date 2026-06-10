@@ -9,8 +9,8 @@ use eframe::egui;
 use serde::{Deserialize, Serialize};
 use tracing_subscriber::EnvFilter;
 use vc_app::{
-    AudioBackend, EngineController, EngineState, LiveParams, RealtimeConfig, Smoother,
-    TelemetrySnapshot,
+    AudioBackend, DenoiserMode, EngineController, EngineState, LiveParams, RealtimeConfig,
+    Smoother, TelemetrySnapshot,
 };
 use vc_core::Provider;
 
@@ -139,6 +139,8 @@ struct GuiSettings {
     speaker_id: i64,
     input_gain: f32,
     output_gain: f32,
+    denoiser: String,
+    #[serde(skip_serializing)]
     noise_gate_enabled: bool,
     noise_gate_threshold: f32,
     noise_gate_attack_ms: f32,
@@ -178,6 +180,7 @@ impl Default for GuiSettings {
             speaker_id: 0,
             input_gain: 1.0,
             output_gain: 1.0,
+            denoiser: "off".to_string(),
             noise_gate_enabled: false,
             noise_gate_threshold: 0.01,
             noise_gate_attack_ms: 5.0,
@@ -210,6 +213,14 @@ impl GuiSettings {
         if !gpu_priority_names().contains(&self.gpu_priority.as_str()) {
             self.gpu_priority = "high".to_string();
         }
+        // Migrate settings written before the exclusive denoiser selector.
+        if self.noise_gate_enabled && self.denoiser == "off" {
+            self.denoiser = "noise-gate".to_string();
+        }
+        self.noise_gate_enabled = false;
+        if !denoiser_names().contains(&self.denoiser.as_str()) {
+            self.denoiser = "off".to_string();
+        }
     }
 
     fn live(&self) -> LiveParams {
@@ -218,7 +229,6 @@ impl GuiSettings {
             speaker_id: self.speaker_id,
             input_gain: self.input_gain,
             output_gain: self.output_gain,
-            noise_gate_enabled: self.noise_gate_enabled,
             noise_gate_threshold: self.noise_gate_threshold,
         }
     }
@@ -249,6 +259,7 @@ impl GuiSettings {
             extra_convert_ms: self.extra_convert_ms,
             f0_threshold: self.f0_threshold,
             silence_threshold: self.silence_threshold,
+            denoiser_mode: parse_denoiser(&self.denoiser)?,
             noise_gate_attack_ms: self.noise_gate_attack_ms,
             noise_gate_release_ms: self.noise_gate_release_ms,
             noise_gate_floor: self.noise_gate_floor,
@@ -496,13 +507,20 @@ impl eframe::App for VcGui {
                         .text("Output gain"),
                 )
                 .changed();
-            // Noise gate: enabled + threshold apply live; attack/release/floor
-            // are baked into the gate at (re)load, so they take effect on the
-            // next Apply/Start.
-            changed |= ui
-                .checkbox(&mut self.settings.noise_gate_enabled, "Noise gate")
-                .changed();
-            ui.add_enabled_ui(self.settings.noise_gate_enabled, |ui| {
+            egui::ComboBox::from_label("Input denoiser")
+                .selected_text(&self.settings.denoiser)
+                .show_ui(ui, |ui| {
+                    for denoiser in denoiser_names() {
+                        changed |= ui
+                            .selectable_value(
+                                &mut self.settings.denoiser,
+                                denoiser.to_string(),
+                                *denoiser,
+                            )
+                            .changed();
+                    }
+                });
+            if self.settings.denoiser == "noise-gate" {
                 changed |= ui
                     .add(
                         egui::Slider::new(&mut self.settings.noise_gate_threshold, 0.0001..=0.5)
@@ -528,7 +546,7 @@ impl eframe::App for VcGui {
                             .text("Gate floor"),
                     )
                     .changed();
-            });
+            }
             if changed {
                 self.changed();
             }
@@ -716,6 +734,19 @@ fn parse_gpu_priority(value: &str) -> Result<vc_core::model_rvc::GpuPriority, St
     }
 }
 
+fn parse_denoiser(value: &str) -> Result<DenoiserMode, String> {
+    match value {
+        "off" => Ok(DenoiserMode::Off),
+        "noise-gate" => Ok(DenoiserMode::NoiseGate),
+        "rnnoise" => Ok(DenoiserMode::Rnnoise),
+        _ => Err(format!("Unsupported denoiser: {value}")),
+    }
+}
+
+fn denoiser_names() -> &'static [&'static str] {
+    &["off", "noise-gate", "rnnoise"]
+}
+
 fn gpu_priority_names() -> &'static [&'static str] {
     &["high", "normal"]
 }
@@ -766,6 +797,20 @@ mod tests {
         let settings: GuiSettings = toml::from_str("unknown = 1\npitch_shift = 2.5").unwrap();
         assert_eq!(settings.pitch_shift, 2.5);
         assert_eq!(settings.gpu_priority, "high");
+    }
+
+    #[test]
+    fn legacy_noise_gate_setting_migrates_to_denoiser_mode() {
+        let mut settings: GuiSettings =
+            toml::from_str("noise_gate_enabled = true\npassthrough = true").unwrap();
+        settings.normalize_gui_managed_settings();
+
+        assert_eq!(settings.denoiser, "noise-gate");
+        assert!(!settings.noise_gate_enabled);
+        assert_eq!(
+            settings.realtime().unwrap().denoiser_mode,
+            DenoiserMode::NoiseGate
+        );
     }
 
     #[test]

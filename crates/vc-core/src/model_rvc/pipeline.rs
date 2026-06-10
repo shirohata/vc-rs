@@ -31,21 +31,25 @@ use super::tensorrt::{tensor_rt_warmup_feature_len, TensorRtSharedWaveform};
 const SKIP_SILENT_CHUNKS: bool = false;
 
 /// Input-side denoising stage, applied to the raw input (after `input_gain`)
-/// before RMS/silence detection and feature/F0 extraction. Currently only a
-/// noise gate. Future denoisers (e.g. RNNoise) plug in by adding a variant
-/// here and a match arm in `process_in_place` — the call site in `process()`
-/// does not change.
+/// before RMS/silence detection and feature/F0 extraction. Keep future denoisers
+/// behind variants and match arms here so the timing-sensitive call site in
+/// `process()` does not change.
 enum InputDenoiser {
     Off,
     Gate(dsp::NoiseGate),
+    #[cfg(feature = "rnnoise")]
+    Rnnoise(Box<crate::rnnoise::RnnoiseDenoiser>),
 }
 
 impl InputDenoiser {
-    fn process_in_place(&mut self, buf: &mut [f32]) {
+    fn process_in_place(&mut self, buf: &mut [f32]) -> Result<()> {
         match self {
             InputDenoiser::Off => {}
             InputDenoiser::Gate(gate) => gate.process_in_place(buf),
+            #[cfg(feature = "rnnoise")]
+            InputDenoiser::Rnnoise(denoiser) => denoiser.process_in_place(buf)?,
         }
+        Ok(())
     }
 }
 
@@ -135,6 +139,18 @@ pub struct RvcPipelineConfig<'a> {
 }
 
 impl RvcPipeline {
+    #[cfg(feature = "rnnoise")]
+    pub fn load_with_rnnoise(config: RvcPipelineConfig<'_>) -> Result<Self> {
+        if config.noise_gate_enabled {
+            bail!("RNNoise and the input noise gate are mutually exclusive");
+        }
+        let sample_rate = config.sample_rate;
+        let mut pipeline = Self::load(config)?;
+        pipeline.input_denoiser =
+            InputDenoiser::Rnnoise(Box::new(crate::rnnoise::RnnoiseDenoiser::new(sample_rate)?));
+        Ok(pipeline)
+    }
+
     pub fn load(config: RvcPipelineConfig<'_>) -> Result<Self> {
         if provider_needs_fixed_shape_profile(config.provider) {
             return Self::load_fixed_shape(config);
@@ -590,6 +606,12 @@ impl RvcPipeline {
     /// release are not live-adjustable (they shape the smoothing coefficients
     /// fixed at construction).
     pub fn set_noise_gate(&mut self, enabled: bool, threshold: f32) {
+        // Standalone live-parameter updates must not replace a configured
+        // stateful denoiser. Future denoiser variants need the same guard.
+        #[cfg(feature = "rnnoise")]
+        if matches!(self.input_denoiser, InputDenoiser::Rnnoise(_)) {
+            return;
+        }
         if !enabled {
             self.input_denoiser = InputDenoiser::Off;
             return;
@@ -632,7 +654,7 @@ impl VoiceModel for RvcPipeline {
         // denoiser forces an owned buffer (`to_mut` clones a borrowed slice);
         // the gain==1.0 + denoiser-off path stays zero-copy.
         if !matches!(self.input_denoiser, InputDenoiser::Off) {
-            self.input_denoiser.process_in_place(input_audio.to_mut());
+            self.input_denoiser.process_in_place(input_audio.to_mut())?;
         }
         let input_audio = input_audio.as_ref();
         let input_rms = dsp::rms(input_audio);

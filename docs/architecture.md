@@ -76,7 +76,8 @@ This lifecycle preserves three invariants:
 
 ```mermaid
 flowchart TD
-    input["Device-rate mono chunk"] --> state["Rolling stream state"]
+    input["Device-rate mono chunk"] --> denoise["Off / Gate / RNNoise"]
+    denoise --> state["Rolling stream state"]
     state --> resample["Resample/context at 16 kHz"]
     resample --> embed["Content embedder"]
     resample --> f0["F0 estimator"]
@@ -91,6 +92,11 @@ flowchart TD
     level --> join["SOLA or PSOLA chunk join"]
     join --> device["Device-rate output chunk"]
 ```
+
+Standalone RNNoise runs after input gain and before RMS/silence detection,
+ContentVec, and F0 extraction. Its fixed-delay adapter preserves the input sample
+count for every worker call while retaining recurrent and resampler state across
+chunks. VST3 intentionally does not enable or ship this optional core feature.
 
 Conceptually, RVC conversion has three model-facing inputs:
 

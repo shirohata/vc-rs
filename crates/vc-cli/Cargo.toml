@@ -15,10 +15,11 @@ path = "src/main.rs"
 # `cargo build`/`cargo test` keep their current backend set. The distribution
 # packages (package.ps1) build single-provider variants explicitly with
 # `--no-default-features --features windowsml|tensorrt|cuda`, mirroring vc-vst3.
-default = ["windowsml", "tensorrt"]
+default = ["windowsml", "tensorrt", "rnnoise"]
 windowsml = ["vc-core/windowsml", "vc-app/windowsml"]
 tensorrt = ["vc-core/tensorrt", "vc-app/tensorrt"]
 cuda = ["vc-core/cuda", "vc-app/cuda"]
+rnnoise = ["vc-core/rnnoise", "vc-app/rnnoise"]
 # Static ORT CPU only: a self-contained, deterministic `vc-rs.exe` for the A/B
 # audio comparison workflow (see scripts/compare-audio.ps1). Build with
 # `--no-default-features --features cpu`.

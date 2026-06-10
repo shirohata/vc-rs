@@ -11,7 +11,7 @@
     VC_RS_WINDOWSML_BOOTSTRAP_DLL).
 
     Run AFTER building the CLI, e.g.:
-        cargo build --release -p vc-cli --no-default-features --features windowsml
+        cargo build --release -p vc-cli --no-default-features --features windowsml,rnnoise
 
 .PARAMETER DestDir
     Directory holding vc-rs.exe to populate. Default: target\release.
@@ -44,7 +44,7 @@ if (-not $DestDir) { $DestDir = Join-Path $repoRoot 'target\release' }
 if (-not (Test-Path $DestDir)) { throw "DestDir not found: $DestDir" }
 $DestDir = (Resolve-Path $DestDir).Path
 if (-not (Test-Path (Join-Path $DestDir 'vc-rs.exe'))) {
-    throw "vc-rs.exe not found in $DestDir. Build it first: cargo build --release -p vc-cli --no-default-features --features windowsml"
+    throw "vc-rs.exe not found in $DestDir. Build it first: cargo build --release -p vc-cli --no-default-features --features windowsml,rnnoise"
 }
 
 # When downloading the nupkg we also grab its license.txt — the Windows App SDK

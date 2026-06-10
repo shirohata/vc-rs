@@ -130,8 +130,8 @@ if (-not (Get-Command cargo-about -ErrorAction SilentlyContinue)) {
 # Single-provider feature set per variant. `--no-default-features` drops the
 # other backend so the binary stays lean (a tensorrt build sheds ONNX Runtime).
 $buildFeatureArgs = switch ($Variant) {
-    'windowsml' { @('--no-default-features', '--features', 'windowsml') }
-    'tensorrt' { @('--no-default-features', '--features', 'tensorrt') }
+    'windowsml' { @('--no-default-features', '--features', 'windowsml,rnnoise') }
+    'tensorrt' { @('--no-default-features', '--features', 'tensorrt,rnnoise') }
 }
 
 Push-Location $repoRoot

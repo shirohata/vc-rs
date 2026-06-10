@@ -108,6 +108,23 @@ pub enum Smoother {
     Psola,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum Denoiser {
+    Off,
+    NoiseGate,
+    Rnnoise,
+}
+
+impl From<Denoiser> for vc_app::DenoiserMode {
+    fn from(value: Denoiser) -> Self {
+        match value {
+            Denoiser::Off => Self::Off,
+            Denoiser::NoiseGate => Self::NoiseGate,
+            Denoiser::Rnnoise => Self::Rnnoise,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 pub enum GpuPriority {
     Normal,
@@ -221,7 +238,9 @@ pub struct RunArgs {
     pub input_gain: f32,
     #[arg(long, default_value_t = DEFAULT_OUTPUT_GAIN)]
     pub output_gain: f32,
-    #[arg(long = "noise-gate", action = clap::ArgAction::SetTrue, help = "Enable the input noise gate")]
+    #[arg(long, value_enum, help = "Input denoiser: off, noise-gate, or rnnoise")]
+    pub denoiser: Option<Denoiser>,
+    #[arg(long = "noise-gate", conflicts_with = "denoiser", action = clap::ArgAction::SetTrue, help = "Deprecated alias for --denoiser noise-gate")]
     pub noise_gate: bool,
     #[arg(
         long,
@@ -289,7 +308,9 @@ pub struct WavArgs {
     pub input_gain: f32,
     #[arg(long, default_value_t = DEFAULT_OUTPUT_GAIN)]
     pub output_gain: f32,
-    #[arg(long = "noise-gate", action = clap::ArgAction::SetTrue, help = "Enable the input noise gate")]
+    #[arg(long, value_enum, help = "Input denoiser: off, noise-gate, or rnnoise")]
+    pub denoiser: Option<Denoiser>,
+    #[arg(long = "noise-gate", conflicts_with = "denoiser", action = clap::ArgAction::SetTrue, help = "Deprecated alias for --denoiser noise-gate")]
     pub noise_gate: bool,
     #[arg(
         long,
@@ -387,6 +408,14 @@ fn parse_unit_f32(value: &str) -> Result<f32, String> {
 }
 
 impl RunArgs {
+    pub fn denoiser_mode(&self) -> Denoiser {
+        self.denoiser.unwrap_or(if self.noise_gate {
+            Denoiser::NoiseGate
+        } else {
+            Denoiser::Off
+        })
+    }
+
     pub fn validate_audio_options(&self) -> Result<(), String> {
         if (self.wasapi_exclusive || self.wasapi_exclusive_input || self.wasapi_exclusive_output)
             && self.audio_backend != AudioBackend::Wasapi
@@ -402,6 +431,16 @@ impl RunArgs {
 
     pub fn wasapi_output_exclusive(&self) -> bool {
         self.wasapi_exclusive || self.wasapi_exclusive_output
+    }
+}
+
+impl WavArgs {
+    pub fn denoiser_mode(&self) -> Denoiser {
+        self.denoiser.unwrap_or(if self.noise_gate {
+            Denoiser::NoiseGate
+        } else {
+            Denoiser::Off
+        })
     }
 }
 
@@ -1020,6 +1059,32 @@ mod tests {
             args.validate_audio_options().unwrap_err(),
             "--wasapi-exclusive* options require --audio-backend wasapi"
         );
+    }
+
+    #[test]
+    fn parses_exclusive_denoiser_modes_and_legacy_gate_alias() {
+        let cli = Cli::try_parse_from(["vc-rs", "run", "--passthrough", "--denoiser", "rnnoise"])
+            .unwrap();
+        let Command::Run(args) = cli.command else {
+            panic!("expected run command");
+        };
+        assert_eq!(args.denoiser_mode(), Denoiser::Rnnoise);
+
+        let cli = Cli::try_parse_from(["vc-rs", "run", "--passthrough", "--noise-gate"]).unwrap();
+        let Command::Run(args) = cli.command else {
+            panic!("expected run command");
+        };
+        assert_eq!(args.denoiser_mode(), Denoiser::NoiseGate);
+
+        assert!(Cli::try_parse_from([
+            "vc-rs",
+            "run",
+            "--passthrough",
+            "--noise-gate",
+            "--denoiser",
+            "rnnoise",
+        ])
+        .is_err());
     }
 
     #[test]
