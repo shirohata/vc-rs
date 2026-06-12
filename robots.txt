@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://shirohata.github.io/vc-rs/sitemap.xml
