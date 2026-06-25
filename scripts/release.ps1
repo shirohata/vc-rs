@@ -13,7 +13,8 @@
       4. Scan each ZIP for release blockers: prohibited files, backend
          cross-contamination, build-machine paths / user names leaked into our
          own binaries, and missing required files (LICENSE, notices, binaries).
-      5. (optional, -Publish) require the remote release branch (main by
+      5. (optional, -Publish) re-run CI's fmt + clippy quality gate on the
+         committed state, then require the remote release branch (main by
          default) to fast-forward to the current commit, then atomically push
          that branch update and the annotated v<version> tag before creating a
          GitHub release with all four ZIPs attached. GitHub shows a SHA-256
@@ -296,6 +297,34 @@ if ($LASTEXITCODE -ne 0) { throw "git status failed (exit $LASTEXITCODE)" }
 if ($worktreeChanges.Count -gt 0) {
     throw "Publishing requires a clean worktree. Commit or remove local changes first."
 }
+
+# ---- 5a. lint + format gate ------------------------------------------------
+
+# CI's fmt + clippy job is the quality gate the published commit must pass, but
+# CI runs asynchronously after push and was never a precondition for tagging --
+# v0.4.0 was cut from a commit whose clippy job had failed. Re-run the same two
+# commands here (against the now-confirmed-clean worktree) so a release can never
+# be published from a commit that fails them. These are compile-only checks and
+# need no GPU DLLs on PATH; keep the commands identical to .github/workflows/ci.yml
+# and `just lint` so the gate matches what CI enforces.
+Push-Location $repoRoot
+try {
+    Write-Host "==> Lint gate: cargo fmt --all --check" -ForegroundColor Cyan
+    cargo fmt --all --check
+    if ($LASTEXITCODE -ne 0) {
+        throw "rustfmt check failed; release blocked. Run 'cargo fmt --all', recommit, and retry."
+    }
+
+    Write-Host "==> Lint gate: cargo clippy --workspace --all-targets -- -D warnings" -ForegroundColor Cyan
+    cargo clippy --workspace --all-targets -- -D warnings
+    if ($LASTEXITCODE -ne 0) {
+        throw "clippy reported warnings/errors; release blocked. Fix them, recommit, and retry."
+    }
+}
+finally {
+    Pop-Location
+}
+Write-Host "==> Lint gate clean (fmt + clippy)" -ForegroundColor Green
 
 $headCommit = (git -C $repoRoot rev-parse HEAD)
 if ($LASTEXITCODE -ne 0) { throw "git rev-parse HEAD failed (exit $LASTEXITCODE)" }
