@@ -252,10 +252,10 @@ pub fn select_catalog_provider_info(
     )
 }
 
-fn select_catalog_provider_info_by_candidates<'a>(
-    providers: &'a [CatalogProviderInfo],
+fn select_catalog_provider_info_by_candidates(
+    providers: &[CatalogProviderInfo],
     candidates: impl Iterator<Item = &'static CatalogCandidate>,
-) -> Option<&'a CatalogProviderInfo> {
+) -> Option<&CatalogProviderInfo> {
     let mut fallback = None;
     for candidate in candidates {
         for provider in providers
@@ -771,6 +771,56 @@ const CATALOG_PRIORITY: &[CatalogCandidate] = &[
     },
 ];
 
+struct ComInit {
+    should_uninitialize: bool,
+}
+
+impl ComInit {
+    fn new() -> Result<Self> {
+        let hr = unsafe { CoInitializeEx(ptr::null_mut(), COINIT_MULTITHREADED) };
+        match hr {
+            0 | 1 => Ok(Self {
+                should_uninitialize: true,
+            }),
+            RPC_E_CHANGED_MODE => Ok(Self {
+                should_uninitialize: false,
+            }),
+            hr if hr < 0 => bail!("CoInitializeEx failed: HRESULT 0x{:08X}", hr as u32),
+            _ => Ok(Self {
+                should_uninitialize: false,
+            }),
+        }
+    }
+}
+
+impl Drop for ComInit {
+    fn drop(&mut self) {
+        if self.should_uninitialize {
+            unsafe { CoUninitialize() };
+        }
+    }
+}
+
+unsafe fn load_symbol<T>(module: Hmodule, name: &'static [u8]) -> Result<T> {
+    let symbol = GetProcAddress(module, name.as_ptr().cast());
+    if symbol.is_null() {
+        let name = std::str::from_utf8(&name[..name.len() - 1]).unwrap_or("<non-utf8>");
+        bail!("GetProcAddress({name}) failed for Windows App SDK bootstrapper");
+    }
+    Ok(std::mem::transmute_copy(&symbol))
+}
+
+fn check_hr(hr: Hresult, what: &str) -> Result<()> {
+    if hr < 0 {
+        bail!("{what} failed: HRESULT 0x{:08X}", hr as u32);
+    }
+    Ok(())
+}
+
+fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -869,54 +919,4 @@ mod tests {
             Some(CatalogExecutionProvider::NvTensorRtRtx)
         );
     }
-}
-
-struct ComInit {
-    should_uninitialize: bool,
-}
-
-impl ComInit {
-    fn new() -> Result<Self> {
-        let hr = unsafe { CoInitializeEx(ptr::null_mut(), COINIT_MULTITHREADED) };
-        match hr {
-            0 | 1 => Ok(Self {
-                should_uninitialize: true,
-            }),
-            RPC_E_CHANGED_MODE => Ok(Self {
-                should_uninitialize: false,
-            }),
-            hr if hr < 0 => bail!("CoInitializeEx failed: HRESULT 0x{:08X}", hr as u32),
-            _ => Ok(Self {
-                should_uninitialize: false,
-            }),
-        }
-    }
-}
-
-impl Drop for ComInit {
-    fn drop(&mut self) {
-        if self.should_uninitialize {
-            unsafe { CoUninitialize() };
-        }
-    }
-}
-
-unsafe fn load_symbol<T>(module: Hmodule, name: &'static [u8]) -> Result<T> {
-    let symbol = GetProcAddress(module, name.as_ptr().cast());
-    if symbol.is_null() {
-        let name = std::str::from_utf8(&name[..name.len() - 1]).unwrap_or("<non-utf8>");
-        bail!("GetProcAddress({name}) failed for Windows App SDK bootstrapper");
-    }
-    Ok(std::mem::transmute_copy(&symbol))
-}
-
-fn check_hr(hr: Hresult, what: &str) -> Result<()> {
-    if hr < 0 {
-        bail!("{what} failed: HRESULT 0x{:08X}", hr as u32);
-    }
-    Ok(())
-}
-
-fn wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
 }
