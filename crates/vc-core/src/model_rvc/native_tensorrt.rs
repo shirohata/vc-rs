@@ -68,6 +68,15 @@ mod ffi {
             rnd_name: *const c_char,
             rnd: *const f32,
             rnd_len: usize,
+            // Optional streaming NSF inputs. `nsf_name`/`nsf` are null and `nsf_len`
+            // is 0 (and `phase_name`/`phase` null) for conventional exports; for a
+            // streaming export they bind the per-sample source noise and the
+            // single-element window-start phase under the model's input names.
+            nsf_name: *const c_char,
+            nsf: *const f32,
+            nsf_len: usize,
+            phase_name: *const c_char,
+            phase: *const f32,
             feats: *const f32,
             feats_len: usize,
             pitch: *const i64,
@@ -151,6 +160,18 @@ struct NativeRvcRnd {
     channels: NonZeroUsize,
 }
 
+// Resolved streaming-export I/O for the native path. The per-sample NSF source
+// noise and the window-start NSF phase are produced backend-neutrally by the
+// rolling CPU state and bound by name here; `audio_len` (== frames * frame_hop)
+// is kept to validate the caller's `nsf_noise` length. `phase_out` is emitted by
+// the engine but unread (vc-rs carries phase on the CPU), so it needs no field.
+#[cfg(native_tensorrt)]
+struct NativeRvcStream {
+    nsf_name: CString,
+    phase_name: CString,
+    audio_len: NonZeroUsize,
+}
+
 #[cfg_attr(not(native_tensorrt), allow(dead_code))]
 pub(super) struct NativeRvcEngine {
     #[cfg(native_tensorrt)]
@@ -163,6 +184,9 @@ pub(super) struct NativeRvcEngine {
     // `None` when the export samples its own noise (no `rnd` input).
     #[cfg(native_tensorrt)]
     rnd: Option<NativeRvcRnd>,
+    // `Some` only for streaming exports (NSF noise + phase inputs).
+    #[cfg(native_tensorrt)]
+    stream: Option<NativeRvcStream>,
 }
 
 // Native TensorRT handles own CUDA streams, execution contexts, and fixed device
@@ -420,17 +444,26 @@ impl NativeRvcEngine {
             .ok_or_else(|| anyhow!("RVC pitch profile must be [1, frames] with frames > 0"))?;
         let channels =
             NonZeroUsize::new(channels).ok_or_else(|| anyhow!("RVC channels is zero"))?;
-        // The scalar inputs (p_len/sid) are not part of the shape profile; add
-        // them under the model's resolved names so the builder's optimization
-        // profile and the engine bindings agree.
-        let load_profile = profile_with_scalars(
-            profile,
-            &[
-                (names.p_len.as_str(), &[1usize]),
-                (names.sid.as_str(), &[1usize]),
-            ],
-        );
-        let path = ensure_native_engine(model_path, profile, profile.profile_shapes.as_str())?;
+        // The scalar inputs (p_len/sid, and a streaming export's static phase_in
+        // [1,1,1]) are not in the dynamic shape profile; add them under the model's
+        // resolved names so the builder's optimization profile and the shim's
+        // per-input check / device-buffer allocation see every input. `nsf_noise`
+        // is already in `profile` (it has a dynamic axis; added by `rvc()`).
+        let mut scalars: Vec<(&str, &[usize])> = vec![
+            (names.p_len.as_str(), &[1usize][..]),
+            (names.sid.as_str(), &[1usize][..]),
+        ];
+        if let Some(phase_in) = names.phase_in.as_deref() {
+            scalars.push((phase_in, &[1usize, 1, 1][..]));
+        }
+        let load_profile = profile_with_scalars(profile, &scalars);
+        // Build with the full input profile (including p_len/sid, and phase_in for
+        // streaming): the rvc-onnx-web streaming export makes phone_lengths/sid
+        // dynamic ([-1]), so the builder needs an optimization profile for them,
+        // not just the dynamic feats/pitch/pitchf/rnd/nsf_noise. The engine cache
+        // key stays the dynamic `profile.profile_shapes`, so existing engines are
+        // reused and the extra static scalars do not force rebuilds.
+        let path = ensure_native_engine(model_path, profile, load_profile.as_str())?;
         // `handle` is unit in the no-TensorRT stub build; see the equivalent
         // binding in NativeContentVecEngine::load for the cfg rationale.
         #[cfg_attr(not(native_tensorrt), allow(clippy::let_unit_value))]
@@ -466,9 +499,15 @@ impl NativeRvcEngine {
             input_names: native_rvc_input_names(names)?,
             #[cfg(native_tensorrt)]
             rnd: native_rvc_rnd(names)?,
+            #[cfg(native_tensorrt)]
+            stream: native_rvc_stream(names, profile)?,
         })
     }
 
+    // Inputs mirror the ONNX RVC contract (feats/pitch/pitchf/sid/rnd plus the
+    // optional streaming nsf_noise/phase_in); an ad-hoc struct would only obscure
+    // it.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn infer(
         &mut self,
         feats: &[f32],
@@ -478,6 +517,10 @@ impl NativeRvcEngine {
         // Caller-supplied latent noise for `rnd`-input models (produced by the
         // rolling CPU state); `None` for models that sample their own noise.
         rnd: Option<&[f32]>,
+        // Streaming exports: per-output-sample NSF source noise `[1, audio_len, 1]`
+        // and the window-start NSF phase. `None` for conventional exports.
+        nsf_noise: Option<&[f32]>,
+        phase_in: Option<f32>,
     ) -> Result<Vec<f32>> {
         if feats.len() != self.frames.get() * self.channels.get() {
             bail!(
@@ -494,7 +537,9 @@ impl NativeRvcEngine {
                 self.frames.get()
             );
         }
-        infer_rvc(self, feats, pitch, pitchf, speaker_id, rnd)
+        infer_rvc(
+            self, feats, pitch, pitchf, speaker_id, rnd, nsf_noise, phase_in,
+        )
     }
 
     pub(super) fn frames(&self) -> usize {
@@ -1112,6 +1157,37 @@ fn native_rvc_rnd(names: &RvcIoNames) -> Result<Option<NativeRvcRnd>> {
 }
 
 #[cfg(native_tensorrt)]
+fn native_rvc_stream(
+    names: &RvcIoNames,
+    profile: &TensorRtSessionProfile,
+) -> Result<Option<NativeRvcStream>> {
+    let (Some(nsf), Some(phase)) = (names.nsf_noise.as_ref(), names.phase_in.as_ref()) else {
+        return Ok(None);
+    };
+    // `nsf_noise` is `[1, audio_len, 1]`; its middle axis is the validated length.
+    let audio_len = profile
+        .fixed_input_dims(nsf)?
+        .get(1)
+        .copied()
+        .and_then(NonZeroUsize::new)
+        .ok_or_else(|| {
+            anyhow!("RVC '{nsf}' profile must be [1, audio_len, 1] with audio_len > 0")
+        })?;
+    let nsf_name = CString::new(nsf.as_str()).with_context(|| {
+        format!("RVC nsf_noise input name '{nsf}' contains an interior NUL byte")
+    })?;
+    let phase_name = CString::new(phase.as_str()).with_context(|| {
+        format!("RVC phase_in input name '{phase}' contains an interior NUL byte")
+    })?;
+    Ok(Some(NativeRvcStream {
+        nsf_name,
+        phase_name,
+        audio_len,
+    }))
+}
+
+#[cfg(native_tensorrt)]
+#[allow(clippy::too_many_arguments)]
 fn infer_rvc(
     engine: &mut NativeRvcEngine,
     feats: &[f32],
@@ -1119,6 +1195,8 @@ fn infer_rvc(
     pitchf: &[f32],
     speaker_id: i64,
     rnd: Option<&[f32]>,
+    nsf_noise: Option<&[f32]>,
+    phase_in: Option<f32>,
 ) -> Result<Vec<f32>> {
     let mut output = vec![0.0f32; engine.output_len.get()];
     // Bind the caller-supplied latent noise (when this export takes it); pass null
@@ -1147,6 +1225,41 @@ fn infer_rvc(
         }
         None => (std::ptr::null(), std::ptr::null(), 0usize),
     };
+    // Streaming NSF inputs, bound the same way: validate the caller's `nsf_noise`
+    // length against the engine's fixed `audio_len`, and pass `phase_in` as a
+    // single-element tensor. `phase_value` must outlive the FFI call.
+    let phase_value = [phase_in.unwrap_or(0.0)];
+    let (nsf_name_ptr, nsf_ptr, nsf_len, phase_name_ptr, phase_ptr) = match engine.stream.as_ref() {
+        Some(stream) => {
+            let data = nsf_noise.ok_or_else(|| {
+                anyhow!("native TensorRT RVC model is streaming but no nsf_noise was provided")
+            })?;
+            if data.len() != stream.audio_len.get() {
+                bail!(
+                    "native TensorRT RVC nsf_noise length {} does not match audio_len {}",
+                    data.len(),
+                    stream.audio_len.get()
+                );
+            }
+            if phase_in.is_none() {
+                bail!("native TensorRT RVC model is streaming but no phase_in was provided");
+            }
+            (
+                stream.nsf_name.as_ptr(),
+                data.as_ptr(),
+                data.len(),
+                stream.phase_name.as_ptr(),
+                phase_value.as_ptr(),
+            )
+        }
+        None => (
+            std::ptr::null(),
+            std::ptr::null(),
+            0usize,
+            std::ptr::null(),
+            std::ptr::null(),
+        ),
+    };
     let mut message = MessageBuffer::new();
     let status = unsafe {
         ffi::vc_rs_trt_rvc_infer(
@@ -1159,6 +1272,11 @@ fn infer_rvc(
             rnd_name_ptr,
             rnd_ptr,
             rnd_len,
+            nsf_name_ptr,
+            nsf_ptr,
+            nsf_len,
+            phase_name_ptr,
+            phase_ptr,
             feats.as_ptr(),
             feats.len(),
             pitch.as_ptr(),
@@ -1179,6 +1297,7 @@ fn infer_rvc(
 }
 
 #[cfg(not(native_tensorrt))]
+#[allow(clippy::too_many_arguments)]
 fn infer_rvc(
     _engine: &mut NativeRvcEngine,
     _feats: &[f32],
@@ -1186,6 +1305,8 @@ fn infer_rvc(
     _pitchf: &[f32],
     _speaker_id: i64,
     _rnd: Option<&[f32]>,
+    _nsf_noise: Option<&[f32]>,
+    _phase_in: Option<f32>,
 ) -> Result<Vec<f32>> {
     bail!("native TensorRT RVC inference is unavailable in this binary")
 }

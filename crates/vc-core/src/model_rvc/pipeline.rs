@@ -567,13 +567,16 @@ impl RvcPipeline {
             }
         );
         let rvc_info = inspect_rvc_model(config.model)?;
-        // Streaming exports carry extra NSF noise/phase I/O that the fixed-shape
-        // profile and IoBinding / native-engine paths do not yet model. Their
-        // dynamic-shape graph runs on the CPU/CUDA/DirectML `load` path instead;
-        // fail clearly here rather than build an engine missing those inputs.
-        if rvc_info.stream.is_some() {
+        let stream_params = stream_params_from_info(&rvc_info)?;
+        // Native TensorRT models the streaming NSF noise/phase I/O in its
+        // fixed-shape profile and engine bindings (below). The ORT fixed-shape
+        // IoBinding paths (CUDA graph, Windows ML TensorRT-RTX) do not yet, so for
+        // those a streaming model must run on the dynamic-shape `load` path
+        // (CPU/CUDA/DirectML); fail clearly rather than build a binding missing
+        // those inputs.
+        if stream_params.is_some() && !config.provider.is_tensorrt() {
             bail!(
-                "provider {} does not support rvc-onnx-web streaming exports yet; use a CPU/CUDA/DirectML provider (windowsml) for streaming models",
+                "provider {} does not support rvc-onnx-web streaming exports yet; use native tensorrt, or a CPU/CUDA/DirectML provider (windowsml) for streaming models",
                 config.provider.label()
             );
         }
@@ -588,9 +591,6 @@ impl RvcPipeline {
             .rnd
             .as_ref()
             .and_then(|rnd| usize::try_from(rnd.channels).ok());
-        // Streaming exports cannot reach this fixed-shape path (bailed above), so
-        // the time state here is never streaming.
-        let stream_params: Option<StreamParams> = None;
         let extra_convert_samples =
             extra_convert_samples_from_ms(config.extra_convert_ms, rvc_sample_rate);
         let input_samples_16k = tensor_rt_model_input_samples_16k(
@@ -674,10 +674,13 @@ impl RvcPipeline {
                 )?;
                 drop(embedder_probe);
                 let feature_len = warmup.rvc_feature_len;
+                // ORT fixed-shape (CUDA graph) does not bind streaming I/O; such
+                // models are rejected at load above, so pass no stream hop here.
                 let rvc_profile = TensorRtSessionProfile::rvc(
                     feature_len,
                     expected_feat_channels_usize,
                     &rvc_info.io_names,
+                    None,
                 )
                 .with_gpu_priority(config.gpu_priority)
                 .with_gpu_device_id(gpu_device_id)
@@ -799,10 +802,13 @@ impl RvcPipeline {
             };
             let feature_len =
                 derive_rvc_feature_len(contentvec_frames, extra_convert_samples, rvc_sample_rate)?;
+            // Native TensorRT models streaming: pass the frame hop so the profile
+            // includes the `nsf_noise` `[1, feature_len*frame_hop, 1]` input.
             let rvc_profile = TensorRtSessionProfile::rvc(
                 feature_len,
                 expected_feat_channels_usize,
                 &rvc_info.io_names,
+                stream_params.map(|stream| stream.frame_hop),
             )
             .with_gpu_priority(config.gpu_priority)
             .with_gpu_device_id(gpu_device_id)
@@ -895,10 +901,13 @@ impl RvcPipeline {
                     &warmup.contentvec_output_shape,
                     shared_waveform.as_ref(),
                 )?;
+                // ORT fixed-shape (device-I/O) does not bind streaming I/O; such
+                // models are rejected at load above, so pass no stream hop here.
                 let rvc_profile = TensorRtSessionProfile::rvc(
                     feature_len,
                     expected_feat_channels_usize,
                     &rvc_info.io_names,
+                    None,
                 )
                 .with_gpu_priority(config.gpu_priority)
                 .with_gpu_device_id(gpu_device_id)

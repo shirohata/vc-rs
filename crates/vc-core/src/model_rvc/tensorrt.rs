@@ -118,7 +118,17 @@ impl TensorRtSessionProfile {
     // model's actual input names, so use the resolved aliases, not the canonical
     // vcclient `feats`/`pitch`/`pitchf` literals (RVC WebUI and third-party
     // converter exports name them differently).
-    pub(super) fn rvc(frames: usize, channels: usize, names: &RvcIoNames) -> Self {
+    //
+    // `stream_frame_hop` is `Some(frame_hop)` for a streaming export, which adds
+    // the dynamic NSF source-noise input `nsf_noise` `[1, frames*frame_hop, 1]` to
+    // the optimization profile (`phase_in` is static `[1,1,1]`, so it needs no
+    // profile entry and is added as a scalar at engine load).
+    pub(super) fn rvc(
+        frames: usize,
+        channels: usize,
+        names: &RvcIoNames,
+        stream_frame_hop: Option<usize>,
+    ) -> Self {
         let mut inputs = vec![
             TensorRtInputShape {
                 name: names.feats.clone(),
@@ -140,6 +150,15 @@ impl TensorRtSessionProfile {
             inputs.push(TensorRtInputShape {
                 name: rnd.name.clone(),
                 dims: vec![1, rnd.channels.max(0) as usize, frames],
+            });
+        }
+        // Streaming NSF source noise on the output-sample grid. `audio_len` is
+        // `frames * frame_hop`; it must be in the profile because that axis is
+        // dynamic in the model.
+        if let (Some(frame_hop), Some(nsf_noise)) = (stream_frame_hop, names.nsf_noise.as_ref()) {
+            inputs.push(TensorRtInputShape {
+                name: nsf_noise.clone(),
+                dims: vec![1, frames.saturating_mul(frame_hop), 1],
             });
         }
         Self::new(ModelRole::Rvc, inputs)

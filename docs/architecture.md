@@ -221,9 +221,14 @@ without touching callers.
     frame_hop`, wrapped to `[0, 1)`. This reproduces the model's per-frame phase
     step on the CPU; `phase_out` is read only for diagnostics.
 
-  Streaming runs on the dynamic-shape ORT path (CPU/CUDA/DirectML). Fixed-shape
-  backends (native TensorRT, Windows ML TensorRT-RTX) do not yet model the extra
-  I/O and fail clearly at load.
+  Streaming runs on the dynamic-shape ORT path (CPU/CUDA/DirectML) and on
+  **native TensorRT**: the fixed-shape profile adds `nsf_noise`
+  `[1, feature_len*frame_hop, 1]` (the `phone_lengths`/`sid` axes are dynamic in
+  the streaming export, so they join the build profile too) and `phase_in`
+  `[1,1,1]`, and the native shim binds both by name (`phase_out` is emitted but
+  unread). The ORT *fixed-shape IoBinding* paths (Windows ML TensorRT-RTX, CUDA
+  graph) do not yet model the extra I/O and fail clearly at load — use native
+  tensorrt or a dynamic-shape provider for those.
 
 - **Reset.** All of the above reset together whenever the audio timeline breaks —
   stream restart, sample-rate or chunk change, model reload, or passthrough↔RVC

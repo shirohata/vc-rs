@@ -118,7 +118,7 @@ fn derives_tensorrt_contentvec_profile_from_default_realtime_chunking() {
     assert_eq!(rmvpe_model_input_samples_16k(960, 48_000), 4_960);
     let contentvec = TensorRtSessionProfile::single_input(ModelRole::ContentVec, "audio", 18_240);
     let rmvpe = TensorRtSessionProfile::single_input(ModelRole::Rmvpe, "waveform", 4_960);
-    let rvc = TensorRtSessionProfile::rvc(114, 768, &RvcIoNames::canonical());
+    let rvc = TensorRtSessionProfile::rvc(114, 768, &RvcIoNames::canonical(), None);
 
     assert_eq!(contentvec.profile_shapes, "audio:1x18240");
     assert_eq!(rmvpe.profile_shapes, "waveform:1x4960");
@@ -226,7 +226,7 @@ fn tensor_rt_sanitizes_model_cache_components() {
 fn validates_tensorrt_profile_input_shapes() {
     let contentvec = TensorRtSessionProfile::single_input(ModelRole::ContentVec, "audio", 24_000);
     let rmvpe = TensorRtSessionProfile::single_input(ModelRole::Rmvpe, "waveform", 24_000);
-    let rvc = TensorRtSessionProfile::rvc(75, 768, &RvcIoNames::canonical());
+    let rvc = TensorRtSessionProfile::rvc(75, 768, &RvcIoNames::canonical(), None);
 
     validate_tensorrt_input_shape(Provider::TensorRt, Some(&contentvec), "audio", &[1, 24_000])
         .unwrap();
@@ -251,7 +251,7 @@ fn validates_tensorrt_profile_input_shapes() {
 
 #[test]
 fn looks_up_tensorrt_fixed_input_dims_explicitly() {
-    let rvc = TensorRtSessionProfile::rvc(113, 768, &RvcIoNames::canonical());
+    let rvc = TensorRtSessionProfile::rvc(113, 768, &RvcIoNames::canonical(), None);
 
     assert_eq!(rvc.fixed_input_dims("feats").unwrap(), &[1, 113, 768]);
     assert_eq!(rvc.fixed_input_dims("pitchf").unwrap(), &[1, 113]);

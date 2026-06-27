@@ -642,6 +642,15 @@ extern "C" int vc_rs_trt_rvc_infer(
     char const* rnd_name,
     float const* rnd,
     std::size_t rnd_len,
+    // Optional streaming NSF inputs: nsf_name/nsf are null (nsf_len 0) and
+    // phase_name/phase null for conventional exports; non-null binds the
+    // per-output-sample source noise [1, audio_len, 1] and the single-element
+    // window-start phase [1, 1, 1] under this engine's streaming input names.
+    char const* nsf_name,
+    float const* nsf,
+    std::size_t nsf_len,
+    char const* phase_name,
+    float const* phase,
     float const* feats,
     std::size_t feats_len,
     int64_t const* pitch,
@@ -674,6 +683,15 @@ extern "C" int vc_rs_trt_rvc_infer(
         msg.append("TensorRT RVC infer received a partial rnd input (name/data mismatch)\n");
         return 2;
     }
+    // Streaming NSF inputs are likewise matched pairs and arrive together.
+    if ((nsf_name == nullptr) != (nsf == nullptr)) {
+        msg.append("TensorRT RVC infer received a partial nsf_noise input (name/data mismatch)\n");
+        return 2;
+    }
+    if ((phase_name == nullptr) != (phase == nullptr)) {
+        msg.append("TensorRT RVC infer received a partial phase_in input (name/data mismatch)\n");
+        return 2;
+    }
     // Bind by the model's resolved tensor names: exporters disagree (vcclient
     // feats/p_len/pitchf vs RVC WebUI / rvc-onnx-web phone/phone_lengths/nsff0),
     // so the caller passes whichever names this engine actually exposes.
@@ -694,6 +712,15 @@ extern "C" int vc_rs_trt_rvc_infer(
         return 1;
     }
     if (rnd != nullptr && !copy_to_device(*native, rnd_name, rnd, rnd_len * sizeof(float), msg)) {
+        return 1;
+    }
+    // Streaming NSF source noise and window-start phase, when present. The phase
+    // tensor is a single float ([1, 1, 1]). `phase_out` is also an engine output
+    // but vc-rs carries phase on the CPU, so it is left unread.
+    if (nsf != nullptr && !copy_to_device(*native, nsf_name, nsf, nsf_len * sizeof(float), msg)) {
+        return 1;
+    }
+    if (phase != nullptr && !copy_to_device(*native, phase_name, phase, sizeof(float), msg)) {
         return 1;
     }
     return enqueue_and_copy(*native, output, output_len, msg) ? 0 : 1;

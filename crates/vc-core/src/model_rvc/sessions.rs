@@ -1213,13 +1213,13 @@ impl RvcModelSession {
             &pitch_shape,
         )?;
         if let Some(native) = self.native_rvc.as_mut() {
-            if is_streaming {
-                bail!("native TensorRT does not support rvc-onnx-web streaming exports yet");
-            }
             // The native TensorRT FFI still returns an owned Vec; copy it into the
             // caller buffer so the reuse contract holds for the ORT paths below.
             // Refactoring the native shim to write in place is out of scope here.
-            let converted = native.infer(feats, pitch, pitchf, speaker_id, rnd)?;
+            // Streaming exports pass their NSF noise/phase here too (the engine
+            // binds them when built with the streaming profile).
+            let converted =
+                native.infer(feats, pitch, pitchf, speaker_id, rnd, nsf_noise, phase_in)?;
             out.clear();
             out.extend_from_slice(&converted);
             return Ok(());
