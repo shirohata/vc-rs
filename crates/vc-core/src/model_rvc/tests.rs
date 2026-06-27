@@ -291,7 +291,7 @@ fn keeps_only_requested_output_tail() {
 // are unchanged; only the buffer the reference is drawn from moved.
 #[test]
 fn output_reference_audio_uses_tail_matching_trimmed_output() {
-    let mut state = RvcStreamState::new(48_000, None);
+    let mut state = RvcStreamState::new(48_000, None, None);
     state.audio_16k_buffer = (0..8).map(|value| value as f32).collect();
     let mut scratch = Vec::new();
 
@@ -304,7 +304,7 @@ fn output_reference_audio_uses_tail_matching_trimmed_output() {
 
 #[test]
 fn output_reference_audio_left_pads_when_history_is_short() {
-    let mut state = RvcStreamState::new(48_000, None);
+    let mut state = RvcStreamState::new(48_000, None, None);
     state.audio_16k_buffer = vec![1.0, 2.0];
     let mut scratch = Vec::new();
 
@@ -338,7 +338,7 @@ fn derives_output_len_like_reference_pipeline() {
 
 #[test]
 fn stream_state_aligns_convert_size_to_16k_hop_samples() {
-    let mut state = RvcStreamState::new(48_000, None);
+    let mut state = RvcStreamState::new(48_000, None, None);
     let input = vec![0.0; 24_000];
     let out = state
         .generate_input(&input, 48_000, 1_536, 1_536, 4_096)
@@ -348,7 +348,7 @@ fn stream_state_aligns_convert_size_to_16k_hop_samples() {
 
 #[test]
 fn stream_state_derives_out_size_from_extra_convert_size() {
-    let mut state = RvcStreamState::new(48_000, None);
+    let mut state = RvcStreamState::new(48_000, None, None);
     let input = vec![0.0; 24_000];
     let out = state
         .generate_input(&input, 48_000, 1_536, 1_536, 4_096)
@@ -358,7 +358,7 @@ fn stream_state_derives_out_size_from_extra_convert_size() {
 
 #[test]
 fn stream_state_zero_pads_initial_buffer() {
-    let mut state = RvcStreamState::new(48_000, None);
+    let mut state = RvcStreamState::new(48_000, None, None);
     let out = state
         .generate_input(&[1.0, 2.0, 3.0, 4.0], 48_000, 0, 0, 4_096)
         .unwrap();
@@ -374,7 +374,7 @@ fn stream_state_zero_pads_initial_buffer() {
 
 #[test]
 fn stream_state_keeps_16k_history_for_embedder() {
-    let mut state = RvcStreamState::new(48_000, None);
+    let mut state = RvcStreamState::new(48_000, None, None);
     let input = vec![0.25; 4_800];
 
     state.generate_input(&input, 48_000, 0, 0, 0).unwrap();
@@ -389,7 +389,7 @@ fn stream_state_keeps_16k_history_for_embedder() {
 
 #[test]
 fn stream_state_volume_excludes_crossfade_not_sola_search() {
-    let mut state = RvcStreamState::new(48_000, None);
+    let mut state = RvcStreamState::new(48_000, None, None);
     let mut input = vec![1.0; 80];
     input.extend(std::iter::repeat_n(0.0, 80));
 
@@ -400,7 +400,7 @@ fn stream_state_volume_excludes_crossfade_not_sola_search() {
 
 #[test]
 fn stream_state_volume_keeps_decay_from_previous_chunk() {
-    let mut state = RvcStreamState::new(48_000, None);
+    let mut state = RvcStreamState::new(48_000, None, None);
     let loud = vec![1.0; 160];
     let quiet = vec![0.0; 160];
 
@@ -440,7 +440,7 @@ fn pitchf_tail_for_output_matches_10ms_output_frames() {
 
 #[test]
 fn stream_state_pitch_update_places_rmvpe_tail_window_at_absolute_frame() {
-    let mut state = RvcStreamState::new(48_000, None);
+    let mut state = RvcStreamState::new(48_000, None, None);
     state.pitchf_buffer = (0..34).map(|frame| frame as f32).collect();
 
     state.update_pitchf_from_rmvpe_window(&[100.0, 101.0, 102.0, 103.0], 480);
@@ -451,7 +451,7 @@ fn stream_state_pitch_update_places_rmvpe_tail_window_at_absolute_frame() {
 
 #[test]
 fn stream_state_pitch_update_drops_center_padded_tail_frame() {
-    let mut state = RvcStreamState::new(48_000, None);
+    let mut state = RvcStreamState::new(48_000, None, None);
     state.pitchf_buffer = vec![0.0, 1.0, 2.0];
 
     state.update_pitchf_from_rmvpe_window(&[10.0, 20.0, 30.0, 40.0], 0);
@@ -481,7 +481,7 @@ fn out_size_tracks_model_sample_rate() {
     let device_rate = 48_000;
 
     let run = |rvc_rate: u32| {
-        RvcStreamState::new(rvc_rate, None)
+        RvcStreamState::new(rvc_rate, None, None)
             .generate_input(
                 &chunk,
                 device_rate,

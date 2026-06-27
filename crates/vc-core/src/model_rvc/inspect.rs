@@ -3,7 +3,7 @@ use std::path::Path;
 use anyhow::Result;
 use tracing::info;
 
-use super::onnx_meta::{read_model_io, RvcIoNames};
+use super::onnx_meta::{read_model_io, RvcIoNames, StreamFormat};
 
 #[cfg(feature = "ort")]
 use super::sessions::{describe_value_type, load_session};
@@ -135,6 +135,9 @@ pub(super) struct RvcModelInfo {
     /// `RVC_SAMPLE_RATE`. Threaded so the convert/output windows are sized at the
     /// model's real rate (e.g. 32 kHz) instead of the hardcoded 48 kHz.
     pub(super) rvc_sample_rate: Option<u32>,
+    /// Streaming-export descriptor (NSF phase / `nsf_noise` contract), or `None`
+    /// for a conventional RVC export. Drives the streaming time state.
+    pub(super) stream: Option<StreamFormat>,
 }
 
 pub(super) fn inspect_contentvec_input_name(
@@ -160,13 +163,23 @@ pub(super) fn inspect_rvc_model(path: &Path) -> Result<RvcModelInfo> {
     let expected_feat_channels = io.feat_channels(&io_names.feats)?;
     io.validate_rvc_metadata()?;
     let rvc_sample_rate = io.rvc_sample_rate();
+    let stream = io.stream_format()?;
     let rnd_desc = io_names
         .rnd
         .as_ref()
         .map(|rnd| format!("{}[1,{},frames]", rnd.name, rnd.channels))
         .unwrap_or_else(|| "none".to_string());
+    let stream_desc = stream
+        .as_ref()
+        .map(|stream| {
+            format!(
+                "v{} frame_hop={} sample_rate={}",
+                stream.version, stream.frame_hop, stream.sample_rate
+            )
+        })
+        .unwrap_or_else(|| "none".to_string());
     info!(
-        "inspected RVC model: {} inputs=[{},{},{},{},{}] rnd={} output={} feat_channels={} sample_rate={}",
+        "inspected RVC model: {} inputs=[{},{},{},{},{}] rnd={} output={} feat_channels={} sample_rate={} stream={}",
         path.display(),
         io_names.feats,
         io_names.p_len,
@@ -178,11 +191,13 @@ pub(super) fn inspect_rvc_model(path: &Path) -> Result<RvcModelInfo> {
         expected_feat_channels,
         rvc_sample_rate
             .map(|rate| rate.to_string())
-            .unwrap_or_else(|| "default".to_string())
+            .unwrap_or_else(|| "default".to_string()),
+        stream_desc
     );
     Ok(RvcModelInfo {
         expected_feat_channels,
         io_names,
         rvc_sample_rate,
+        stream,
     })
 }

@@ -752,6 +752,25 @@ fn resolve_rnd_input<'a>(
     }
 }
 
+// Pair an optional model input name with caller-supplied data: `(Some, Some)`
+// binds, `(Some, None)` is a contract violation (the model needs it), `(None, _)`
+// means the model has no such input so the data is ignored. Used for the optional
+// streaming `nsf_noise` input.
+#[cfg(feature = "ort")]
+fn resolve_optional_input<'a>(
+    name: Option<&'a str>,
+    data: Option<&'a [f32]>,
+    label: &str,
+) -> Result<Option<(&'a str, &'a [f32])>> {
+    match (name, data) {
+        (Some(name), Some(data)) => Ok(Some((name, data))),
+        (Some(name), None) => {
+            bail!("RVC model requires a '{name}' input but no {label} was provided")
+        }
+        (None, _) => Ok(None),
+    }
+}
+
 // CPU output binding is deliberately output-only: inputs still borrow the
 // worker-owned buffers for each synchronous run, while the RVC "audio" tensor
 // keeps stable preallocated storage across chunks with the same shapes.
@@ -1119,6 +1138,12 @@ impl RvcModelSession {
         if self.provider != Provider::Cpu {
             return Ok(());
         }
+        // Streaming exports have extra inputs (nsf_noise) and an extra output
+        // (phase_out) this output-only binding does not model; keep them on the
+        // plain session-run path so all I/O is bound by name each call.
+        if self.io_names.phase_in.is_some() {
+            return Ok(());
+        }
         let session = self
             .session
             .as_ref()
@@ -1157,8 +1182,16 @@ impl RvcModelSession {
         // rolling CPU state; `None` when the model samples its own noise. Each
         // backend below only binds this slice.
         rnd: Option<&[f32]>,
+        // Streaming-export NSF source noise `[1, audio_len, 1]` and window-start
+        // NSF phase. `None` for conventional exports. Only the dynamic-shape
+        // session-run path consumes them; streaming cannot reach the fixed-shape
+        // IoBinding / native paths (rejected at load).
+        nsf_noise: Option<&[f32]>,
+        phase_in: Option<f32>,
         out: &mut Vec<f32>,
     ) -> Result<()> {
+        // Streaming I/O is only modeled on the dynamic-shape session-run path.
+        let is_streaming = nsf_noise.is_some() || phase_in.is_some();
         let feats_shape_usize = i64_shape_to_usize(feats_shape, "feats")?;
         validate_tensorrt_input_shape(
             self.provider,
@@ -1180,6 +1213,9 @@ impl RvcModelSession {
             &pitch_shape,
         )?;
         if let Some(native) = self.native_rvc.as_mut() {
+            if is_streaming {
+                bail!("native TensorRT does not support rvc-onnx-web streaming exports yet");
+            }
             // The native TensorRT FFI still returns an owned Vec; copy it into the
             // caller buffer so the reuse contract holds for the ORT paths below.
             // Refactoring the native shim to write in place is out of scope here.
@@ -1191,9 +1227,15 @@ impl RvcModelSession {
         #[cfg(feature = "ort")]
         {
             if self.tensor_rt_binding.is_some() {
+                if is_streaming {
+                    bail!("the TensorRT IoBinding path does not support streaming exports yet");
+                }
                 return self
                     .infer_with_binding(feats, frame_len, pitch, pitchf, speaker_id, rnd, out);
             }
+            // The CPU output-binding fast path binds a fixed input set; it is never
+            // enabled for streaming exports (see `enable_cpu_output_binding`), so
+            // streaming always takes the session-run path below.
             if self.provider == Provider::Cpu
                 && self
                     .cpu_output_binding
@@ -1223,14 +1265,16 @@ impl RvcModelSession {
                 speaker_id,
                 &pitch_shape,
                 rnd,
+                nsf_noise,
+                phase_in,
                 out,
             )
         }
         #[cfg(not(feature = "ort"))]
         {
-            // `rnd` is consumed only by the ORT/native paths above; in the native
-            // build with no ORT it is referenced there. Nothing else to do.
-            let _ = rnd;
+            // `rnd`/streaming inputs are consumed only by the ORT/native paths
+            // above; in the native build with no ORT they are referenced there.
+            let _ = (rnd, nsf_noise, phase_in);
             let _ = out;
             bail!("RVC session inference requires the `ort` feature; this build supports native TensorRT only")
         }
@@ -1251,10 +1295,13 @@ impl RvcModelSession {
         speaker_id: i64,
         pitch_shape: &[usize; 2],
         rnd: Option<&[f32]>,
+        nsf_noise: Option<&[f32]>,
+        phase_in: Option<f32>,
         out: &mut Vec<f32>,
     ) -> Result<()> {
         let p_len_value = [frame_len as i64];
         let sid_value = [speaker_id];
+        let phase_value = [phase_in.unwrap_or(0.0)];
         let feats = TensorRef::from_array_view((feats_shape, feats))?;
         let p_len = TensorRef::from_array_view(([1usize], p_len_value.as_slice()))?;
         let pitch = TensorRef::from_array_view((*pitch_shape, pitch))?;
@@ -1262,6 +1309,16 @@ impl RvcModelSession {
         let sid = TensorRef::from_array_view(([1usize], sid_value.as_slice()))?;
         let names = &self.io_names;
         let rnd = resolve_rnd_input(names, frame_len, rnd)?;
+        // Streaming NSF inputs: resolve name + data here (validation), build the
+        // tensor views after taking the session borrow below.
+        let nsf = resolve_optional_input(names.nsf_noise.as_deref(), nsf_noise, "nsf_noise")?;
+        let phase = match (names.phase_in.as_deref(), phase_in) {
+            (Some(name), Some(_)) => Some(name),
+            (Some(name), None) => {
+                bail!("RVC model requires a '{name}' input but no NSF phase was provided")
+            }
+            (None, _) => None,
+        };
         let session = self
             .session
             .as_mut()
@@ -1270,25 +1327,55 @@ impl RvcModelSession {
             Some((name, shape, data)) => Some((name, TensorRef::from_array_view((shape, data))?)),
             None => None,
         };
+        let nsf = match nsf {
+            Some((name, data)) => Some((
+                name,
+                TensorRef::from_array_view(([1usize, data.len(), 1usize], data))?,
+            )),
+            None => None,
+        };
+        let phase = match phase {
+            Some(name) => Some((
+                name,
+                TensorRef::from_array_view(([1usize, 1, 1], phase_value.as_slice()))?,
+            )),
+            None => None,
+        };
         let output_shape = {
             let run_start = Instant::now();
-            let outputs = if let Some((rnd_name, rnd)) = rnd {
-                session.run(ort::inputs![
+            let outputs = match (rnd, nsf, phase) {
+                // Streaming export: feats/p_len/pitch/pitchf/sid + rnd + nsf_noise
+                // + phase_in (all present together).
+                (Some((rnd_name, rnd)), Some((nsf_name, nsf)), Some((phase_name, phase))) => {
+                    session.run(ort::inputs![
+                        names.feats.as_str() => feats,
+                        names.p_len.as_str() => p_len,
+                        names.pitch.as_str() => pitch,
+                        names.pitchf.as_str() => pitchf,
+                        names.sid.as_str() => sid,
+                        rnd_name => rnd,
+                        nsf_name => nsf,
+                        phase_name => phase,
+                    ])?
+                }
+                // Conventional `rnd`-input export.
+                (Some((rnd_name, rnd)), None, None) => session.run(ort::inputs![
                     names.feats.as_str() => feats,
                     names.p_len.as_str() => p_len,
                     names.pitch.as_str() => pitch,
                     names.pitchf.as_str() => pitchf,
                     names.sid.as_str() => sid,
                     rnd_name => rnd,
-                ])?
-            } else {
-                session.run(ort::inputs![
+                ])?,
+                // Model samples its own noise.
+                (None, None, None) => session.run(ort::inputs![
                     names.feats.as_str() => feats,
                     names.p_len.as_str() => p_len,
                     names.pitch.as_str() => pitch,
                     names.pitchf.as_str() => pitchf,
                     names.sid.as_str() => sid,
-                ])?
+                ])?,
+                _ => bail!("inconsistent RVC streaming inputs (rnd/nsf_noise/phase_in)"),
             };
             debug!(
                 "rvc session.run backend={} feats_shape={} pitch_shape={} elapsed_us={}",
@@ -1297,6 +1384,21 @@ impl RvcModelSession {
                 format_usize_shape(pitch_shape),
                 run_start.elapsed().as_micros()
             );
+            // Streaming exports also emit `phase_out` (phase after the last sample).
+            // vc-rs carries phase on the CPU (overlapping windows make the model's
+            // adjacent-window contract inapplicable), so this is read only for
+            // diagnostics when present.
+            if let Some(phase_out_name) = names.phase_out.as_deref() {
+                if let Some(value) = outputs.get(phase_out_name) {
+                    if let Ok((_, data)) = value.try_extract_tensor::<f32>() {
+                        debug!(
+                            "rvc streaming phase_out backend={} value={:?}",
+                            self.provider.label(),
+                            data.first().copied()
+                        );
+                    }
+                }
+            }
             let value = outputs
                 .get(names.audio.as_str())
                 .ok_or_else(|| anyhow!("RVC output 'audio' not found"))?;

@@ -184,6 +184,55 @@ manual or automatic gain. These operations happen before chunk joining so the
 smoother compares and crossfades audio at the level that will actually be
 played.
 
+### Generator time state (`rnd` noise, NSF phase, `nsf_noise`)
+
+Some RVC exports take time-varying noise/phase as graph inputs rather than
+sampling them internally. Because the worker feeds an **overlapping** rolling
+window, a given absolute frame recurs across consecutive chunks; if those frames
+saw fresh noise each chunk the overlapping region would differ and the SOLA join
+would degrade. `model_rvc/time_state.rs` (`RvcTimeState`) keeps this state on the
+CPU, backend-neutrally — every backend (ORT CPU/CUDA/DirectML and native
+TensorRT) only *binds* the buffers it produces, so there is one noise/phase
+timeline regardless of provider. State is plain `Vec<f32>`/scalars today, behind a
+`roll`/`window_into` surface, so it can later move to a GPU-resident buffer
+without touching callers.
+
+- **Latent noise (`rnd`)** — for RVC WebUI / converter exports that expose the
+  VITS reparameterization noise `z`. A rolling buffer is advanced in lockstep with
+  `pitchf_buffer` (same new-frame count, same window length, same 10 ms grid). The
+  per-chunk `[1, channels, feature_len]` tensor is selected with the *same*
+  center-crop + tail alignment the pipeline applies to `pitchf`, so `rnd` frame
+  *i* lines up with `pitchf`/`feats` frame *i* and overlapping absolute frames
+  read identical noise across chunks. A fixed seed plus a fixed chunk sequence is
+  byte-reproducible.
+
+- **Streaming exports (rvc-onnx-web, `rvc.export_mode == "streaming"`)** add two
+  more inputs, detected from `rvc.*` metadata + I/O names (`onnx_meta`):
+  - **`nsf_noise` `[1, audio_len, 1]`** — per-output-sample NSF source noise,
+    rolled on the output-sample grid (`* frame_hop`) with the same alignment as
+    `rnd` (distinct seed, so it is independent of `rnd`).
+  - **NSF phase (`phase_in`/`phase_out` `[1,1,1]`)** — the exporter contract is
+    `absolute_window_start`: `phase_in` is the phase at the window's first
+    generated sample. vc-rs feeds overlapping windows, so the exporter's "carry
+    `phase_out` straight into the next window" rule does **not** apply. Instead the
+    CPU carries the window-start phase and, after each inference, advances it past
+    exactly the frames the window scrolls (`advance_frames`, constant for a fixed
+    chunk size) using this chunk's `pitchf`: `phase += Σ f0/sample_rate *
+    frame_hop`, wrapped to `[0, 1)`. This reproduces the model's per-frame phase
+    step on the CPU; `phase_out` is read only for diagnostics.
+
+  Streaming runs on the dynamic-shape ORT path (CPU/CUDA/DirectML). Fixed-shape
+  backends (native TensorRT, Windows ML TensorRT-RTX) do not yet model the extra
+  I/O and fail clearly at load.
+
+- **Reset.** All of the above reset together whenever the audio timeline breaks —
+  stream restart, sample-rate or chunk change, model reload, or passthrough↔RVC
+  toggle — via the single `RvcStreamState` rebuild in
+  `RvcPipeline::reset_streaming_state` (and the device-rate-change clear inside
+  `generate_input`). Reset re-seeds the generators and zeroes the NSF phase and
+  absolute position, so a resumed stream is reproducible from its start. Models
+  with none of these inputs are entirely unaffected.
+
 ## SOLA
 
 SOLA, Similarity Overlap-Add, is used to hide discontinuities between

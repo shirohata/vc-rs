@@ -80,6 +80,33 @@ pub(super) struct RvcIoNames {
     /// fresh `N(0, 1)` tensor of this shape each inference; `None` means the model
     /// samples its own noise and needs no extra input.
     pub(super) rnd: Option<RvcRndInput>,
+    /// Optional NSF source-noise input of a streaming export
+    /// (`nsf_noise`, shape `[1, audio_len, 1]`): per-output-sample `N(0, 1)` noise
+    /// the decoder's NSF source would otherwise sample internally. `None` for
+    /// non-streaming exports.
+    pub(super) nsf_noise: Option<String>,
+    /// Optional NSF fundamental-phase input of a streaming export
+    /// (`phase_in`, shape `[1, 1, 1]`): the normalized phase at the window start.
+    /// Paired with [`phase_out`](Self::phase_out). `None` for non-streaming.
+    pub(super) phase_in: Option<String>,
+    /// Optional NSF fundamental-phase output of a streaming export
+    /// (`phase_out`, shape `[1, 1, 1]`): the phase after the last generated
+    /// sample. `None` for non-streaming exports.
+    pub(super) phase_out: Option<String>,
+}
+
+/// Streaming-export format descriptor parsed from `rvc.*` metadata. Present only
+/// for rvc-onnx-web streaming exports (`rvc.export_mode == "streaming"`).
+#[derive(Debug, Clone, Copy)]
+pub(super) struct StreamFormat {
+    /// `rvc.stream_format_version` — the phase/noise contract version (currently 1).
+    pub(super) version: u32,
+    /// `rvc.frame_hop` — output samples per feature frame (NSF upsampling factor).
+    /// `audio_len == feature_frames * frame_hop`.
+    pub(super) frame_hop: usize,
+    /// `rvc.sample_rate` — the model's output sample rate, the time base for the
+    /// per-frame phase advance `f0 / sample_rate * frame_hop`.
+    pub(super) sample_rate: u32,
 }
 
 /// The resolved name and static channel count (`inter_channels`, the middle axis
@@ -102,6 +129,11 @@ const RVC_AUDIO_ALIASES: &[&str] = &["audio", "out", "output"];
 // Latent-noise input is optional, so it has no canonical fallback: a model
 // either exports it under one of these names or samples noise internally.
 const RVC_RND_ALIASES: &[&str] = &["rnd", "z"];
+// Streaming-export I/O (rvc-onnx-web). All optional; absent on non-streaming
+// exports. Names are fixed by `rvc.stream_format_version` 1.
+const RVC_NSF_NOISE_ALIASES: &[&str] = &["nsf_noise"];
+const RVC_PHASE_IN_ALIASES: &[&str] = &["phase_in"];
+const RVC_PHASE_OUT_ALIASES: &[&str] = &["phase_out"];
 
 impl RvcIoNames {
     /// The canonical vcclient names, for tests/benchmarks that synthesize a
@@ -116,6 +148,9 @@ impl RvcIoNames {
             sid: "sid".to_string(),
             audio: "audio".to_string(),
             rnd: None,
+            nsf_noise: None,
+            phase_in: None,
+            phase_out: None,
         }
     }
 }
@@ -175,7 +210,56 @@ impl ModelIo {
             sid: self.resolve_input_alias("sid", RVC_SID_ALIASES)?,
             audio: self.resolve_rvc_output()?,
             rnd: self.resolve_rvc_rnd()?,
+            // Streaming I/O is optional; `find_input`/`find_output` return `None`
+            // for non-streaming exports, leaving those paths untouched.
+            nsf_noise: self.find_input_alias(RVC_NSF_NOISE_ALIASES),
+            phase_in: self.find_input_alias(RVC_PHASE_IN_ALIASES),
+            phase_out: self.find_output_alias(RVC_PHASE_OUT_ALIASES),
         })
+    }
+
+    /// First matching input name among `aliases`, or `None` (optional inputs).
+    fn find_input_alias(&self, aliases: &[&str]) -> Option<String> {
+        aliases
+            .iter()
+            .find(|alias| self.input(alias).is_some())
+            .map(|alias| (*alias).to_string())
+    }
+
+    /// First matching output name among `aliases`, or `None` (optional outputs).
+    fn find_output_alias(&self, aliases: &[&str]) -> Option<String> {
+        aliases
+            .iter()
+            .find(|alias| self.output(alias).is_some())
+            .map(|alias| (*alias).to_string())
+    }
+
+    /// Streaming-export descriptor, or `None` for a non-streaming export. A model
+    /// is streaming when `rvc.export_mode == "streaming"`; the frame hop and
+    /// sample rate are then required (they set the phase/noise time base).
+    pub(super) fn stream_format(&self) -> Result<Option<StreamFormat>> {
+        if self.metadata_value("rvc.export_mode") != Some("streaming") {
+            return Ok(None);
+        }
+        let version = self
+            .metadata_value("rvc.stream_format_version")
+            .and_then(|value| value.trim().parse::<u32>().ok())
+            .ok_or_else(|| anyhow!("streaming RVC export is missing rvc.stream_format_version"))?;
+        let frame_hop = self
+            .metadata_value("rvc.frame_hop")
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .filter(|hop| *hop > 0)
+            .ok_or_else(|| anyhow!("streaming RVC export is missing a positive rvc.frame_hop"))?;
+        let sample_rate = self
+            .metadata_value("rvc.sample_rate")
+            .and_then(|value| value.trim().parse::<u32>().ok())
+            .filter(|rate| *rate > 0)
+            .ok_or_else(|| anyhow!("streaming RVC export is missing a positive rvc.sample_rate"))?;
+        Ok(Some(StreamFormat {
+            version,
+            frame_hop,
+            sample_rate,
+        }))
     }
 
     /// Detect the optional latent-noise input. Returns `None` when the model
@@ -266,6 +350,16 @@ impl ModelIo {
     /// back to the [`RVC_SAMPLE_RATE`](super::shape::RVC_SAMPLE_RATE) default.
     /// Dependency-free string parse, matching `validate_rvc_metadata`.
     pub(super) fn rvc_sample_rate(&self) -> Option<u32> {
+        // Streaming exports record the rate as a dedicated `rvc.sample_rate` key
+        // rather than inside the `metadata` JSON blob; prefer it when present so a
+        // 40/48 kHz streaming model is not mis-sized to the default.
+        if let Some(rate) = self
+            .metadata_value("rvc.sample_rate")
+            .and_then(|value| value.trim().parse::<u32>().ok())
+            .filter(|rate| *rate > 0)
+        {
+            return Some(rate);
+        }
         let metadata = self.metadata_value("metadata")?;
         let compact: String = metadata.chars().filter(|c| !c.is_whitespace()).collect();
         const KEY: &str = r#""samplingRate":"#;
@@ -847,6 +941,77 @@ mod tests {
         let err = io.resolve_rvc_io_names().unwrap_err().to_string();
         assert!(err.contains("rnd"), "{err}");
         assert!(err.contains("static channel count"), "{err}");
+    }
+
+    #[test]
+    fn resolves_streaming_io_and_format() {
+        // rvc-onnx-web streaming export: rnd + nsf_noise + phase_in inputs and a
+        // phase_out output, with the rvc.* metadata keys.
+        let mut io = rvc_io(
+            &["phone", "phone_lengths", "pitch", "nsff0", "sid"],
+            &["audio"],
+        );
+        io.inputs.push(TensorInfo {
+            name: "rnd".to_string(),
+            elem_type: 1,
+            dims: vec![1, 192, 0],
+        });
+        io.inputs.push(TensorInfo {
+            name: "nsf_noise".to_string(),
+            elem_type: 1,
+            dims: vec![1, 0, 1],
+        });
+        io.inputs.push(TensorInfo {
+            name: "phase_in".to_string(),
+            elem_type: 1,
+            dims: vec![1, 1, 1],
+        });
+        io.outputs.push(TensorInfo {
+            name: "phase_out".to_string(),
+            elem_type: 1,
+            dims: vec![1, 1, 1],
+        });
+        io.metadata = vec![
+            ("rvc.export_mode".to_string(), "streaming".to_string()),
+            ("rvc.stream_format_version".to_string(), "1".to_string()),
+            ("rvc.frame_hop".to_string(), "480".to_string()),
+            ("rvc.sample_rate".to_string(), "48000".to_string()),
+        ];
+
+        let names = io.resolve_rvc_io_names().unwrap();
+        assert_eq!(names.pitchf, "nsff0");
+        assert_eq!(names.nsf_noise.as_deref(), Some("nsf_noise"));
+        assert_eq!(names.phase_in.as_deref(), Some("phase_in"));
+        assert_eq!(names.phase_out.as_deref(), Some("phase_out"));
+
+        let stream = io.stream_format().unwrap().expect("streaming format");
+        assert_eq!(stream.version, 1);
+        assert_eq!(stream.frame_hop, 480);
+        assert_eq!(stream.sample_rate, 48_000);
+        // Streaming exports record the rate as `rvc.sample_rate`, not a JSON blob.
+        assert_eq!(io.rvc_sample_rate(), Some(48_000));
+    }
+
+    #[test]
+    fn non_streaming_export_has_no_stream_format_or_extra_io() {
+        let io = rvc_io(&["feats", "p_len", "pitch", "pitchf", "sid"], &["audio"]);
+        let names = io.resolve_rvc_io_names().unwrap();
+        assert!(names.nsf_noise.is_none());
+        assert!(names.phase_in.is_none());
+        assert!(names.phase_out.is_none());
+        assert!(io.stream_format().unwrap().is_none());
+    }
+
+    #[test]
+    fn streaming_export_missing_frame_hop_errors() {
+        let mut io = rvc_io(&["feats", "p_len", "pitch", "pitchf", "sid"], &["audio"]);
+        io.metadata = vec![
+            ("rvc.export_mode".to_string(), "streaming".to_string()),
+            ("rvc.stream_format_version".to_string(), "1".to_string()),
+            ("rvc.sample_rate".to_string(), "48000".to_string()),
+        ];
+        let err = io.stream_format().unwrap_err().to_string();
+        assert!(err.contains("rvc.frame_hop"), "{err}");
     }
 
     #[test]

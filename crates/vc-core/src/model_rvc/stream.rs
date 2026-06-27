@@ -6,7 +6,7 @@ use super::shape::{
     feature_len_for_samples, keep_tail_in_place, samples_between_rates, tensor_rt_convert_size_16k,
     Rounding, EMBEDDER_SAMPLE_RATE, RMVPE_FRAME_SAMPLES_16K,
 };
-use super::time_state::RvcTimeState;
+use super::time_state::{RvcTimeState, StreamParams};
 
 pub(super) const VOLUME_DECAY: f32 = 0.97;
 
@@ -113,8 +113,14 @@ pub(super) struct RvcStreamState {
 
 impl RvcStreamState {
     /// `rnd_channels` is the model's `rnd` input channel count (`inter_channels`),
-    /// or `None` when the model samples its own noise — see [`RvcTimeState::new`].
-    pub(super) fn new(rvc_sample_rate: u32, rnd_channels: Option<usize>) -> Self {
+    /// or `None` when the model samples its own noise. `stream` is `Some` only for
+    /// streaming exports (enables the NSF noise/phase state) — see
+    /// [`RvcTimeState::new`].
+    pub(super) fn new(
+        rvc_sample_rate: u32,
+        rnd_channels: Option<usize>,
+        stream: Option<StreamParams>,
+    ) -> Self {
         Self {
             audio_buffer: Vec::new(),
             audio_16k_buffer: Vec::new(),
@@ -124,7 +130,7 @@ impl RvcStreamState {
             sample_rate: 0,
             rvc_sample_rate,
             resampler_16k: None,
-            time_state: RvcTimeState::new(rnd_channels),
+            time_state: RvcTimeState::new(rnd_channels, stream),
             #[cfg(feature = "gtcrn")]
             gtcrn: None,
         }
@@ -236,11 +242,12 @@ impl RvcStreamState {
         keep_tail_in_place(&mut self.audio_16k_buffer, convert_size_16k);
         keep_tail_in_place(&mut self.pitchf_buffer, feature_size);
 
-        // Roll the latent-noise window in lockstep with `pitchf_buffer`: same new
-        // frame count, same total window length, same 10 ms grid. This keeps a
-        // given absolute frame's `rnd` value stable across overlapping chunks.
-        // Inert when the model has no `rnd` input.
-        self.time_state.roll_rnd(new_feature_len, feature_size);
+        // Roll every per-chunk timeline (latent `rnd` noise; for streaming exports
+        // also the NSF source noise and absolute position) in lockstep with
+        // `pitchf_buffer`: same new frame count, same total window length, same
+        // 10 ms grid. This keeps a given absolute frame's noise stable across
+        // overlapping chunks. Inert for the parts the model does not use.
+        self.time_state.roll(new_feature_len, feature_size);
 
         // Volume envelope memory on the 16 kHz timeline (same signal as
         // ContentVec/F0), the new-increment region minus the excluded tail. The

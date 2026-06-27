@@ -31,6 +31,7 @@ use super::tensorrt::{
 };
 #[cfg(feature = "ort")]
 use super::tensorrt::{tensor_rt_warmup_feature_len, TensorRtSharedWaveform};
+use super::time_state::StreamParams;
 
 const SKIP_SILENT_CHUNKS: bool = false;
 
@@ -128,9 +129,15 @@ pub struct RvcPipeline {
     // noise state can be rebuilt with the same shape on `reset_streaming_state`.
     // `None` when the model samples its own noise.
     rnd_channels: Option<usize>,
+    // Streaming NSF time base (frame hop / sample rate), retained to rebuild the
+    // streaming time state on reset. `None` for conventional exports.
+    stream_params: Option<StreamParams>,
     // Reused channel-major `[1, channels, feature_len]` latent-noise tensor,
     // refilled per chunk from the rolling noise state and bound by every backend.
     rnd_scratch: Vec<f32>,
+    // Reused `[1, audio_len, 1]` NSF source-noise tensor for streaming exports,
+    // refilled per chunk from the rolling NSF noise state.
+    nsf_scratch: Vec<f32>,
     // Reused per-chunk buffer for the gain-scaled / denoised input, so `process`
     // does not allocate a fresh Vec every chunk when input_gain != 1.0 or a
     // denoiser is active. Empty when the zero-copy (gain==1.0, denoiser-off) path
@@ -419,6 +426,9 @@ impl RvcPipeline {
             .rnd
             .as_ref()
             .and_then(|rnd| usize::try_from(rnd.channels).ok());
+        // Streaming exports add NSF noise/phase state; the dynamic-shape `load`
+        // path (CPU/CUDA/DirectML) handles their extra I/O directly.
+        let stream_params = stream_params_from_info(&rvc_info)?;
         // CLI-facing configuration is milliseconds for consistency with other latency knobs.
         // The RVC shape and trimming code below use the model's sample-rate domain, so keep the
         // conversion at load time and leave the per-chunk processing path in samples.
@@ -508,9 +518,11 @@ impl RvcPipeline {
             auto_output_gain: config.output_dynamics.auto_output_gain,
             target_output_rms: config.output_dynamics.target_output_rms,
             max_output_gain: config.output_dynamics.max_output_gain,
-            stream_state: RvcStreamState::new(rvc_sample_rate, rnd_channels),
+            stream_state: RvcStreamState::new(rvc_sample_rate, rnd_channels, stream_params),
             rnd_channels,
+            stream_params,
             rnd_scratch: Vec::new(),
+            nsf_scratch: Vec::new(),
             input_scratch: Vec::new(),
             feature_tensor: FeatureTensor::default(),
             input_reference_scratch: Vec::new(),
@@ -555,6 +567,16 @@ impl RvcPipeline {
             }
         );
         let rvc_info = inspect_rvc_model(config.model)?;
+        // Streaming exports carry extra NSF noise/phase I/O that the fixed-shape
+        // profile and IoBinding / native-engine paths do not yet model. Their
+        // dynamic-shape graph runs on the CPU/CUDA/DirectML `load` path instead;
+        // fail clearly here rather than build an engine missing those inputs.
+        if rvc_info.stream.is_some() {
+            bail!(
+                "provider {} does not support rvc-onnx-web streaming exports yet; use a CPU/CUDA/DirectML provider (windowsml) for streaming models",
+                config.provider.label()
+            );
+        }
         let expected_feat_channels = rvc_info.expected_feat_channels;
         let expected_feat_channels_usize = usize::try_from(expected_feat_channels)
             .context("RVC expected feature channel count does not fit in usize")?;
@@ -566,6 +588,9 @@ impl RvcPipeline {
             .rnd
             .as_ref()
             .and_then(|rnd| usize::try_from(rnd.channels).ok());
+        // Streaming exports cannot reach this fixed-shape path (bailed above), so
+        // the time state here is never streaming.
+        let stream_params: Option<StreamParams> = None;
         let extra_convert_samples =
             extra_convert_samples_from_ms(config.extra_convert_ms, rvc_sample_rate);
         let input_samples_16k = tensor_rt_model_input_samples_16k(
@@ -962,9 +987,11 @@ impl RvcPipeline {
             auto_output_gain: config.output_dynamics.auto_output_gain,
             target_output_rms: config.output_dynamics.target_output_rms,
             max_output_gain: config.output_dynamics.max_output_gain,
-            stream_state: RvcStreamState::new(rvc_sample_rate, rnd_channels),
+            stream_state: RvcStreamState::new(rvc_sample_rate, rnd_channels, stream_params),
             rnd_channels,
+            stream_params,
             rnd_scratch: Vec::new(),
+            nsf_scratch: Vec::new(),
             input_scratch: Vec::new(),
             feature_tensor: FeatureTensor::default(),
             input_reference_scratch: Vec::new(),
@@ -1068,9 +1095,11 @@ impl RvcPipeline {
         // not emit audio captured before the pause.
         #[cfg(feature = "gtcrn")]
         let gtcrn = self.stream_state.gtcrn.take();
-        // Rebuilding the stream state re-seeds the rolling noise/phase state, so a
-        // resumed stream is reproducible from its start.
-        self.stream_state = RvcStreamState::new(self.rvc_sample_rate, self.rnd_channels);
+        // Rebuilding the stream state re-seeds the rolling noise/phase state and
+        // zeroes the NSF phase / absolute position, so a resumed stream is
+        // reproducible from its start.
+        self.stream_state =
+            RvcStreamState::new(self.rvc_sample_rate, self.rnd_channels, self.stream_params);
         #[cfg(feature = "gtcrn")]
         if let Some(mut gtcrn) = gtcrn {
             gtcrn.reset()?;
@@ -1078,6 +1107,7 @@ impl RvcPipeline {
         }
         self.input_scratch.clear();
         self.rnd_scratch.clear();
+        self.nsf_scratch.clear();
         self.feature_tensor = FeatureTensor::default();
         self.input_reference_scratch.clear();
         self.rms_mix_scratch = dsp::RmsMixScratch::default();
@@ -1310,6 +1340,24 @@ impl VoiceModel for RvcPipeline {
         );
         let rnd = has_rnd.then_some(self.rnd_scratch.as_slice());
 
+        // Streaming exports: the NSF source noise `[1, audio_len, 1]` (selected on
+        // the output-sample grid by the same alignment as `rnd`) and the
+        // window-start NSF phase. Both are `None`/false for conventional exports.
+        let has_nsf = self.stream_state.time_state.nsf_noise_window_into(
+            feature_len_before_trim,
+            feature_len,
+            &mut self.nsf_scratch,
+        );
+        let nsf_noise = has_nsf.then_some(self.nsf_scratch.as_slice());
+        let phase_in = self.stream_state.time_state.phase_in();
+        if let Some(phase) = phase_in {
+            let (abs_frame, abs_sample) = self.stream_state.time_state.absolute_position();
+            debug!(
+                "rvc streaming state phase_in={phase} abs_frame={abs_frame} abs_sample={abs_sample} nsf_noise_len={}",
+                self.nsf_scratch.len()
+            );
+        }
+
         // RVC. The converted samples are written straight into the caller-owned
         // `out_audio` buffer (reused across chunks) and all post-processing runs
         // in place on it; the output pitchf goes into `out_pitchf`.
@@ -1322,9 +1370,15 @@ impl VoiceModel for RvcPipeline {
             pitchf,
             self.speaker_id,
             rnd,
+            nsf_noise,
+            phase_in,
             out_audio,
         )?;
         let rvc_time = rvc_start.elapsed();
+        // Advance the NSF phase for the next chunk by exactly the frames this
+        // window scrolls past, using this chunk's `pitchf` (the model's `nsff0`).
+        // No-op for conventional exports.
+        self.stream_state.time_state.advance_phase(pitchf);
         let raw_output_samples = out_audio.len();
         keep_tail_in_place(out_audio, stream_input.out_size);
         pitchf_tail_for_output_into(pitchf, out_audio.len(), self.rvc_sample_rate, out_pitchf);
@@ -1398,6 +1452,24 @@ impl VoiceModel for RvcPipeline {
             volume: stream_input.volume,
         })
     }
+}
+
+/// Derive the streaming NSF time base from inspected metadata, validating the
+/// format version we implement. `None` for conventional (non-streaming) exports.
+fn stream_params_from_info(info: &super::inspect::RvcModelInfo) -> Result<Option<StreamParams>> {
+    let Some(stream) = info.stream else {
+        return Ok(None);
+    };
+    if stream.version != 1 {
+        bail!(
+            "unsupported RVC stream_format_version {}; this build implements version 1",
+            stream.version
+        );
+    }
+    Ok(Some(StreamParams {
+        frame_hop: stream.frame_hop,
+        sample_rate: stream.sample_rate,
+    }))
 }
 
 fn provider_needs_fixed_shape_profile(provider: Provider) -> bool {
