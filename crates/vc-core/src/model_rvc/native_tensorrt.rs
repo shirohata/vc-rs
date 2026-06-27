@@ -141,15 +141,14 @@ struct NativeRvcInputNames {
     sid: CString,
 }
 
-// Per-engine latent-noise generator for RVC exports that take the `rnd` input.
-// The engine owns it so the native path matches the ORT path: fresh N(0,1) noise
-// shaped [1, channels, frames] each chunk, reusing one scratch buffer.
+// Resolved `rnd` input metadata for RVC exports that take the latent noise as a
+// graph input. The noise itself is produced backend-neutrally by the rolling CPU
+// state (see `time_state`) and passed into `infer`; the engine only keeps the
+// resolved input name (for the FFI bind) and channel count (to validate length).
 #[cfg(native_tensorrt)]
 struct NativeRvcRnd {
     name: CString,
     channels: NonZeroUsize,
-    generator: super::noise::GaussianNoise,
-    scratch: Vec<f32>,
 }
 
 #[cfg_attr(not(native_tensorrt), allow(dead_code))]
@@ -476,6 +475,9 @@ impl NativeRvcEngine {
         pitch: &[i64],
         pitchf: &[f32],
         speaker_id: i64,
+        // Caller-supplied latent noise for `rnd`-input models (produced by the
+        // rolling CPU state); `None` for models that sample their own noise.
+        rnd: Option<&[f32]>,
     ) -> Result<Vec<f32>> {
         if feats.len() != self.frames.get() * self.channels.get() {
             bail!(
@@ -492,7 +494,7 @@ impl NativeRvcEngine {
                 self.frames.get()
             );
         }
-        infer_rvc(self, feats, pitch, pitchf, speaker_id)
+        infer_rvc(self, feats, pitch, pitchf, speaker_id, rnd)
     }
 
     pub(super) fn frames(&self) -> usize {
@@ -1091,11 +1093,6 @@ fn native_rvc_input_names(names: &RvcIoNames) -> Result<NativeRvcInputNames> {
     })
 }
 
-// Fixed seed for the native RVC latent-noise generator (mirrors the ORT path):
-// reproducible across runs, advances per chunk for independent noise.
-#[cfg(native_tensorrt)]
-const RVC_RND_SEED: u64 = 0x0000_5256_4352_4e44;
-
 #[cfg(native_tensorrt)]
 fn native_rvc_rnd(names: &RvcIoNames) -> Result<Option<NativeRvcRnd>> {
     let Some(rnd) = names.rnd.as_ref() else {
@@ -1111,12 +1108,7 @@ fn native_rvc_rnd(names: &RvcIoNames) -> Result<Option<NativeRvcRnd>> {
             rnd.name
         )
     })?;
-    Ok(Some(NativeRvcRnd {
-        name,
-        channels,
-        generator: super::noise::GaussianNoise::new(RVC_RND_SEED),
-        scratch: Vec::new(),
-    }))
+    Ok(Some(NativeRvcRnd { name, channels }))
 }
 
 #[cfg(native_tensorrt)]
@@ -1126,23 +1118,32 @@ fn infer_rvc(
     pitch: &[i64],
     pitchf: &[f32],
     speaker_id: i64,
+    rnd: Option<&[f32]>,
 ) -> Result<Vec<f32>> {
     let mut output = vec![0.0f32; engine.output_len.get()];
-    // Refresh latent noise (when this export takes it) into the reused scratch;
-    // pass null pointers / zero length otherwise so the shim skips the input.
-    // The raw pointers derived here stay valid through the FFI call below because
-    // `engine.rnd` is not touched again until the call returns.
+    // Bind the caller-supplied latent noise (when this export takes it); pass null
+    // pointers / zero length otherwise so the shim skips the input. The raw
+    // pointers derived here stay valid through the FFI call below because neither
+    // `engine.rnd` nor `rnd` is mutated until the call returns.
     let frames = engine.frames.get();
-    let (rnd_name_ptr, rnd_ptr, rnd_len) = match engine.rnd.as_mut() {
-        Some(rnd) => {
-            let len = rnd
+    let (rnd_name_ptr, rnd_ptr, rnd_len) = match engine.rnd.as_ref() {
+        Some(state) => {
+            let expected = state
                 .channels
                 .get()
                 .checked_mul(frames)
                 .context("native TensorRT RVC rnd length overflow")?;
-            rnd.scratch.resize(len, 0.0);
-            rnd.generator.fill(&mut rnd.scratch);
-            (rnd.name.as_ptr(), rnd.scratch.as_ptr(), rnd.scratch.len())
+            let data = rnd.ok_or_else(|| {
+                anyhow!("native TensorRT RVC model has an 'rnd' input but no noise was provided")
+            })?;
+            if data.len() != expected {
+                bail!(
+                    "native TensorRT RVC rnd length {} does not match channels*frames {}",
+                    data.len(),
+                    expected
+                );
+            }
+            (state.name.as_ptr(), data.as_ptr(), data.len())
         }
         None => (std::ptr::null(), std::ptr::null(), 0usize),
     };
@@ -1184,6 +1185,7 @@ fn infer_rvc(
     _pitch: &[i64],
     _pitchf: &[f32],
     _speaker_id: i64,
+    _rnd: Option<&[f32]>,
 ) -> Result<Vec<f32>> {
     bail!("native TensorRT RVC inference is unavailable in this binary")
 }

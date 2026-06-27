@@ -124,6 +124,13 @@ pub struct RvcPipeline {
     target_output_rms: f32,
     max_output_gain: f32,
     stream_state: RvcStreamState,
+    // The model's `rnd` (latent-noise) channel count, retained so the rolling
+    // noise state can be rebuilt with the same shape on `reset_streaming_state`.
+    // `None` when the model samples its own noise.
+    rnd_channels: Option<usize>,
+    // Reused channel-major `[1, channels, feature_len]` latent-noise tensor,
+    // refilled per chunk from the rolling noise state and bound by every backend.
+    rnd_scratch: Vec<f32>,
     // Reused per-chunk buffer for the gain-scaled / denoised input, so `process`
     // does not allocate a fresh Vec every chunk when input_gain != 1.0 or a
     // denoiser is active. Empty when the zero-copy (gain==1.0, denoiser-off) path
@@ -405,6 +412,13 @@ impl RvcPipeline {
         // all sizing math runs in the model's actual rate domain.
         let rvc_info = inspect_rvc_model(config.model)?;
         let rvc_sample_rate = rvc_info.rvc_sample_rate.unwrap_or(RVC_SAMPLE_RATE);
+        // Capture the `rnd` channel count before `io_names` is moved into the
+        // session, so the rolling-noise state can be sized (and rebuilt on reset).
+        let rnd_channels = rvc_info
+            .io_names
+            .rnd
+            .as_ref()
+            .and_then(|rnd| usize::try_from(rnd.channels).ok());
         // CLI-facing configuration is milliseconds for consistency with other latency knobs.
         // The RVC shape and trimming code below use the model's sample-rate domain, so keep the
         // conversion at load time and leave the per-chunk processing path in samples.
@@ -494,7 +508,9 @@ impl RvcPipeline {
             auto_output_gain: config.output_dynamics.auto_output_gain,
             target_output_rms: config.output_dynamics.target_output_rms,
             max_output_gain: config.output_dynamics.max_output_gain,
-            stream_state: RvcStreamState::new(rvc_sample_rate),
+            stream_state: RvcStreamState::new(rvc_sample_rate, rnd_channels),
+            rnd_channels,
+            rnd_scratch: Vec::new(),
             input_scratch: Vec::new(),
             feature_tensor: FeatureTensor::default(),
             input_reference_scratch: Vec::new(),
@@ -543,6 +559,13 @@ impl RvcPipeline {
         let expected_feat_channels_usize = usize::try_from(expected_feat_channels)
             .context("RVC expected feature channel count does not fit in usize")?;
         let rvc_sample_rate = rvc_info.rvc_sample_rate.unwrap_or(RVC_SAMPLE_RATE);
+        // Capture the `rnd` channel count before `io_names` is cloned/moved into
+        // the sessions, so the rolling-noise state can be sized (and reset).
+        let rnd_channels = rvc_info
+            .io_names
+            .rnd
+            .as_ref()
+            .and_then(|rnd| usize::try_from(rnd.channels).ok());
         let extra_convert_samples =
             extra_convert_samples_from_ms(config.extra_convert_ms, rvc_sample_rate);
         let input_samples_16k = tensor_rt_model_input_samples_16k(
@@ -939,7 +962,9 @@ impl RvcPipeline {
             auto_output_gain: config.output_dynamics.auto_output_gain,
             target_output_rms: config.output_dynamics.target_output_rms,
             max_output_gain: config.output_dynamics.max_output_gain,
-            stream_state: RvcStreamState::new(rvc_sample_rate),
+            stream_state: RvcStreamState::new(rvc_sample_rate, rnd_channels),
+            rnd_channels,
+            rnd_scratch: Vec::new(),
             input_scratch: Vec::new(),
             feature_tensor: FeatureTensor::default(),
             input_reference_scratch: Vec::new(),
@@ -1043,13 +1068,16 @@ impl RvcPipeline {
         // not emit audio captured before the pause.
         #[cfg(feature = "gtcrn")]
         let gtcrn = self.stream_state.gtcrn.take();
-        self.stream_state = RvcStreamState::new(self.rvc_sample_rate);
+        // Rebuilding the stream state re-seeds the rolling noise/phase state, so a
+        // resumed stream is reproducible from its start.
+        self.stream_state = RvcStreamState::new(self.rvc_sample_rate, self.rnd_channels);
         #[cfg(feature = "gtcrn")]
         if let Some(mut gtcrn) = gtcrn {
             gtcrn.reset()?;
             self.stream_state.gtcrn = Some(gtcrn);
         }
         self.input_scratch.clear();
+        self.rnd_scratch.clear();
         self.feature_tensor = FeatureTensor::default();
         self.input_reference_scratch.clear();
         self.rms_mix_scratch = dsp::RmsMixScratch::default();
@@ -1271,6 +1299,17 @@ impl VoiceModel for RvcPipeline {
             });
         }
 
+        // Latent noise: produce this chunk's `[1, channels, feature_len]` rnd
+        // window into the reused `rnd_scratch`, aligned to `pitchf`/`feats` by the
+        // same center-crop + tail selection used above. `has_rnd` is false (and
+        // the buffer untouched) for models that sample their own noise.
+        let has_rnd = self.stream_state.time_state.rnd_window_into(
+            feature_len_before_trim,
+            feature_len,
+            &mut self.rnd_scratch,
+        );
+        let rnd = has_rnd.then_some(self.rnd_scratch.as_slice());
+
         // RVC. The converted samples are written straight into the caller-owned
         // `out_audio` buffer (reused across chunks) and all post-processing runs
         // in place on it; the output pitchf goes into `out_pitchf`.
@@ -1282,6 +1321,7 @@ impl VoiceModel for RvcPipeline {
             pitch,
             pitchf,
             self.speaker_id,
+            rnd,
             out_audio,
         )?;
         let rvc_time = rvc_start.elapsed();

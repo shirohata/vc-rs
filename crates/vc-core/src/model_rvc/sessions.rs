@@ -21,16 +21,8 @@ use crate::Provider;
 
 use super::feature::FeatureTensor;
 use super::native_tensorrt::{NativeContentVecEngine, NativeRmvpeEngine, NativeRvcEngine};
-#[cfg(feature = "ort")]
-use super::noise::GaussianNoise;
 use super::onnx_meta::{read_model_io, RvcIoNames};
 use super::tensorrt::*;
-
-// Fixed seed for the RVC latent-noise generator: reproducible across runs while
-// still advancing per chunk (each chunk draws fresh, independent noise like the
-// reference `torch.randn`). Spells "RVCRND" in ASCII for grep-ability.
-#[cfg(feature = "ort")]
-const RVC_RND_SEED: u64 = 0x0000_5256_4352_4e44;
 
 /// Copies an embedder output (`shape` + `data`) into a reused `FeatureTensor`,
 /// clearing it first. Lets the extract paths fill a caller-owned buffer instead
@@ -714,47 +706,49 @@ impl RmvpePitchSession {
     }
 }
 
-// Per-session latent-noise generator for RVC exports that take the VITS
-// reparameterization noise `z` (`rnd`) as a generator input. Present only when
-// the model exposes that input; the generator and scratch buffer are reused
-// across chunks so the realtime path never allocates a fresh noise Vec, and the
-// generator advances per chunk so successive chunks draw independent noise.
+// Resolved latent-noise binding: the model's `rnd` input name, its
+// `[1, channels, frame_len]` shape, and the caller-supplied channel-major data.
 #[cfg(feature = "ort")]
-struct RvcRndState {
-    name: String,
-    channels: usize,
-    generator: GaussianNoise,
-    scratch: Vec<f32>,
-}
+type RndBinding<'a> = (&'a str, [usize; 3], &'a [f32]);
 
+// Resolve the model's optional `rnd` (latent-noise) input into a bindable tensor
+// view from the caller-supplied CPU noise window. The noise itself is produced
+// once, backend-neutrally, by the rolling state in `time_state` — this only maps
+// the flat channel-major slice to the model's resolved input name and shape.
+//
+// `(Some(info), Some(data))` -> bind under `info.name` with shape
+// `[1, channels, frame_len]`; `(Some, None)` -> the model needs noise but none
+// was provided (error); `(None, _)` -> the model samples its own noise, so any
+// provided slice is ignored.
 #[cfg(feature = "ort")]
-impl RvcRndState {
-    fn from_io_names(io_names: &RvcIoNames) -> Result<Option<Self>> {
-        let Some(rnd) = io_names.rnd.as_ref() else {
-            return Ok(None);
-        };
-        let channels = usize::try_from(rnd.channels)
-            .ok()
-            .filter(|channels| *channels > 0)
-            .ok_or_else(|| anyhow!("RVC '{}' input has non-positive channel count", rnd.name))?;
-        Ok(Some(Self {
-            name: rnd.name.clone(),
-            channels,
-            generator: GaussianNoise::new(RVC_RND_SEED),
-            scratch: Vec::new(),
-        }))
-    }
-
-    /// Refresh the reused scratch with fresh `N(0, 1)` noise shaped
-    /// `[1, channels, frame_len]` and return that shape.
-    fn refresh(&mut self, frame_len: usize) -> Result<[usize; 3]> {
-        let len = self
-            .channels
-            .checked_mul(frame_len)
-            .context("RVC rnd input length overflow")?;
-        self.scratch.resize(len, 0.0);
-        self.generator.fill(&mut self.scratch);
-        Ok([1, self.channels, frame_len])
+fn resolve_rnd_input<'a>(
+    io_names: &'a RvcIoNames,
+    frame_len: usize,
+    rnd: Option<&'a [f32]>,
+) -> Result<Option<RndBinding<'a>>> {
+    match (io_names.rnd.as_ref(), rnd) {
+        (Some(info), Some(data)) => {
+            let channels =
+                usize::try_from(info.channels).context("invalid RVC rnd channel count")?;
+            let expected = channels
+                .checked_mul(frame_len)
+                .context("RVC rnd input length overflow")?;
+            if data.len() != expected {
+                bail!(
+                    "RVC rnd length {} does not match channels*frame_len {} ({}*{})",
+                    data.len(),
+                    expected,
+                    channels,
+                    frame_len
+                );
+            }
+            Ok(Some((info.name.as_str(), [1, channels, frame_len], data)))
+        }
+        (Some(info), None) => bail!(
+            "RVC model requires an '{}' latent-noise input but none was provided",
+            info.name
+        ),
+        (None, _) => Ok(None),
     }
 }
 
@@ -817,12 +811,6 @@ pub(super) struct RvcModelSession {
     /// bind site uses these instead of the canonical vcclient literals so RVC
     /// WebUI / converter exports (`phone`/`nsff0`/`ds`/`rnd`/...) bind correctly.
     io_names: RvcIoNames,
-    /// Latent-noise generator for ORT-backed sessions whose export takes the
-    /// `rnd` input. `None` when the model samples noise internally. The native
-    /// TensorRT path keeps its own generator inside `NativeRvcEngine`, so this
-    /// stays `None` there.
-    #[cfg(feature = "ort")]
-    rnd: Option<RvcRndState>,
 }
 
 impl RvcModelSession {
@@ -867,9 +855,6 @@ impl RvcModelSession {
                 cpu_output_binding: None,
                 expected_feat_channels,
                 io_names,
-                // Native TensorRT generates rnd noise inside NativeRvcEngine.
-                #[cfg(feature = "ort")]
-                rnd: None,
             });
         }
         // CPU/CUDA only: validate via the provider-neutral reader, then load the
@@ -903,7 +888,6 @@ impl RvcModelSession {
                 tensor_rt_session_purpose,
             )?;
             info!("loaded RVC model: {}", path.display());
-            let rnd = RvcRndState::from_io_names(&io_names)?;
             Ok(Self {
                 session: Some(session),
                 provider,
@@ -914,7 +898,6 @@ impl RvcModelSession {
                 cpu_output_binding: None,
                 expected_feat_channels,
                 io_names,
-                rnd,
             })
         }
         #[cfg(not(feature = "ort"))]
@@ -1170,6 +1153,10 @@ impl RvcModelSession {
         pitch: &[i64],
         pitchf: &[f32],
         speaker_id: i64,
+        // Latent noise for `rnd`-input models, produced backend-neutrally by the
+        // rolling CPU state; `None` when the model samples its own noise. Each
+        // backend below only binds this slice.
+        rnd: Option<&[f32]>,
         out: &mut Vec<f32>,
     ) -> Result<()> {
         let feats_shape_usize = i64_shape_to_usize(feats_shape, "feats")?;
@@ -1196,7 +1183,7 @@ impl RvcModelSession {
             // The native TensorRT FFI still returns an owned Vec; copy it into the
             // caller buffer so the reuse contract holds for the ORT paths below.
             // Refactoring the native shim to write in place is out of scope here.
-            let converted = native.infer(feats, pitch, pitchf, speaker_id)?;
+            let converted = native.infer(feats, pitch, pitchf, speaker_id, rnd)?;
             out.clear();
             out.extend_from_slice(&converted);
             return Ok(());
@@ -1204,7 +1191,8 @@ impl RvcModelSession {
         #[cfg(feature = "ort")]
         {
             if self.tensor_rt_binding.is_some() {
-                return self.infer_with_binding(feats, frame_len, pitch, pitchf, speaker_id, out);
+                return self
+                    .infer_with_binding(feats, frame_len, pitch, pitchf, speaker_id, rnd, out);
             }
             if self.provider == Provider::Cpu
                 && self
@@ -1221,6 +1209,7 @@ impl RvcModelSession {
                     pitchf,
                     speaker_id,
                     &pitch_shape,
+                    rnd,
                     out,
                 );
             }
@@ -1233,11 +1222,15 @@ impl RvcModelSession {
                 pitchf,
                 speaker_id,
                 &pitch_shape,
+                rnd,
                 out,
             )
         }
         #[cfg(not(feature = "ort"))]
         {
+            // `rnd` is consumed only by the ORT/native paths above; in the native
+            // build with no ORT it is referenced there. Nothing else to do.
+            let _ = rnd;
             let _ = out;
             bail!("RVC session inference requires the `ort` feature; this build supports native TensorRT only")
         }
@@ -1257,33 +1250,25 @@ impl RvcModelSession {
         pitchf: &[f32],
         speaker_id: i64,
         pitch_shape: &[usize; 2],
+        rnd: Option<&[f32]>,
         out: &mut Vec<f32>,
     ) -> Result<()> {
         let p_len_value = [frame_len as i64];
         let sid_value = [speaker_id];
-        // Refresh latent noise first (a self-disjoint mutable borrow of `rnd`),
-        // then borrow the scratch immutably alongside the session below.
-        let rnd_shape = match self.rnd.as_mut() {
-            Some(state) => Some(state.refresh(frame_len)?),
-            None => None,
-        };
         let feats = TensorRef::from_array_view((feats_shape, feats))?;
         let p_len = TensorRef::from_array_view(([1usize], p_len_value.as_slice()))?;
         let pitch = TensorRef::from_array_view((*pitch_shape, pitch))?;
         let pitchf = TensorRef::from_array_view((*pitch_shape, pitchf))?;
         let sid = TensorRef::from_array_view(([1usize], sid_value.as_slice()))?;
         let names = &self.io_names;
-        let rnd_state = self.rnd.as_ref();
+        let rnd = resolve_rnd_input(names, frame_len, rnd)?;
         let session = self
             .session
             .as_mut()
             .ok_or_else(|| anyhow!("RVC ORT session is not initialized"))?;
-        let rnd = match (rnd_state, rnd_shape) {
-            (Some(state), Some(shape)) => Some((
-                state.name.as_str(),
-                TensorRef::from_array_view((shape, state.scratch.as_slice()))?,
-            )),
-            _ => None,
+        let rnd = match rnd {
+            Some((name, shape, data)) => Some((name, TensorRef::from_array_view((shape, data))?)),
+            None => None,
         };
         let output_shape = {
             let run_start = Instant::now();
@@ -1339,16 +1324,11 @@ impl RvcModelSession {
         pitchf: &[f32],
         speaker_id: i64,
         pitch_shape: &[usize; 2],
+        rnd: Option<&[f32]>,
         out: &mut Vec<f32>,
     ) -> Result<()> {
         let p_len_value = [frame_len as i64];
         let sid_value = [speaker_id];
-        // Refresh latent noise first (self-disjoint mutable borrow of `rnd`),
-        // then bind the scratch alongside the other inputs below.
-        let rnd_shape = match self.rnd.as_mut() {
-            Some(state) => Some(state.refresh(frame_len)?),
-            None => None,
-        };
         let feats = TensorRef::from_array_view((feats_shape, feats))?;
         let p_len = TensorRef::from_array_view(([1usize], p_len_value.as_slice()))?;
         let pitch = TensorRef::from_array_view((*pitch_shape, pitch))?;
@@ -1356,7 +1336,7 @@ impl RvcModelSession {
         let sid = TensorRef::from_array_view(([1usize], sid_value.as_slice()))?;
         let provider = self.provider;
         let names = &self.io_names;
-        let rnd_state = self.rnd.as_ref();
+        let rnd = resolve_rnd_input(names, frame_len, rnd)?;
         let session = self
             .session
             .as_mut()
@@ -1365,12 +1345,9 @@ impl RvcModelSession {
             .cpu_output_binding
             .as_mut()
             .ok_or_else(|| anyhow!("CPU RVC output IoBinding is not initialized"))?;
-        let rnd = match (rnd_state, rnd_shape) {
-            (Some(state), Some(shape)) => Some((
-                state.name.as_str(),
-                TensorRef::from_array_view((shape, state.scratch.as_slice()))?,
-            )),
-            _ => None,
+        let rnd = match rnd {
+            Some((name, shape, data)) => Some((name, TensorRef::from_array_view((shape, data))?)),
+            None => None,
         };
         let run_start = Instant::now();
         // IoBinding retains bound input OrtValues after the run. These TensorRefs
@@ -1434,7 +1411,10 @@ impl RvcModelSession {
         Ok(())
     }
 
+    // Inputs mirror the ONNX RVC contract (feats/pitch/pitchf/sid/rnd) plus the
+    // reused output buffer; an ad-hoc struct would only obscure that contract.
     #[cfg(feature = "ort")]
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn infer_with_binding(
         &mut self,
         feats: &[f32],
@@ -1442,8 +1422,13 @@ impl RvcModelSession {
         pitch: &[i64],
         pitchf: &[f32],
         speaker_id: i64,
+        rnd: Option<&[f32]>,
         out: &mut Vec<f32>,
     ) -> Result<()> {
+        // Resolve the caller-supplied noise window (name/shape validation) before
+        // borrowing the binding/session below; the model's `rnd` channel count
+        // lives in `io_names`.
+        let rnd = resolve_rnd_input(&self.io_names, frame_len, rnd)?;
         let binding = self
             .tensor_rt_binding
             .as_mut()
@@ -1452,7 +1437,6 @@ impl RvcModelSession {
             .session
             .as_mut()
             .ok_or_else(|| anyhow!("RVC ORT session is not initialized"))?;
-        let mut rnd_state = self.rnd.as_mut();
         match binding {
             RvcTensorRtBinding::Pinned(binding) => {
                 copy_f32_tensor(&mut binding.feats, feats, "feats")?;
@@ -1471,21 +1455,15 @@ impl RvcModelSession {
                     .binding
                     .bind_input(binding.names.pitchf.as_str(), &binding.pitchf)
                     .context("failed to bind TensorRT RVC input 'pitchf'")?;
-                // Latent noise: stage fresh N(0,1) into the pinned buffer and
-                // re-bind it (the pinned path copies inputs at bind time).
+                // Latent noise: stage the caller-supplied N(0,1) window into the
+                // pinned buffer and re-bind it (the pinned path copies inputs at
+                // bind time). The buffer exists iff the model takes `rnd`, which is
+                // exactly when `resolve_rnd_input` returned `Some`.
                 if let Some(rnd_tensor) = binding.rnd.as_mut() {
-                    let rnd_name = binding
-                        .names
-                        .rnd
-                        .as_ref()
-                        .ok_or_else(|| anyhow!("RVC rnd tensor without a resolved name"))?
-                        .name
-                        .as_str();
-                    let state = rnd_state
-                        .take()
-                        .ok_or_else(|| anyhow!("RVC rnd noise generator is not initialized"))?;
-                    state.refresh(frame_len)?;
-                    copy_f32_tensor(rnd_tensor, &state.scratch, "rnd")?;
+                    let (rnd_name, _shape, rnd_data) = rnd.ok_or_else(|| {
+                        anyhow!("RVC model has an 'rnd' input but no noise was provided")
+                    })?;
+                    copy_f32_tensor(rnd_tensor, rnd_data, "rnd")?;
                     binding
                         .binding
                         .bind_input(rnd_name, rnd_tensor)
@@ -1530,17 +1508,17 @@ impl RvcModelSession {
                     &mut binding.device_pitchf,
                     "pitchf",
                 )?;
-                // Latent noise: stage fresh N(0,1) into host_rnd, then copy into
-                // the already-bound device_rnd (its address stays stable for the
-                // captured graph; only its contents change).
+                // Latent noise: stage the caller-supplied N(0,1) window into
+                // host_rnd, then copy into the already-bound device_rnd (its
+                // address stays stable for the captured graph; only its contents
+                // change). Both buffers exist iff the model takes `rnd`.
                 if let (Some(host_rnd), Some(device_rnd)) =
                     (binding.host_rnd.as_mut(), binding.device_rnd.as_mut())
                 {
-                    let state = rnd_state
-                        .take()
-                        .ok_or_else(|| anyhow!("RVC rnd noise generator is not initialized"))?;
-                    state.refresh(frame_len)?;
-                    copy_f32_tensor(host_rnd, &state.scratch, "rnd")?;
+                    let (_rnd_name, _shape, rnd_data) = rnd.ok_or_else(|| {
+                        anyhow!("RVC model has an 'rnd' input but no noise was provided")
+                    })?;
+                    copy_f32_tensor(host_rnd, rnd_data, "rnd")?;
                     copy_f32_tensor_to_device(host_rnd, device_rnd, "rnd")?;
                 }
                 binding.copy_fixed_scalars_if_changed(frame_len as i64, speaker_id)?;

@@ -14,6 +14,7 @@ mod sessions;
 mod shape;
 mod stream;
 mod tensorrt;
+mod time_state;
 
 /// GPU scheduling priority requested for inference work.
 ///

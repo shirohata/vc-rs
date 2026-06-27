@@ -6,6 +6,7 @@ use super::shape::{
     feature_len_for_samples, keep_tail_in_place, samples_between_rates, tensor_rt_convert_size_16k,
     Rounding, EMBEDDER_SAMPLE_RATE, RMVPE_FRAME_SAMPLES_16K,
 };
+use super::time_state::RvcTimeState;
 
 pub(super) const VOLUME_DECAY: f32 = 0.97;
 
@@ -97,6 +98,11 @@ pub(super) struct RvcStreamState {
     /// the device/input rate. Sizes `out_size` and the RVC-domain conversions.
     pub(super) rvc_sample_rate: u32,
     pub(super) resampler_16k: Option<dsp::StreamingResampleMono>,
+    // Backend-neutral CPU time state (latent `rnd` noise; Step 2 adds NSF
+    // phase / nsf_noise). Rolled in lockstep with `pitchf_buffer` so per-frame
+    // noise tracks the same absolute feature window. Inert when the model has no
+    // `rnd` input.
+    pub(super) time_state: RvcTimeState,
     // GTCRN input denoiser applied to each new 16 kHz increment before it is
     // appended to the windowed `audio_16k_buffer` (the RVC-path seam). `Some`
     // only when the pipeline was built with `load_with_gtcrn`. At 16 kHz the
@@ -106,7 +112,9 @@ pub(super) struct RvcStreamState {
 }
 
 impl RvcStreamState {
-    pub(super) fn new(rvc_sample_rate: u32) -> Self {
+    /// `rnd_channels` is the model's `rnd` input channel count (`inter_channels`),
+    /// or `None` when the model samples its own noise — see [`RvcTimeState::new`].
+    pub(super) fn new(rvc_sample_rate: u32, rnd_channels: Option<usize>) -> Self {
         Self {
             audio_buffer: Vec::new(),
             audio_16k_buffer: Vec::new(),
@@ -116,6 +124,7 @@ impl RvcStreamState {
             sample_rate: 0,
             rvc_sample_rate,
             resampler_16k: None,
+            time_state: RvcTimeState::new(rnd_channels),
             #[cfg(feature = "gtcrn")]
             gtcrn: None,
         }
@@ -140,6 +149,9 @@ impl RvcStreamState {
                 sample_rate as usize,
                 EMBEDDER_SAMPLE_RATE as usize,
             )?);
+            // A device sample-rate change restarts the stream; the audio timeline
+            // breaks, so drop the per-frame noise/phase history too.
+            self.time_state.reset();
             // A device sample-rate change restarts the stream; reset GTCRN's
             // fixed-delay/cache state so it does not emit pre-restart audio.
             #[cfg(feature = "gtcrn")]
@@ -223,6 +235,12 @@ impl RvcStreamState {
         keep_tail_in_place(&mut self.audio_buffer, convert_size);
         keep_tail_in_place(&mut self.audio_16k_buffer, convert_size_16k);
         keep_tail_in_place(&mut self.pitchf_buffer, feature_size);
+
+        // Roll the latent-noise window in lockstep with `pitchf_buffer`: same new
+        // frame count, same total window length, same 10 ms grid. This keeps a
+        // given absolute frame's `rnd` value stable across overlapping chunks.
+        // Inert when the model has no `rnd` input.
+        self.time_state.roll_rnd(new_feature_len, feature_size);
 
         // Volume envelope memory on the 16 kHz timeline (same signal as
         // ContentVec/F0), the new-increment region minus the excluded tail. The
