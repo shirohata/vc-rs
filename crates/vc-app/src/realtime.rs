@@ -537,8 +537,11 @@ fn control_loop(
             .as_ref()
             .is_some_and(|s| !s.running.load(Ordering::Relaxed))
         {
+            // Carry the worker's real failure (e.g. a backend that cannot run the
+            // model) into the status detail, not just the generic message.
+            let detail = session.as_ref().and_then(|s| s.last_error());
             drop(session.take());
-            set_status(&status, EngineState::Error, "Realtime worker stopped");
+            set_error_message(&status, "Realtime worker stopped", detail);
         }
     }
     drop(session);
@@ -560,6 +563,26 @@ fn set_status(
             status.output_sample_rate = 0;
             status.passthrough_live_switchable = false;
         }
+    }
+}
+
+/// Set an error status with an explicit message and optional detail (e.g. the
+/// worker's captured failure). Mirrors `set_error` but for a message that is not
+/// itself an `anyhow::Error`.
+fn set_error_message(
+    status: &Mutex<EngineStatusSnapshot>,
+    message: impl Into<String>,
+    detail: Option<String>,
+) {
+    if let Ok(mut status) = status.lock() {
+        status.state = EngineState::Error;
+        status.message = message.into();
+        status.detail = detail;
+        status.input_device.clear();
+        status.output_device.clear();
+        status.input_sample_rate = 0;
+        status.output_sample_rate = 0;
+        status.passthrough_live_switchable = false;
     }
 }
 
@@ -886,6 +909,10 @@ fn accumulate_input_chunk(
 
 struct RealtimeSession {
     running: Arc<AtomicBool>,
+    // The error that stopped the inference worker, if any. The worker writes it
+    // before clearing `running`; the controller surfaces it in the engine status
+    // instead of the bare "Realtime worker stopped" message.
+    last_error: Arc<Mutex<Option<String>>>,
     wake: Arc<WorkerWake>,
     worker: Option<JoinHandle<()>>,
     input_stream: Option<AudioStream>,
@@ -1031,6 +1058,8 @@ impl RealtimeSession {
             &wake,
             &telemetry,
         )?;
+        let last_error = Arc::new(Mutex::new(None));
+        let worker_last_error = Arc::clone(&last_error);
         let worker_running = Arc::clone(&running);
         let worker_wake = Arc::clone(&wake);
         let worker_telemetry = Arc::clone(&telemetry);
@@ -1083,9 +1112,20 @@ impl RealtimeSession {
                             &mut prepared,
                         );
                         input_acc.clear();
-                        let Ok(stats) = stats else {
-                            worker_running.store(false, Ordering::SeqCst);
-                            break;
+                        let stats = match stats {
+                            Ok(stats) => stats,
+                            Err(err) => {
+                                // Surface the real cause: a backend that cannot run
+                                // the model (e.g. DirectML rejecting a ConvTranspose
+                                // node) otherwise only showed "Realtime worker
+                                // stopped". Log it and stash it for the status.
+                                tracing::error!("realtime inference worker stopped: {err:#}");
+                                if let Ok(mut slot) = worker_last_error.lock() {
+                                    *slot = Some(format!("{err:#}"));
+                                }
+                                worker_running.store(false, Ordering::SeqCst);
+                                break;
+                            }
                         };
                         worker_telemetry.chunks.fetch_add(1, Ordering::Relaxed);
                         worker_telemetry
@@ -1131,6 +1171,7 @@ impl RealtimeSession {
 
         Ok(Self {
             running,
+            last_error,
             wake,
             worker: worker.take(),
             input_stream: Some(input_stream),
@@ -1160,6 +1201,11 @@ impl RealtimeSession {
 
     fn status(&self) -> EngineStatusSnapshot {
         self.status.clone()
+    }
+
+    /// The error that stopped the worker, if it stopped because of one.
+    fn last_error(&self) -> Option<String> {
+        self.last_error.lock().ok().and_then(|slot| slot.clone())
     }
 }
 
