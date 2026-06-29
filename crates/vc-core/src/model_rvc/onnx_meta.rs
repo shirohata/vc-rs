@@ -89,9 +89,12 @@ pub(super) struct RvcIoNames {
     /// (`phase_in`, shape `[1, 1, 1]`): the normalized phase at the window start.
     /// Paired with [`phase_out`](Self::phase_out). `None` for non-streaming.
     pub(super) phase_in: Option<String>,
-    /// Optional NSF fundamental-phase output of a streaming export
-    /// (`phase_out`, shape `[1, 1, 1]`): the phase after the last generated
-    /// sample. `None` for non-streaming exports.
+    /// Optional NSF fundamental-phase output of a streaming export. The current
+    /// export emits the per-sample `streaming_nsf_phase [1, audio_len, 1]` (the
+    /// phase of every generated sample), from which the host selects the next
+    /// window's `phase_in` for overlapping windows; an earlier export emitted a
+    /// scalar `phase_out [1, 1, 1]` (phase after the last sample). `None` for
+    /// non-streaming exports.
     pub(super) phase_out: Option<String>,
 }
 
@@ -133,7 +136,12 @@ const RVC_RND_ALIASES: &[&str] = &["rnd", "z"];
 // exports. Names are fixed by `rvc.stream_format_version` 1.
 const RVC_NSF_NOISE_ALIASES: &[&str] = &["nsf_noise"];
 const RVC_PHASE_IN_ALIASES: &[&str] = &["phase_in"];
-const RVC_PHASE_OUT_ALIASES: &[&str] = &["phase_out"];
+// `stream_format_version` 1 first emitted a scalar `phase_out [1,1,1]` (phase
+// after the last sample). The current export emits the per-sample
+// `streaming_nsf_phase [1, audio_len, 1]` so the host can pick the next window's
+// `phase_in` for overlapping windows. Prefer the per-sample name; the scalar is
+// kept for back-compat (it falls back to CPU phase accumulation).
+const RVC_PHASE_OUT_ALIASES: &[&str] = &["streaming_nsf_phase", "phase_out"];
 
 impl RvcIoNames {
     /// The canonical vcclient names, for tests/benchmarks that synthesize a
@@ -967,9 +975,9 @@ mod tests {
             dims: vec![1, 1, 1],
         });
         io.outputs.push(TensorInfo {
-            name: "phase_out".to_string(),
+            name: "streaming_nsf_phase".to_string(),
             elem_type: 1,
-            dims: vec![1, 1, 1],
+            dims: vec![1, 0, 1],
         });
         io.metadata = vec![
             ("rvc.export_mode".to_string(), "streaming".to_string()),
@@ -982,7 +990,7 @@ mod tests {
         assert_eq!(names.pitchf, "nsff0");
         assert_eq!(names.nsf_noise.as_deref(), Some("nsf_noise"));
         assert_eq!(names.phase_in.as_deref(), Some("phase_in"));
-        assert_eq!(names.phase_out.as_deref(), Some("phase_out"));
+        assert_eq!(names.phase_out.as_deref(), Some("streaming_nsf_phase"));
 
         let stream = io.stream_format().unwrap().expect("streaming format");
         assert_eq!(stream.version, 1);

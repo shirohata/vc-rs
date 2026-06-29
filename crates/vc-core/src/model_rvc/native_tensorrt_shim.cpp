@@ -651,6 +651,11 @@ extern "C" int vc_rs_trt_rvc_infer(
     std::size_t nsf_len,
     char const* phase_name,
     float const* phase,
+    // Optional per-sample phase output (`streaming_nsf_phase`) copied back to the
+    // host after inference; null/0 skips the copy.
+    char const* phase_out_name,
+    float* phase_out,
+    std::size_t phase_out_len,
     float const* feats,
     std::size_t feats_len,
     int64_t const* pitch,
@@ -723,7 +728,19 @@ extern "C" int vc_rs_trt_rvc_infer(
     if (phase != nullptr && !copy_to_device(*native, phase_name, phase, sizeof(float), msg)) {
         return 1;
     }
-    return enqueue_and_copy(*native, output, output_len, msg) ? 0 : 1;
+    if ((phase_out_name == nullptr) != (phase_out == nullptr)) {
+        msg.append("TensorRT RVC infer received a partial phase_out (name/buffer mismatch)\n");
+        return 2;
+    }
+    if (!enqueue_and_copy(*native, output, output_len, msg)) {
+        return 1;
+    }
+    // Copy the per-sample phase output back for the host's next-window phase_in.
+    if (phase_out != nullptr
+        && !copy_named_output_to_host(*native, phase_out_name, phase_out, phase_out_len, msg)) {
+        return 1;
+    }
+    return 0;
 }
 
 extern "C" int vc_rs_trt_gtcrn_infer(

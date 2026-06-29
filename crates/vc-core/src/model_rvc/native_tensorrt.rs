@@ -77,6 +77,11 @@ mod ffi {
             nsf_len: usize,
             phase_name: *const c_char,
             phase: *const f32,
+            // Optional per-sample phase output copied back to the host
+            // (`streaming_nsf_phase`). Null/0 to skip the copy.
+            phase_out_name: *const c_char,
+            phase_out: *mut f32,
+            phase_out_len: usize,
             feats: *const f32,
             feats_len: usize,
             pitch: *const i64,
@@ -169,6 +174,9 @@ struct NativeRvcRnd {
 struct NativeRvcStream {
     nsf_name: CString,
     phase_name: CString,
+    // Per-sample NSF phase output (`streaming_nsf_phase`, `[1, audio_len, 1]`),
+    // copied back so the host can pick the next window's `phase_in`.
+    phase_out_name: CString,
     audio_len: NonZeroUsize,
 }
 
@@ -521,6 +529,9 @@ impl NativeRvcEngine {
         // and the window-start NSF phase. `None` for conventional exports.
         nsf_noise: Option<&[f32]>,
         phase_in: Option<f32>,
+        // Filled (when streaming) with the model's per-sample `streaming_nsf_phase`
+        // output so the caller can pick the next window's `phase_in`.
+        phase_out: Option<&mut Vec<f32>>,
     ) -> Result<Vec<f32>> {
         if feats.len() != self.frames.get() * self.channels.get() {
             bail!(
@@ -538,7 +549,7 @@ impl NativeRvcEngine {
             );
         }
         infer_rvc(
-            self, feats, pitch, pitchf, speaker_id, rnd, nsf_noise, phase_in,
+            self, feats, pitch, pitchf, speaker_id, rnd, nsf_noise, phase_in, phase_out,
         )
     }
 
@@ -1161,10 +1172,15 @@ fn native_rvc_stream(
     names: &RvcIoNames,
     profile: &TensorRtSessionProfile,
 ) -> Result<Option<NativeRvcStream>> {
-    let (Some(nsf), Some(phase)) = (names.nsf_noise.as_ref(), names.phase_in.as_ref()) else {
+    let (Some(nsf), Some(phase), Some(phase_out)) = (
+        names.nsf_noise.as_ref(),
+        names.phase_in.as_ref(),
+        names.phase_out.as_ref(),
+    ) else {
         return Ok(None);
     };
     // `nsf_noise` is `[1, audio_len, 1]`; its middle axis is the validated length.
+    // `streaming_nsf_phase` shares that length ([1, audio_len, 1]).
     let audio_len = profile
         .fixed_input_dims(nsf)?
         .get(1)
@@ -1179,9 +1195,13 @@ fn native_rvc_stream(
     let phase_name = CString::new(phase.as_str()).with_context(|| {
         format!("RVC phase_in input name '{phase}' contains an interior NUL byte")
     })?;
+    let phase_out_name = CString::new(phase_out.as_str()).with_context(|| {
+        format!("RVC phase output name '{phase_out}' contains an interior NUL byte")
+    })?;
     Ok(Some(NativeRvcStream {
         nsf_name,
         phase_name,
+        phase_out_name,
         audio_len,
     }))
 }
@@ -1197,6 +1217,7 @@ fn infer_rvc(
     rnd: Option<&[f32]>,
     nsf_noise: Option<&[f32]>,
     phase_in: Option<f32>,
+    phase_out: Option<&mut Vec<f32>>,
 ) -> Result<Vec<f32>> {
     let mut output = vec![0.0f32; engine.output_len.get()];
     // Bind the caller-supplied latent noise (when this export takes it); pass null
@@ -1260,6 +1281,19 @@ fn infer_rvc(
             std::ptr::null(),
         ),
     };
+    // Per-sample phase output (`streaming_nsf_phase`, `[1, audio_len, 1]`): size the
+    // caller's buffer to the engine's audio_len and let the shim copy it back. The
+    // raw pointer stays valid through the FFI call (the buffer is not touched
+    // again). Null when not streaming or the caller did not request it.
+    let (phase_out_name_ptr, phase_out_ptr, phase_out_len) =
+        match (engine.stream.as_ref(), phase_out) {
+            (Some(stream), Some(buf)) => {
+                buf.clear();
+                buf.resize(stream.audio_len.get(), 0.0);
+                (stream.phase_out_name.as_ptr(), buf.as_mut_ptr(), buf.len())
+            }
+            _ => (std::ptr::null(), std::ptr::null_mut(), 0usize),
+        };
     let mut message = MessageBuffer::new();
     let status = unsafe {
         ffi::vc_rs_trt_rvc_infer(
@@ -1277,6 +1311,9 @@ fn infer_rvc(
             nsf_len,
             phase_name_ptr,
             phase_ptr,
+            phase_out_name_ptr,
+            phase_out_ptr,
+            phase_out_len,
             feats.as_ptr(),
             feats.len(),
             pitch.as_ptr(),
@@ -1307,6 +1344,7 @@ fn infer_rvc(
     _rnd: Option<&[f32]>,
     _nsf_noise: Option<&[f32]>,
     _phase_in: Option<f32>,
+    _phase_out: Option<&mut Vec<f32>>,
 ) -> Result<Vec<f32>> {
     bail!("native TensorRT RVC inference is unavailable in this binary")
 }

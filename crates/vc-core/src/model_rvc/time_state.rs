@@ -315,8 +315,34 @@ impl RvcTimeState {
         (self.abs_frame, self.abs_sample)
     }
 
+    /// Set the next chunk's window-start phase directly from the model's
+    /// per-sample phase output (`streaming_nsf_phase`), per the exporter contract
+    /// "select the next phase_in from streaming_nsf_phase at the next input window
+    /// start". The next window starts `advance_frames * frame_hop` samples into the
+    /// current output, so that element is the next `phase_in`.
+    ///
+    /// Returns `false` (leaving the phase unchanged) for non-streaming exports or
+    /// when the output is too short to contain that sample — the caller then falls
+    /// back to [`advance_phase`]. Preferring the model output keeps the carry exact
+    /// even if the exporter's internal phase math changes.
+    pub(super) fn set_phase_from_output(&mut self, phase_samples: &[f32]) -> bool {
+        let Some(params) = self.stream else {
+            return false;
+        };
+        let advance_samples = self.last_advance_frames.saturating_mul(params.frame_hop);
+        let Some(phase) = self.phase.as_mut() else {
+            return false;
+        };
+        let Some(&value) = phase_samples.get(advance_samples) else {
+            return false;
+        };
+        phase.window_start_phase = (value as f64).rem_euclid(1.0);
+        true
+    }
+
     /// Advance the carried NSF phase past this chunk's window advance, using the
-    /// final `pitchf` (the model's `nsff0`). Call once after each inference.
+    /// final `pitchf` (the model's `nsff0`). The CPU fallback for exports that do
+    /// not emit a usable per-sample phase output. Call once after each inference.
     /// No-op for non-streaming exports.
     pub(super) fn advance_phase(&mut self, pitchf: &[f32]) {
         if let (Some(phase), Some(params)) = (self.phase.as_mut(), self.stream) {
@@ -616,6 +642,22 @@ mod tests {
         state.advance_phase(&pitchf);
         let p = state.phase_in().unwrap();
         assert!((p - 0.5).abs() < 1e-5, "phase {p} should be 0.5");
+    }
+
+    #[test]
+    fn phase_from_output_picks_next_window_start_sample() {
+        let frame_hop = 4;
+        let total = 8;
+        let advance = 2;
+        let mut state = streaming_state(frame_hop, 48_000);
+        state.roll(advance, total); // last_advance_frames = 2 -> advance_samples = 8
+                                    // Per-sample phase output, audio_len = total * frame_hop = 32.
+        let phase: Vec<f32> = (0..total * frame_hop).map(|i| i as f32 / 100.0).collect();
+        assert!(state.set_phase_from_output(&phase));
+        // The next window starts at sample advance*frame_hop = 8 -> phase[8] = 0.08.
+        assert!((state.phase_in().unwrap() - 0.08).abs() < 1e-5);
+        // A too-short output leaves the phase unchanged and reports no update.
+        assert!(!state.set_phase_from_output(&phase[..4]));
     }
 
     #[test]

@@ -1183,14 +1183,18 @@ impl RvcModelSession {
         // backend below only binds this slice.
         rnd: Option<&[f32]>,
         // Streaming-export NSF source noise `[1, audio_len, 1]` and window-start
-        // NSF phase. `None` for conventional exports. Only the dynamic-shape
-        // session-run path consumes them; streaming cannot reach the fixed-shape
-        // IoBinding / native paths (rejected at load).
+        // NSF phase. `None` for conventional exports. Consumed by the dynamic-shape
+        // session-run path and the native TensorRT path; the ORT fixed-shape
+        // IoBinding paths reject streaming at load.
         nsf_noise: Option<&[f32]>,
         phase_in: Option<f32>,
+        // Filled (when streaming) with the model's per-sample `streaming_nsf_phase`
+        // output, from which the caller picks the next chunk's `phase_in`.
+        phase_out: Option<&mut Vec<f32>>,
         out: &mut Vec<f32>,
     ) -> Result<()> {
-        // Streaming I/O is only modeled on the dynamic-shape session-run path.
+        // Streaming I/O is modeled on the dynamic-shape session-run path and the
+        // native engine; only the ORT fixed-shape IoBinding path rejects it.
         let is_streaming = nsf_noise.is_some() || phase_in.is_some();
         let feats_shape_usize = i64_shape_to_usize(feats_shape, "feats")?;
         validate_tensorrt_input_shape(
@@ -1217,9 +1221,11 @@ impl RvcModelSession {
             // caller buffer so the reuse contract holds for the ORT paths below.
             // Refactoring the native shim to write in place is out of scope here.
             // Streaming exports pass their NSF noise/phase here too (the engine
-            // binds them when built with the streaming profile).
-            let converted =
-                native.infer(feats, pitch, pitchf, speaker_id, rnd, nsf_noise, phase_in)?;
+            // binds them when built with the streaming profile) and read back the
+            // per-sample phase output for the next window's `phase_in`.
+            let converted = native.infer(
+                feats, pitch, pitchf, speaker_id, rnd, nsf_noise, phase_in, phase_out,
+            )?;
             out.clear();
             out.extend_from_slice(&converted);
             return Ok(());
@@ -1267,6 +1273,7 @@ impl RvcModelSession {
                 rnd,
                 nsf_noise,
                 phase_in,
+                phase_out,
                 out,
             )
         }
@@ -1274,7 +1281,7 @@ impl RvcModelSession {
         {
             // `rnd`/streaming inputs are consumed only by the ORT/native paths
             // above; in the native build with no ORT they are referenced there.
-            let _ = (rnd, nsf_noise, phase_in);
+            let _ = (rnd, nsf_noise, phase_in, phase_out);
             let _ = out;
             bail!("RVC session inference requires the `ort` feature; this build supports native TensorRT only")
         }
@@ -1297,6 +1304,7 @@ impl RvcModelSession {
         rnd: Option<&[f32]>,
         nsf_noise: Option<&[f32]>,
         phase_in: Option<f32>,
+        phase_out: Option<&mut Vec<f32>>,
         out: &mut Vec<f32>,
     ) -> Result<()> {
         let p_len_value = [frame_len as i64];
@@ -1384,19 +1392,15 @@ impl RvcModelSession {
                 format_usize_shape(pitch_shape),
                 run_start.elapsed().as_micros()
             );
-            // Streaming exports also emit `phase_out` (phase after the last sample).
-            // vc-rs carries phase on the CPU (overlapping windows make the model's
-            // adjacent-window contract inapplicable), so this is read only for
-            // diagnostics when present.
-            if let Some(phase_out_name) = names.phase_out.as_deref() {
+            // Streaming exports emit the per-sample `streaming_nsf_phase`; copy it
+            // into the caller's buffer so it can select the next window's
+            // `phase_in`. Absent/unrequested for conventional exports.
+            if let (Some(phase_out), Some(phase_out_name)) = (phase_out, names.phase_out.as_deref())
+            {
+                phase_out.clear();
                 if let Some(value) = outputs.get(phase_out_name) {
-                    if let Ok((_, data)) = value.try_extract_tensor::<f32>() {
-                        debug!(
-                            "rvc streaming phase_out backend={} value={:?}",
-                            self.provider.label(),
-                            data.first().copied()
-                        );
-                    }
+                    let (_, data) = value.try_extract_tensor::<f32>()?;
+                    phase_out.extend_from_slice(data);
                 }
             }
             let value = outputs

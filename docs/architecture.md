@@ -211,24 +211,27 @@ without touching callers.
   - **`nsf_noise` `[1, audio_len, 1]`** — per-output-sample NSF source noise,
     rolled on the output-sample grid (`* frame_hop`) with the same alignment as
     `rnd` (distinct seed, so it is independent of `rnd`).
-  - **NSF phase (`phase_in`/`phase_out` `[1,1,1]`)** — the exporter contract is
-    `absolute_window_start`: `phase_in` is the phase at the window's first
-    generated sample. vc-rs feeds overlapping windows, so the exporter's "carry
-    `phase_out` straight into the next window" rule does **not** apply. Instead the
-    CPU carries the window-start phase and, after each inference, advances it past
-    exactly the frames the window scrolls (`advance_frames`, constant for a fixed
-    chunk size) using this chunk's `pitchf`: `phase += Σ f0/sample_rate *
-    frame_hop`, wrapped to `[0, 1)`. This reproduces the model's per-frame phase
-    step on the CPU; `phase_out` is read only for diagnostics.
+  - **NSF phase (`phase_in` `[1,1,1]` → `streaming_nsf_phase` `[1, audio_len, 1]`)**
+    — `phase_in` is the normalized phase at the window's first generated sample.
+    vc-rs feeds *overlapping* windows, so a naive carry of the last sample's phase
+    is wrong. The current export emits the per-sample `streaming_nsf_phase`, and
+    the contract is "select the next `phase_in` from `streaming_nsf_phase` at the
+    next input window start": the next window starts `advance_frames * frame_hop`
+    samples into this output, so that element is the next `phase_in`. The host
+    reads the output back and picks it ([`set_phase_from_output`]). For an earlier
+    export that emitted only a scalar phase (or none), it falls back to CPU
+    accumulation: advance the window-start phase past the frames the window scrolls
+    using this chunk's `pitchf` (`phase += Σ f0/sample_rate * frame_hop`, wrapped),
+    which reproduces the model's per-frame step.
 
   Streaming runs on the dynamic-shape ORT path (CPU/CUDA/DirectML) and on
   **native TensorRT**: the fixed-shape profile adds `nsf_noise`
   `[1, feature_len*frame_hop, 1]` (the `phone_lengths`/`sid` axes are dynamic in
   the streaming export, so they join the build profile too) and `phase_in`
-  `[1,1,1]`, and the native shim binds both by name (`phase_out` is emitted but
-  unread). The ORT *fixed-shape IoBinding* paths (Windows ML TensorRT-RTX, CUDA
-  graph) do not yet model the extra I/O and fail clearly at load — use native
-  tensorrt or a dynamic-shape provider for those.
+  `[1,1,1]`; the native shim binds those inputs by name and copies the
+  `streaming_nsf_phase` output back to the host. The ORT *fixed-shape IoBinding*
+  paths (Windows ML TensorRT-RTX, CUDA graph) do not yet model the extra I/O and
+  fail clearly at load — use native tensorrt or a dynamic-shape provider for those.
 
 - **Reset.** All of the above reset together whenever the audio timeline breaks —
   stream restart, sample-rate or chunk change, model reload, or passthrough↔RVC

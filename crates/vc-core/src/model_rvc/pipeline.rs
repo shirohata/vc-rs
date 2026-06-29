@@ -138,6 +138,9 @@ pub struct RvcPipeline {
     // Reused `[1, audio_len, 1]` NSF source-noise tensor for streaming exports,
     // refilled per chunk from the rolling NSF noise state.
     nsf_scratch: Vec<f32>,
+    // Reused buffer for the model's per-sample `streaming_nsf_phase` output, read
+    // back each streaming chunk to pick the next window's `phase_in`.
+    phase_out_scratch: Vec<f32>,
     // Reused per-chunk buffer for the gain-scaled / denoised input, so `process`
     // does not allocate a fresh Vec every chunk when input_gain != 1.0 or a
     // denoiser is active. Empty when the zero-copy (gain==1.0, denoiser-off) path
@@ -523,6 +526,7 @@ impl RvcPipeline {
             stream_params,
             rnd_scratch: Vec::new(),
             nsf_scratch: Vec::new(),
+            phase_out_scratch: Vec::new(),
             input_scratch: Vec::new(),
             feature_tensor: FeatureTensor::default(),
             input_reference_scratch: Vec::new(),
@@ -1001,6 +1005,7 @@ impl RvcPipeline {
             stream_params,
             rnd_scratch: Vec::new(),
             nsf_scratch: Vec::new(),
+            phase_out_scratch: Vec::new(),
             input_scratch: Vec::new(),
             feature_tensor: FeatureTensor::default(),
             input_reference_scratch: Vec::new(),
@@ -1117,6 +1122,7 @@ impl RvcPipeline {
         self.input_scratch.clear();
         self.rnd_scratch.clear();
         self.nsf_scratch.clear();
+        self.phase_out_scratch.clear();
         self.feature_tensor = FeatureTensor::default();
         self.input_reference_scratch.clear();
         self.rms_mix_scratch = dsp::RmsMixScratch::default();
@@ -1371,6 +1377,9 @@ impl VoiceModel for RvcPipeline {
         // `out_audio` buffer (reused across chunks) and all post-processing runs
         // in place on it; the output pitchf goes into `out_pitchf`.
         let rvc_start = Instant::now();
+        // Streaming exports return the per-sample `streaming_nsf_phase`; collect it
+        // so the next chunk's `phase_in` can be read at the next window start.
+        let phase_out = phase_in.is_some().then_some(&mut self.phase_out_scratch);
         self.rvc.infer(
             &self.feature_tensor.data,
             &self.feature_tensor.shape,
@@ -1381,13 +1390,21 @@ impl VoiceModel for RvcPipeline {
             rnd,
             nsf_noise,
             phase_in,
+            phase_out,
             out_audio,
         )?;
         let rvc_time = rvc_start.elapsed();
-        // Advance the NSF phase for the next chunk by exactly the frames this
-        // window scrolls past, using this chunk's `pitchf` (the model's `nsff0`).
+        // Carry the NSF phase to the next chunk. Prefer the model's per-sample
+        // phase output (exact, per the streaming contract); fall back to CPU
+        // accumulation when the export does not provide a usable per-sample output.
         // No-op for conventional exports.
-        self.stream_state.time_state.advance_phase(pitchf);
+        if !self
+            .stream_state
+            .time_state
+            .set_phase_from_output(&self.phase_out_scratch)
+        {
+            self.stream_state.time_state.advance_phase(pitchf);
+        }
         let raw_output_samples = out_audio.len();
         keep_tail_in_place(out_audio, stream_input.out_size);
         pitchf_tail_for_output_into(pitchf, out_audio.len(), self.rvc_sample_rate, out_pitchf);
