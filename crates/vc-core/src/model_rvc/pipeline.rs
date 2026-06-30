@@ -572,15 +572,18 @@ impl RvcPipeline {
         );
         let rvc_info = inspect_rvc_model(config.model)?;
         let stream_params = stream_params_from_info(&rvc_info)?;
-        // Native TensorRT models the streaming NSF noise/phase I/O in its
-        // fixed-shape profile and engine bindings (below). The ORT fixed-shape
-        // IoBinding paths (CUDA graph, Windows ML TensorRT-RTX) do not yet, so for
-        // those a streaming model must run on the dynamic-shape `load` path
-        // (CPU/CUDA/DirectML); fail clearly rather than build a binding missing
-        // those inputs.
-        if stream_params.is_some() && !config.provider.is_tensorrt() {
+        // Streaming NSF noise/phase I/O is bound on two fixed-shape backends:
+        // native TensorRT (its engine profile + bindings) and the pinned-CPU ORT
+        // IoBinding (Windows ML TensorRT-RTX). The CUDA device-I/O and CUDA-graph
+        // IoBinding paths do not bind it yet, so for those a streaming model must
+        // run on the dynamic-shape `load` path (CPU/CUDA/DirectML); fail clearly
+        // rather than build a binding missing those inputs.
+        if stream_params.is_some()
+            && !config.provider.is_tensorrt()
+            && tensor_rt_run_mode != TensorRtRunMode::PinnedCpu
+        {
             bail!(
-                "provider {} does not support rvc-onnx-web streaming exports yet; use native tensorrt, or a CPU/CUDA/DirectML provider (windowsml) for streaming models",
+                "provider {} does not support rvc-onnx-web streaming exports in this run mode; use native tensorrt, windowsml-nvtrtx, or a CPU/CUDA/DirectML provider (windowsml) for streaming models",
                 config.provider.label()
             );
         }
@@ -905,13 +908,21 @@ impl RvcPipeline {
                     &warmup.contentvec_output_shape,
                     shared_waveform.as_ref(),
                 )?;
-                // ORT fixed-shape (device-I/O) does not bind streaming I/O; such
-                // models are rejected at load above, so pass no stream hop here.
+                // Pinned-CPU IoBinding (Windows ML TensorRT-RTX) binds streaming
+                // I/O, so pass the frame hop to add the `nsf_noise`
+                // `[1, feature_len*frame_hop, 1]` input to its profile. The
+                // device-I/O / CUDA-graph modes do not, and streaming models are
+                // rejected for them at load above, so they get no stream hop.
+                let rvc_stream_frame_hop = if tensor_rt_run_mode == TensorRtRunMode::PinnedCpu {
+                    stream_params.map(|stream| stream.frame_hop)
+                } else {
+                    None
+                };
                 let rvc_profile = TensorRtSessionProfile::rvc(
                     feature_len,
                     expected_feat_channels_usize,
                     &rvc_info.io_names,
-                    None,
+                    rvc_stream_frame_hop,
                 )
                 .with_gpu_priority(config.gpu_priority)
                 .with_gpu_device_id(gpu_device_id)

@@ -224,14 +224,26 @@ without touching callers.
     using this chunk's `pitchf` (`phase += Σ f0/sample_rate * frame_hop`, wrapped),
     which reproduces the model's per-frame step.
 
-  Streaming runs on the dynamic-shape ORT path (CPU/CUDA/DirectML) and on
-  **native TensorRT**: the fixed-shape profile adds `nsf_noise`
+  Streaming runs on the dynamic-shape ORT path (CPU/CUDA/DirectML), on
+  **native TensorRT**, and on the **Windows ML TensorRT-RTX** pinned-CPU
+  IoBinding (`windowsml-nvtrtx`). The fixed-shape profile adds `nsf_noise`
   `[1, feature_len*frame_hop, 1]` (the `phone_lengths`/`sid` axes are dynamic in
   the streaming export, so they join the build profile too) and `phase_in`
-  `[1,1,1]`; the native shim binds those inputs by name and copies the
-  `streaming_nsf_phase` output back to the host. The ORT *fixed-shape IoBinding*
-  paths (Windows ML TensorRT-RTX, CUDA graph) do not yet model the extra I/O and
-  fail clearly at load — use native tensorrt or a dynamic-shape provider for those.
+  `[1,1,1]`; native TensorRT's shim and the ORT pinned IoBinding both bind those
+  inputs by name and copy the `streaming_nsf_phase` output back to the host
+  (`RvcTensorRtPinnedBinding` for the ORT path). The *CUDA-graph* IoBinding does
+  not model the extra I/O and fails clearly at load — use one of the above.
+
+  - **NvTensorRtRtx runtime-cache caveat.** The TensorRT-RTX EP writes its
+    runtime cache file when the session is destroyed, and for streaming engines
+    that on-destroy write fast-fails the process (`0xC0000409`, in
+    `trt_rtx_ep::utils::WriteFile` — an EP-side teardown bug, independent of our
+    IoBinding; the dynamic `session.run` path crashes the same way, and the
+    inference output itself is correct). vc-rs therefore omits
+    `nv_runtime_cache_path` for streaming RVC sessions only (`load_session`'s
+    `disable_nvtrtx_runtime_cache`, set from `io_names.nsf_noise.is_some()`), so
+    those engines rebuild each load but tear down cleanly. Non-streaming
+    `windowsml-nvtrtx` keeps the cache.
 
 - **Reset.** All of the above reset together whenever the audio timeline breaks —
   stream restart, sample-rate or chunk change, model reload, or passthrough↔RVC

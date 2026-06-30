@@ -28,6 +28,8 @@ pub fn inspect_model(path: &Path) -> Result<()> {
         None,
         TensorRtRunMode::PinnedCpu,
         TensorRtSessionPurpose::Main,
+        // CPU inspect never uses the NvTensorRtRtx runtime cache.
+        false,
     )?;
     println!("Model: {}", path.display());
     println!("Inputs:");

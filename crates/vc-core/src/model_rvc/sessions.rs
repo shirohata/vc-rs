@@ -95,6 +95,8 @@ impl HubertEmbedderSession {
                 tensor_rt_profile.as_ref(),
                 tensor_rt_run_mode,
                 tensor_rt_session_purpose,
+                // ContentVec is never a streaming export; keep its runtime cache.
+                false,
             )?
         };
         info!(
@@ -412,6 +414,8 @@ impl RmvpePitchSession {
                 tensor_rt_profile.as_ref(),
                 tensor_rt_run_mode,
                 tensor_rt_session_purpose,
+                // RMVPE is never a streaming export; keep its runtime cache.
+                false,
             )?
         };
         info!("loaded RMVPE f0 model: {}", path.display());
@@ -905,6 +909,10 @@ impl RvcModelSession {
                 tensor_rt_profile.as_ref(),
                 tensor_rt_run_mode,
                 tensor_rt_session_purpose,
+                // Streaming RVC exports (nsf_noise/phase I/O) crash the NvTensorRtRtx
+                // EP when it writes its runtime cache on session destroy; disable
+                // that cache for them. Non-streaming RVC keeps it.
+                io_names.nsf_noise.is_some(),
             )?;
             info!("loaded RVC model: {}", path.display());
             Ok(Self {
@@ -1010,29 +1018,70 @@ impl RvcModelSession {
                 }
                 None => None,
             };
+            // Streaming exports require `nsf_noise` + `phase_in` to run at all;
+            // warmup only learns the output shape, so zeros suffice. Size the NSF
+            // noise from the profile's `[1, audio_len, 1]` entry so it matches the
+            // fixed-shape session. Both names are present together for streaming.
+            let stream = match (
+                self.io_names.nsf_noise.as_deref(),
+                self.io_names.phase_in.as_deref(),
+            ) {
+                (Some(nsf_name), Some(phase_name)) => {
+                    let profile = self.tensor_rt_profile.as_ref().ok_or_else(|| {
+                        anyhow!("streaming RVC warmup requires a fixed-shape profile")
+                    })?;
+                    let dims = profile.fixed_input_dims(nsf_name)?;
+                    let audio_len = *dims.get(1).ok_or_else(|| {
+                        anyhow!("TensorRT RVC 'nsf_noise' profile must be rank-3")
+                    })?;
+                    Some((
+                        nsf_name,
+                        Tensor::from_array(([1usize, audio_len, 1usize], vec![0.0f32; audio_len]))?,
+                        phase_name,
+                        Tensor::from_array(([1usize, 1, 1], vec![0.0f32]))?,
+                    ))
+                }
+                _ => None,
+            };
             let run_start = Instant::now();
             let names = &self.io_names;
             let session = self
                 .session
                 .as_mut()
                 .ok_or_else(|| anyhow!("RVC ORT session is not initialized"))?;
-            let outputs = if let Some((rnd_name, rnd)) = rnd {
-                session.run(ort::inputs![
+            let outputs = match (rnd, stream) {
+                // Streaming export: feats/p_len/pitch/pitchf/sid + rnd + nsf_noise
+                // + phase_in (all present together).
+                (Some((rnd_name, rnd)), Some((nsf_name, nsf, phase_name, phase))) => {
+                    session.run(ort::inputs![
+                        names.feats.as_str() => feats,
+                        names.p_len.as_str() => p_len,
+                        names.pitch.as_str() => pitch,
+                        names.pitchf.as_str() => pitchf,
+                        names.sid.as_str() => sid,
+                        rnd_name => rnd,
+                        nsf_name => nsf,
+                        phase_name => phase,
+                    ])?
+                }
+                (Some((rnd_name, rnd)), None) => session.run(ort::inputs![
                     names.feats.as_str() => feats,
                     names.p_len.as_str() => p_len,
                     names.pitch.as_str() => pitch,
                     names.pitchf.as_str() => pitchf,
                     names.sid.as_str() => sid,
                     rnd_name => rnd,
-                ])?
-            } else {
-                session.run(ort::inputs![
+                ])?,
+                (None, None) => session.run(ort::inputs![
                     names.feats.as_str() => feats,
                     names.p_len.as_str() => p_len,
                     names.pitch.as_str() => pitch,
                     names.pitchf.as_str() => pitchf,
                     names.sid.as_str() => sid,
-                ])?
+                ])?,
+                (None, Some(_)) => {
+                    bail!("RVC streaming warmup requires the export's 'rnd' input")
+                }
             };
             debug!(
                 "rvc warmup session.run backend={} feats_shape={} pitch_shape={} elapsed_us={}",
@@ -1072,6 +1121,21 @@ impl RvcModelSession {
             .copied()
             .ok_or_else(|| anyhow!("TensorRT RVC pitch profile must be rank-2"))?;
         let output_shape = i64_shape_to_usize(output_shape, "rvc output")?;
+        // Streaming exports add the NSF noise/phase I/O. Its output-sample length
+        // comes from the profile's `nsf_noise` `[1, audio_len, 1]` entry (added
+        // only when the model is a streaming export and the run mode supports it),
+        // so the binding buffers agree with the profiled shapes. Only the
+        // pinned-CPU IoBinding binds streaming I/O today.
+        let stream_audio_len =
+            match self.io_names.nsf_noise.as_deref() {
+                Some(nsf_name) => {
+                    let dims = profile.fixed_input_dims(nsf_name)?;
+                    Some(*dims.get(1).ok_or_else(|| {
+                        anyhow!("TensorRT RVC 'nsf_noise' profile must be rank-3")
+                    })?)
+                }
+                None => None,
+            };
         let binding = match self.tensor_rt_run_mode {
             TensorRtRunMode::PinnedCpu => {
                 RvcTensorRtBinding::Pinned(RvcTensorRtPinnedBinding::new(
@@ -1085,6 +1149,7 @@ impl RvcModelSession {
                     speaker_id,
                     profile.gpu_device_id,
                     &self.io_names,
+                    stream_audio_len,
                 )?)
             }
             TensorRtRunMode::DeviceIo | TensorRtRunMode::CudaGraph => {
@@ -1193,9 +1258,9 @@ impl RvcModelSession {
         phase_out: Option<&mut Vec<f32>>,
         out: &mut Vec<f32>,
     ) -> Result<()> {
-        // Streaming I/O is modeled on the dynamic-shape session-run path and the
-        // native engine; only the ORT fixed-shape IoBinding path rejects it.
-        let is_streaming = nsf_noise.is_some() || phase_in.is_some();
+        // Streaming NSF noise/phase I/O is bound by the dynamic-shape session-run
+        // path, the native engine, and the pinned-CPU IoBinding; only the
+        // CUDA-graph IoBinding still rejects it (inside `infer_with_binding`).
         let feats_shape_usize = i64_shape_to_usize(feats_shape, "feats")?;
         validate_tensorrt_input_shape(
             self.provider,
@@ -1233,11 +1298,13 @@ impl RvcModelSession {
         #[cfg(feature = "ort")]
         {
             if self.tensor_rt_binding.is_some() {
-                if is_streaming {
-                    bail!("the TensorRT IoBinding path does not support streaming exports yet");
-                }
-                return self
-                    .infer_with_binding(feats, frame_len, pitch, pitchf, speaker_id, rnd, out);
+                // The pinned-CPU IoBinding binds streaming NSF noise/phase I/O; the
+                // CUDA-graph IoBinding does not (it rejects streaming inside
+                // `infer_with_binding`).
+                return self.infer_with_binding(
+                    feats, frame_len, pitch, pitchf, speaker_id, rnd, nsf_noise, phase_in,
+                    phase_out, out,
+                );
             }
             // The CPU output-binding fast path binds a fixed input set; it is never
             // enabled for streaming exports (see `enable_cpu_output_binding`), so
@@ -1517,8 +1584,9 @@ impl RvcModelSession {
         Ok(())
     }
 
-    // Inputs mirror the ONNX RVC contract (feats/pitch/pitchf/sid/rnd) plus the
-    // reused output buffer; an ad-hoc struct would only obscure that contract.
+    // Inputs mirror the ONNX RVC contract (feats/pitch/pitchf/sid/rnd, plus the
+    // streaming NSF noise/phase I/O) and the reused output buffer; an ad-hoc
+    // struct would only obscure that contract.
     #[cfg(feature = "ort")]
     #[allow(clippy::too_many_arguments)]
     pub(super) fn infer_with_binding(
@@ -1529,6 +1597,13 @@ impl RvcModelSession {
         pitchf: &[f32],
         speaker_id: i64,
         rnd: Option<&[f32]>,
+        // Streaming-export NSF source noise `[1, audio_len, 1]` and window-start
+        // phase; bound by the pinned-CPU path, rejected by the CUDA-graph path.
+        nsf_noise: Option<&[f32]>,
+        phase_in: Option<f32>,
+        // Filled (when streaming) with the model's per-sample `streaming_nsf_phase`
+        // output for the caller to pick the next chunk's `phase_in`.
+        phase_out: Option<&mut Vec<f32>>,
         out: &mut Vec<f32>,
     ) -> Result<()> {
         // Resolve the caller-supplied noise window (name/shape validation) before
@@ -1575,12 +1650,51 @@ impl RvcModelSession {
                         .bind_input(rnd_name, rnd_tensor)
                         .context("failed to bind TensorRT RVC input 'rnd'")?;
                 }
+                // Streaming NSF source noise + window-start phase: stage into the
+                // pinned input buffers and re-bind (the pinned path copies inputs
+                // at bind time). Both buffers exist iff the model is a streaming
+                // export; the per-sample phase output stays bound from construction.
+                if let Some(nsf_tensor) = binding.nsf_noise.as_mut() {
+                    let nsf_data = nsf_noise.ok_or_else(|| {
+                        anyhow!(
+                            "RVC streaming model has an 'nsf_noise' input but none was provided"
+                        )
+                    })?;
+                    let nsf_name = binding.names.nsf_noise.as_deref().ok_or_else(|| {
+                        anyhow!("RVC streaming binding is missing its 'nsf_noise' input name")
+                    })?;
+                    copy_f32_tensor(nsf_tensor, nsf_data, "nsf_noise")?;
+                    binding
+                        .binding
+                        .bind_input(nsf_name, nsf_tensor)
+                        .context("failed to bind TensorRT RVC input 'nsf_noise'")?;
+                }
+                if let Some(phase_tensor) = binding.phase_in.as_mut() {
+                    let phase_name = binding.names.phase_in.as_deref().ok_or_else(|| {
+                        anyhow!("RVC streaming binding is missing its 'phase_in' input name")
+                    })?;
+                    copy_f32_tensor(phase_tensor, &[phase_in.unwrap_or(0.0)], "phase_in")?;
+                    binding
+                        .binding
+                        .bind_input(phase_name, phase_tensor)
+                        .context("failed to bind TensorRT RVC input 'phase_in'")?;
+                }
                 let run_start = Instant::now();
                 let _outputs = session.run_binding(&binding.binding)?;
                 binding
                     .binding
                     .synchronize_outputs()
                     .context("failed to synchronize TensorRT RVC bound output")?;
+                // Streaming: read back the per-sample `streaming_nsf_phase` so the
+                // caller can pick the next window's `phase_in`. The output buffer
+                // exists iff the export emits it.
+                if let (Some(phase_out), Some(phase_tensor)) =
+                    (phase_out, binding.phase_out.as_ref())
+                {
+                    let (_, data) = phase_tensor.try_extract_tensor::<f32>()?;
+                    phase_out.clear();
+                    phase_out.extend_from_slice(data);
+                }
                 debug!(
                     "rvc session.run_binding backend={} cuda_graph=false device_io=false feats_shape={} pitch_shape={} output_shape={} elapsed_us={}",
                     self.provider.label(),
@@ -1603,6 +1717,13 @@ impl RvcModelSession {
                 Ok(())
             }
             RvcTensorRtBinding::CudaGraph(binding) => {
+                // The CUDA-graph IoBinding does not bind streaming NSF noise/phase
+                // I/O (captured-graph device addresses + no phase read-back path);
+                // such models are rejected at load, so this is a defensive guard.
+                if nsf_noise.is_some() || phase_in.is_some() {
+                    bail!("the CUDA-graph IoBinding path does not support rvc-onnx-web streaming exports");
+                }
+                let _ = phase_out;
                 let h2d_start = Instant::now();
                 copy_f32_tensor(&mut binding.host_feats, feats, "feats")?;
                 copy_i64_tensor(&mut binding.host_pitch, pitch, "pitch")?;
@@ -1688,6 +1809,9 @@ fn with_windows_ml_catalog_ep(
     catalog_ep: crate::windows_ml::CatalogExecutionProvider,
     path: &Path,
     tensor_rt_profile: Option<&TensorRtSessionProfile>,
+    // Skip the NvTensorRtRtx runtime cache (its on-destroy write fast-fails for
+    // rvc-onnx-web streaming engines). Only set for streaming RVC sessions.
+    disable_runtime_cache: bool,
 ) -> Result<ort::session::builder::SessionBuilder> {
     let env = ort::environment::Environment::current()?;
     let devices = env
@@ -1726,18 +1850,27 @@ fn with_windows_ml_catalog_ep(
         ] {
             options.push((format!("{ep_name}.{key}"), profile.profile_shapes.clone()));
         }
-        if let Ok(cache_root) = tensor_rt_cache_root() {
-            if let Ok(cache_dir) = profile.cache_dir_from_root(&cache_root) {
-                std::fs::create_dir_all(&cache_dir).with_context(|| {
-                    format!(
-                        "failed to create Windows ML NvTensorRtRtx runtime cache dir {}",
-                        cache_dir.display()
-                    )
-                })?;
-                options.push((
-                    format!("{ep_name}.nv_runtime_cache_path"),
-                    cache_dir.display().to_string(),
-                ));
+        // The TensorRT-RTX EP writes this runtime cache file when the session is
+        // destroyed. For rvc-onnx-web streaming engines that on-destroy write
+        // fast-fails the process (0xC0000409) — confirmed isolated to the EP's
+        // `trt_rtx_ep::utils::WriteFile` teardown path, independent of our
+        // IoBinding. Omitting the cache path for streaming models avoids the crash
+        // at the cost of rebuilding the engine each load. Non-streaming models keep
+        // the cache. See the streaming-export notes in docs/architecture.md.
+        if !disable_runtime_cache {
+            if let Ok(cache_root) = tensor_rt_cache_root() {
+                if let Ok(cache_dir) = profile.cache_dir_from_root(&cache_root) {
+                    std::fs::create_dir_all(&cache_dir).with_context(|| {
+                        format!(
+                            "failed to create Windows ML NvTensorRtRtx runtime cache dir {}",
+                            cache_dir.display()
+                        )
+                    })?;
+                    options.push((
+                        format!("{ep_name}.nv_runtime_cache_path"),
+                        cache_dir.display().to_string(),
+                    ));
+                }
             }
         }
     }
@@ -1773,12 +1906,19 @@ pub(super) fn load_session(
     tensor_rt_profile: Option<&TensorRtSessionProfile>,
     tensor_rt_run_mode: TensorRtRunMode,
     tensor_rt_session_purpose: TensorRtSessionPurpose,
+    // True for rvc-onnx-web streaming RVC sessions: skip the NvTensorRtRtx runtime
+    // cache whose on-destroy write fast-fails the process for those engines.
+    disable_nvtrtx_runtime_cache: bool,
 ) -> Result<Session> {
     // CUDA consumes the selected device ID from the fixed-shape profile.
     // Windows ML consumes the same profile only for TensorRT-RTX shape options;
     // its adapter selection remains owned by Windows ML.
     #[cfg(not(any(feature = "cuda", all(windows, feature = "windowsml"))))]
     let _ = tensor_rt_profile;
+    // Only the Windows ML NvTensorRtRtx path consumes this; reference it elsewhere
+    // so non-windowsml builds don't warn on the unused parameter.
+    #[cfg(not(all(windows, feature = "windowsml")))]
+    let _ = disable_nvtrtx_runtime_cache;
     #[cfg(feature = "cuda")]
     let gpu_device_id = tensor_rt_profile.map_or(0, |profile| profile.gpu_device_id);
     #[cfg(feature = "cuda")]
@@ -1885,6 +2025,7 @@ pub(super) fn load_session(
                             catalog_ep,
                             path,
                             tensor_rt_profile,
+                            disable_nvtrtx_runtime_cache,
                         )?;
                         if with_directml_fallback {
                             builder = builder
@@ -1942,7 +2083,13 @@ pub(super) fn load_session(
                         path.display()
                     );
                 }
-                builder = with_windows_ml_catalog_ep(builder, catalog_ep, path, tensor_rt_profile)?;
+                builder = with_windows_ml_catalog_ep(
+                    builder,
+                    catalog_ep,
+                    path,
+                    tensor_rt_profile,
+                    disable_nvtrtx_runtime_cache,
+                )?;
             }
         }
         Provider::WindowsMlDirectMl => {

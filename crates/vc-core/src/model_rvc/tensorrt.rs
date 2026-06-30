@@ -499,6 +499,15 @@ pub(super) struct RvcTensorRtPinnedBinding {
     /// Latent-noise input buffer, when the export takes `rnd`. Re-bound per run
     /// like `feats`, since fresh noise is copied in each chunk.
     pub(super) rnd: Option<Tensor<f32>>,
+    /// Streaming-export NSF source noise `[1, audio_len, 1]`. Re-bound per run
+    /// like `rnd`; present iff the model is a streaming export.
+    pub(super) nsf_noise: Option<Tensor<f32>>,
+    /// Streaming-export window-start NSF phase `[1, 1, 1]`. Re-bound per run
+    /// (it changes every chunk).
+    pub(super) phase_in: Option<Tensor<f32>>,
+    /// Streaming-export per-sample NSF phase output `[1, audio_len, 1]`, bound
+    /// once like `audio`; the caller reads the next window's `phase_in` from it.
+    pub(super) phase_out: Option<Tensor<f32>>,
     pub(super) output: Tensor<f32>,
     pub(super) _input_allocator: Allocator,
     pub(super) _output_allocator: Allocator,
@@ -541,6 +550,10 @@ impl RvcTensorRtPinnedBinding {
         speaker_id: i64,
         gpu_device_id: u32,
         names: &RvcIoNames,
+        // Streaming exports: NSF output-sample length `audio_len = frames *
+        // frame_hop`. `Some` iff the model is a streaming export, in which case
+        // the NSF noise/phase I/O is allocated and bound below.
+        stream_audio_len: Option<usize>,
     ) -> Result<Self> {
         let input_allocator =
             tensor_rt_pinned_allocator(session, MemoryType::CPUInput, gpu_device_id)?;
@@ -567,6 +580,34 @@ impl RvcTensorRtPinnedBinding {
             ),
             None => None,
         };
+        // Streaming NSF I/O (allocated only for streaming exports). `nsf_noise`
+        // and `phase_in` are inputs re-bound per run like `rnd`; `phase_out` is a
+        // per-sample output bound once like `audio`. Require all three names so a
+        // partially-exported model fails loudly rather than binding a subset.
+        let (nsf_noise, phase_in, mut phase_out) = match stream_audio_len {
+            Some(audio_len) => {
+                if names.nsf_noise.is_none() {
+                    bail!("streaming RVC binding requires an 'nsf_noise' input name");
+                }
+                if names.phase_in.is_none() {
+                    bail!("streaming RVC binding requires a 'phase_in' input name");
+                }
+                let nsf_noise = Tensor::<f32>::new(&input_allocator, vec![1, audio_len, 1])
+                    .context("failed to allocate TensorRT RVC input 'nsf_noise'")?;
+                let phase_in = Tensor::<f32>::new(&input_allocator, vec![1usize, 1, 1])
+                    .context("failed to allocate TensorRT RVC input 'phase_in'")?;
+                let phase_out = match names.phase_out.as_deref() {
+                    Some(_) => Some(
+                        Tensor::<f32>::new(&output_allocator, vec![1, audio_len, 1]).context(
+                            "failed to allocate TensorRT RVC output 'streaming_nsf_phase'",
+                        )?,
+                    ),
+                    None => None,
+                };
+                (Some(nsf_noise), Some(phase_in), phase_out)
+            }
+            None => (None, None, None),
+        };
         let mut output = Tensor::<f32>::new(&output_allocator, output_shape.to_vec())
             .context("failed to allocate TensorRT RVC output 'audio'")?;
         let mut binding = session
@@ -578,6 +619,14 @@ impl RvcTensorRtPinnedBinding {
         binding
             .bind_input(names.sid.as_str(), &sid)
             .context("failed to bind TensorRT RVC input 'sid'")?;
+        // Bind the per-sample NSF phase output once; its address stays stable and
+        // the pinned buffer is read back after each run.
+        if let (Some(phase_out_name), Some(phase_out)) =
+            (names.phase_out.as_deref(), phase_out.as_mut())
+        {
+            bind_output_tensor(&mut binding, phase_out_name, phase_out)
+                .context("failed to bind TensorRT RVC output 'streaming_nsf_phase'")?;
+        }
         bind_output_tensor(&mut binding, names.audio.as_str(), &mut output)
             .context("failed to bind TensorRT RVC output 'audio'")?;
         Ok(Self {
@@ -588,6 +637,9 @@ impl RvcTensorRtPinnedBinding {
             p_len,
             sid,
             rnd,
+            nsf_noise,
+            phase_in,
+            phase_out,
             output,
             _input_allocator: input_allocator,
             _output_allocator: output_allocator,
