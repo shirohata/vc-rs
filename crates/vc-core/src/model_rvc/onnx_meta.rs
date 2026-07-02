@@ -18,6 +18,7 @@
 //! - `StringStringEntryProto.key` = 1, `StringStringEntryProto.value` = 2
 
 use std::fs;
+use std::num::NonZeroUsize;
 use std::path::Path;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -118,6 +119,19 @@ pub(super) struct StreamFormat {
 pub(super) struct RvcRndInput {
     pub(super) name: String,
     pub(super) channels: i64,
+}
+
+impl RvcRndInput {
+    /// Validate and return the `rnd` middle-axis channel count (`inter_channels`)
+    /// as a positive value. The exported `channels` is a raw ONNX dim and must be
+    /// a positive integer to size the `[1, channels, frames]` noise tensor. Shared
+    /// by the ORT-TensorRT and native-TensorRT paths so both reject the same way.
+    pub(super) fn validate_channels(&self) -> Result<NonZeroUsize> {
+        usize::try_from(self.channels)
+            .ok()
+            .and_then(NonZeroUsize::new)
+            .ok_or_else(|| anyhow!("RVC '{}' input has non-positive channel count", self.name))
+    }
 }
 
 // Accepted aliases per role, canonical (vcclient) name first. Resolution picks

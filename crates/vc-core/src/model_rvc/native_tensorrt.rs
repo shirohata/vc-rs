@@ -1154,10 +1154,7 @@ fn native_rvc_rnd(names: &RvcIoNames) -> Result<Option<NativeRvcRnd>> {
     let Some(rnd) = names.rnd.as_ref() else {
         return Ok(None);
     };
-    let channels = usize::try_from(rnd.channels)
-        .ok()
-        .and_then(NonZeroUsize::new)
-        .ok_or_else(|| anyhow!("RVC '{}' input has non-positive channel count", rnd.name))?;
+    let channels = rnd.validate_channels()?;
     let name = CString::new(rnd.name.as_str()).with_context(|| {
         format!(
             "RVC rnd input name '{}' contains an interior NUL byte",

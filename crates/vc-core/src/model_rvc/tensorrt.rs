@@ -527,10 +527,7 @@ fn rvc_rnd_shape(names: &RvcIoNames, frame_len: i64) -> Result<Option<Vec<usize>
     let Some(rnd) = names.rnd.as_ref() else {
         return Ok(None);
     };
-    let channels = usize::try_from(rnd.channels)
-        .ok()
-        .filter(|channels| *channels > 0)
-        .ok_or_else(|| anyhow!("RVC '{}' input has non-positive channel count", rnd.name))?;
+    let channels = rnd.validate_channels()?.get();
     let frames = usize::try_from(frame_len).context("RVC rnd frame count does not fit usize")?;
     Ok(Some(vec![1, channels, frames]))
 }
