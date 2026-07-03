@@ -157,6 +157,22 @@ impl Provider {
         matches!(self, Provider::WindowsMl | Provider::WindowsMlDirectMl)
     }
 
+    /// True for the windowsml catalog execution providers (TensorRT-RTX,
+    /// OpenVINO, QNN, MIGraphX, VitisAI). These are gated on the device's
+    /// Windows ML catalog at runtime rather than purely by build features, so
+    /// they are excluded from the build-time base list and appended from the
+    /// live catalog. See [`selectable_providers`].
+    pub fn is_catalog_ep(self) -> bool {
+        matches!(
+            self,
+            Provider::WindowsMlNvTensorRtRtx
+                | Provider::WindowsMlOpenVino
+                | Provider::WindowsMlQnn
+                | Provider::WindowsMlMiGraphX
+                | Provider::WindowsMlVitisAi
+        )
+    }
+
     /// True for backends the engine drives with a fixed-shape TensorRT/CUDA
     /// profile (native TensorRT and the ORT CUDA EP). The one place this
     /// capability is defined; `model_rvc` and the front-ends both read it here.
@@ -208,6 +224,32 @@ pub fn default_provider() -> Provider {
         (false, false, true) => Provider::Cuda,
         _ => Provider::Cpu,
     }
+}
+
+/// Providers a front-end should offer in its picker: every non-catalog backend
+/// compiled into this build, followed by the windowsml catalog EPs the device's
+/// Windows ML catalog actually lists (including not-yet-installed ones, which
+/// download on first load). The catalog is enumerated once and cached, so this
+/// is cheap to call per frame. The single source both the GUI and VST3 render.
+pub fn selectable_providers() -> Vec<Provider> {
+    let list: Vec<Provider> = Provider::ALL
+        .iter()
+        .copied()
+        .filter(|provider| provider.available_in_build() && !provider.is_catalog_ep())
+        .collect();
+    // Only the windowsml build appends live catalog EPs; shadow with a mutable
+    // binding there so the base-only builds keep `list` immutable (no unused-mut).
+    #[cfg(all(windows, feature = "windowsml"))]
+    let list = {
+        let mut list = list;
+        for &provider in crate::windows_ml::available_catalog_providers() {
+            if !list.contains(&provider) {
+                list.push(provider);
+            }
+        }
+        list
+    };
+    list
 }
 
 /// Returned by `Provider::from_str` for an unrecognized spelling.

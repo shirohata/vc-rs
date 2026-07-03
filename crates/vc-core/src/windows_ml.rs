@@ -237,6 +237,32 @@ pub(crate) fn try_register_catalog_ep(provider: CatalogExecutionProvider) -> Res
     Ok(registered)
 }
 
+/// The catalog EPs this device's Windows ML catalog lists, as `Provider`s, in
+/// vc-rs priority order — including not-yet-installed (`NotPresent`) ones, since
+/// selecting them triggers a download on load. Enumerated once and cached for
+/// the process, so front-end pickers can call it freely; enumeration failure
+/// (no Windows ML runtime) yields an empty list and the picker shows only the
+/// build's base providers.
+pub fn available_catalog_providers() -> &'static [crate::Provider] {
+    static CACHE: OnceLock<Vec<crate::Provider>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        let listed = list_catalog_providers().unwrap_or_default();
+        CATALOG_PRIORITY
+            .iter()
+            .map(|candidate| candidate.provider)
+            .filter(|ep| listed.iter().any(|info| info.vc_provider == Some(*ep)))
+            .map(CatalogExecutionProvider::vc_provider)
+            // CATALOG_PRIORITY lists TensorRT-RTX twice (two catalog spellings);
+            // collapse to one entry per provider while keeping priority order.
+            .fold(Vec::new(), |mut acc, provider| {
+                if !acc.contains(&provider) {
+                    acc.push(provider);
+                }
+                acc
+            })
+    })
+}
+
 pub fn list_catalog_providers() -> Result<Vec<CatalogProviderInfo>> {
     ensure_initialized()?;
     with_catalog(|catalog_api, catalog| {

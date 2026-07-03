@@ -231,7 +231,10 @@ impl GuiSettings {
         self.crossfade_ms = GUI_CROSSFADE_MS;
         self.sola_search_ms = GUI_SOLA_SEARCH_MS;
         self.extra_convert_ms = self.extra_convert_ms.max(GUI_MIN_EXTRA_CONVERT_MS);
-        if !provider_names().contains(&self.provider.as_str()) {
+        // Validate the persisted provider against what this build can run
+        // (compile-time), not the live picker list: a saved catalog EP stays
+        // valid even if the device's catalog does not list it right now.
+        if !Provider::from_name(&self.provider).is_some_and(Provider::available_in_build) {
             self.provider = default_provider_name().to_string();
         }
         if !gpu_priority_names().contains(&self.gpu_priority.as_str()) {
@@ -509,12 +512,16 @@ impl eframe::App for VcGui {
             egui::ComboBox::from_label("Provider")
                 .selected_text(&self.settings.provider)
                 .show_ui(ui, |ui| {
-                    for provider in provider_names() {
+                    // Build's base backends plus the device's live Windows ML
+                    // catalog EPs (cached in vc-core), so the picker offers what
+                    // is actually usable here rather than a fixed per-build list.
+                    for provider in vc_core::selectable_providers() {
+                        let label = provider.label();
                         changed |= ui
                             .selectable_value(
                                 &mut self.settings.provider,
-                                provider.to_string(),
-                                *provider,
+                                label.to_string(),
+                                label,
                             )
                             .changed();
                     }
@@ -1071,25 +1078,6 @@ fn gpu_priority_names() -> &'static [&'static str] {
     &["high", "normal"]
 }
 
-fn provider_names() -> &'static [&'static str] {
-    &[
-        #[cfg(not(all(feature = "tensorrt", not(feature = "windowsml"))))]
-        "cpu",
-        #[cfg(feature = "cuda")]
-        "cuda",
-        #[cfg(feature = "tensorrt")]
-        "tensorrt",
-        #[cfg(feature = "windowsml")]
-        "windowsml",
-        #[cfg(feature = "windowsml")]
-        "windowsml-cpu",
-        #[cfg(feature = "windowsml")]
-        "windowsml-directml",
-        #[cfg(feature = "windowsml")]
-        "windowsml-nvtrtx",
-    ]
-}
-
 // Shared with the CLI/VST3 via `vc_core::default_provider`, rendered as the
 // config string the dropdown stores.
 fn default_provider_name() -> &'static str {
@@ -1248,7 +1236,10 @@ passthrough = true
     #[cfg(all(feature = "tensorrt", not(feature = "windowsml")))]
     #[test]
     fn tensorrt_only_gui_removes_cpu_provider() {
-        assert!(!provider_names().contains(&"cpu"));
+        // CPU has no ORT in the tensorrt-only build, so it is neither selectable
+        // nor a valid persisted provider.
+        assert!(!vc_core::selectable_providers().contains(&Provider::Cpu));
+        assert!(!Provider::Cpu.available_in_build());
         let mut settings = GuiSettings {
             provider: "cpu".to_string(),
             ..GuiSettings::default()

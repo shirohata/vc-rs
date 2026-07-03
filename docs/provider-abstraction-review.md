@@ -116,15 +116,28 @@ editing one table, and eliminate the divergences in §2. Order is
 lowest-risk-first; each step compiles and ships on its own.
 
 > **Status:** Steps 1–4 done and verified (cpu + windowsml builds; tensorrt/cuda
-> builds unverified — no GPU SDK on the dev box). Step 5's tests landed alongside
-> them. Deferred by design (see notes below): the curated front-end **option
-> lists** (`provider_names` / `PROVIDER_OPTIONS`), the repeated `load_session`
-> windowsml bail arms, and the CLI's `WindowsMlEpProvider` arg enum.
+> builds compile-unverified — no GPU SDK on the dev box). Step 5's tests landed
+> alongside them. The front-end **option lists** are now unified too (see
+> below). Still deferred by design: the repeated `load_session` windowsml bail
+> arms, and the CLI's `WindowsMlEpProvider` arg enum.
 >
 > Step 4 decision (agreed): a single-provider build defaults to its backend and
 > the **cuda-only** build now defaults to `cuda` (was `cpu` for the CLI/GUI;
 > cuda is dev-only/unpackaged, so the change is low-impact). The combined dev
 > build (windowsml + tensorrt) and the CPU-only build still default to `cpu`.
+>
+> **Picker lists (agreed: "show what's usable"):** `vc_core::selectable_providers`
+> is now the single list both the GUI combo and VST3 dropdown render — the
+> build's non-catalog backends (`available_in_build`) plus the windowsml catalog
+> EPs the device's Windows ML catalog actually lists. Catalog EPs are gated at
+> **runtime**, not build time: `windows_ml::available_catalog_providers`
+> enumerates the catalog once (cached for the process) and includes
+> not-yet-installed (`NotPresent`) EPs, which download on first load. Enumeration
+> failure (no Windows ML runtime) falls back to the base list. Persisted-provider
+> validation uses `available_in_build` (compile-time), so a saved catalog EP
+> survives even when the device's catalog does not list it at that moment. The
+> runtime catalog path needs on-device verification (this dev box lists no
+> catalog EPs).
 
 ### Step 1 — One parser: `impl FromStr for Provider` (+ `all()` / `aliases()`)
 
