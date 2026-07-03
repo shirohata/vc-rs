@@ -433,7 +433,11 @@ fn spawn_gpu_device_discovery() -> (
 }
 
 fn gpu_device_selector_visible(provider: &str) -> bool {
-    GPU_DEVICE_SELECTOR_AVAILABLE && matches!(provider, "cuda" | "tensorrt")
+    // Capability lives on `Provider`; parse the stored string and ask it, so the
+    // VST3 and GUI can't drift from the engine's notion of a GPU backend.
+    GPU_DEVICE_SELECTOR_AVAILABLE
+        && vc_core::Provider::from_name(provider)
+            .is_some_and(vc_core::Provider::shows_gpu_device_selector)
 }
 
 fn gpu_device_control(

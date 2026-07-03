@@ -1424,7 +1424,7 @@ pub(super) fn tensor_rt_cache_key(profile_shapes: &str) -> String {
 }
 
 pub(super) fn provider_uses_fixed_shape(provider: Provider) -> bool {
-    provider.is_tensorrt() || provider.is_cuda()
+    provider.uses_fixed_shape()
 }
 
 #[cfg(feature = "ort")]

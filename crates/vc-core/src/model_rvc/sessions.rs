@@ -1787,23 +1787,6 @@ impl RvcModelSession {
 
 #[cfg(feature = "ort")]
 #[cfg(all(windows, feature = "windowsml"))]
-fn windows_ml_catalog_ep_for_provider(
-    provider: Provider,
-) -> Option<crate::windows_ml::CatalogExecutionProvider> {
-    match provider {
-        Provider::WindowsMlNvTensorRtRtx => {
-            Some(crate::windows_ml::CatalogExecutionProvider::NvTensorRtRtx)
-        }
-        Provider::WindowsMlQnn => Some(crate::windows_ml::CatalogExecutionProvider::Qnn),
-        Provider::WindowsMlOpenVino => Some(crate::windows_ml::CatalogExecutionProvider::OpenVino),
-        Provider::WindowsMlMiGraphX => Some(crate::windows_ml::CatalogExecutionProvider::MiGraphX),
-        Provider::WindowsMlVitisAi => Some(crate::windows_ml::CatalogExecutionProvider::VitisAi),
-        _ => None,
-    }
-}
-
-#[cfg(feature = "ort")]
-#[cfg(all(windows, feature = "windowsml"))]
 fn with_windows_ml_catalog_ep(
     builder: ort::session::builder::SessionBuilder,
     catalog_ep: crate::windows_ml::CatalogExecutionProvider,
@@ -2068,7 +2051,7 @@ pub(super) fn load_session(
             }
             #[cfg(all(windows, feature = "windowsml"))]
             {
-                let catalog_ep = windows_ml_catalog_ep_for_provider(provider).ok_or_else(|| {
+                let catalog_ep = provider.catalog_ep().ok_or_else(|| {
                     anyhow!(
                         "provider {} has no Windows ML catalog EP mapping for {}",
                         provider.label(),

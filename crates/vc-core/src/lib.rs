@@ -27,4 +27,4 @@ pub mod model_rvc;
 pub mod sola;
 pub mod validation;
 
-pub use provider::Provider;
+pub use provider::{default_provider, Provider};

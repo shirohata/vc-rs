@@ -8,28 +8,12 @@ use vc_core::validation::{
 };
 pub use vc_core::Provider;
 
-/// Default inference backend for this build. The distribution packages are
-/// single-provider (`package.ps1` builds `--no-default-features --features
-/// windowsml|tensorrt`), so the default tracks the one backend that package
-/// ships — Windows ML for the windowsml package, native TensorRT for the
-/// tensorrt package. The combined dev binary (both features, via `cargo build`)
-/// and any CPU-only build fall back to `cpu`, which always works there.
-#[cfg(all(feature = "windowsml", not(feature = "tensorrt")))]
+/// Default inference backend for this build. Delegates to the shared
+/// `vc_core::default_provider` so the CLI, GUI, and VST3 agree: a
+/// single-provider distribution package defaults to its one backend, while the
+/// combined dev binary and the CPU-only build fall back to `cpu`.
 pub fn default_provider() -> Provider {
-    Provider::WindowsMl
-}
-
-#[cfg(all(feature = "tensorrt", not(feature = "windowsml")))]
-pub fn default_provider() -> Provider {
-    Provider::TensorRt
-}
-
-#[cfg(not(any(
-    all(feature = "windowsml", not(feature = "tensorrt")),
-    all(feature = "tensorrt", not(feature = "windowsml")),
-)))]
-pub fn default_provider() -> Provider {
-    Provider::Cpu
+    vc_core::default_provider()
 }
 
 pub const DEFAULT_CROSSFADE_MS: u32 = 85;

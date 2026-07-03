@@ -725,7 +725,10 @@ impl eframe::App for VcGui {
 }
 
 fn gpu_device_selector_visible(provider: &str) -> bool {
-    GPU_DEVICE_SELECTOR_AVAILABLE && matches!(provider, "cuda" | "tensorrt")
+    // Capability lives on `Provider`; parse the stored string and ask it, so the
+    // GUI and VST3 can't drift from the engine's notion of a GPU backend.
+    GPU_DEVICE_SELECTOR_AVAILABLE
+        && Provider::from_name(provider).is_some_and(Provider::shows_gpu_device_selector)
 }
 
 fn ensure_gpu_device_discovery(discovery: &Arc<Mutex<GpuDeviceDiscovery>>) {
@@ -958,16 +961,9 @@ fn save_settings(settings: &GuiSettings) -> Result<(), String> {
 }
 
 fn parse_provider(value: &str) -> Result<Provider, String> {
-    match value {
-        "cpu" => Ok(Provider::Cpu),
-        "cuda" => Ok(Provider::Cuda),
-        "tensorrt" => Ok(Provider::TensorRt),
-        "windowsml" => Ok(Provider::WindowsMl),
-        "windowsml-cpu" => Ok(Provider::WindowsMlCpu),
-        "windowsml-directml" => Ok(Provider::WindowsMlDirectMl),
-        "windowsml-nvtrtx" => Ok(Provider::WindowsMlNvTensorRtRtx),
-        _ => Err(format!("Unsupported provider: {value}")),
-    }
+    // Shared parser (canonical names + aliases) so the GUI accepts exactly what
+    // the CLI and VST3 do, including the windowsml catalog EPs this used to omit.
+    Provider::from_name(value).ok_or_else(|| format!("Unsupported provider: {value}"))
 }
 
 fn parse_gpu_priority(value: &str) -> Result<vc_core::model_rvc::GpuPriority, String> {
@@ -1094,22 +1090,10 @@ fn provider_names() -> &'static [&'static str] {
     ]
 }
 
-#[cfg(all(feature = "windowsml", not(feature = "tensorrt")))]
+// Shared with the CLI/VST3 via `vc_core::default_provider`, rendered as the
+// config string the dropdown stores.
 fn default_provider_name() -> &'static str {
-    "windowsml"
-}
-
-#[cfg(all(feature = "tensorrt", not(feature = "windowsml")))]
-fn default_provider_name() -> &'static str {
-    "tensorrt"
-}
-
-#[cfg(not(any(
-    all(feature = "windowsml", not(feature = "tensorrt")),
-    all(feature = "tensorrt", not(feature = "windowsml")),
-)))]
-fn default_provider_name() -> &'static str {
-    "cpu"
+    vc_core::default_provider().label()
 }
 
 #[cfg(test)]

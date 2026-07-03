@@ -107,29 +107,16 @@ impl PluginConfig {
     }
 
     pub fn provider(&self) -> Provider {
-        match self.provider.trim().to_ascii_lowercase().as_str() {
-            "windowsml" | "windows-ml" | "winml" => Provider::WindowsMl,
-            "windowsml-cpu" | "windows-ml-cpu" | "winml-cpu" => Provider::WindowsMlCpu,
-            "windowsml-directml"
-            | "windows-ml-directml"
-            | "winml-directml"
-            | "windowsml-dml"
-            | "winml-dml" => Provider::WindowsMlDirectMl,
-            "windowsml-nvtrtx" | "windows-ml-nvtrtx" | "winml-nvtrtx" | "windowsml-tensorrt"
-            | "winml-tensorrt" => Provider::WindowsMlNvTensorRtRtx,
-            "windowsml-openvino" | "windows-ml-openvino" | "winml-openvino" => {
-                Provider::WindowsMlOpenVino
+        // Shared parser (canonical names + aliases); unknown spellings fall back
+        // to CPU as before. Native GPU spellings ("cuda"/"tensorrt") still route
+        // through `gpu_provider` so they resolve to whichever GPU backend this
+        // package was compiled with; the windowsml catalog EPs pass through.
+        match Provider::from_name(&self.provider) {
+            Some(provider) if provider.is_cuda() || provider.is_tensorrt() => {
+                gpu_provider(provider.label())
             }
-            "windowsml-qnn" | "windows-ml-qnn" | "winml-qnn" => Provider::WindowsMlQnn,
-            "windowsml-migraphx" | "windows-ml-migraphx" | "winml-migraphx" => {
-                Provider::WindowsMlMiGraphX
-            }
-            "windowsml-vitisai" | "windows-ml-vitisai" | "winml-vitisai" => {
-                Provider::WindowsMlVitisAi
-            }
-            "cuda" => gpu_provider("cuda"),
-            "tensorrt" | "trt" | "tensor-rt" => gpu_provider("tensorrt"),
-            _ => Provider::Cpu,
+            Some(provider) => provider,
+            None => Provider::Cpu,
         }
     }
 
@@ -222,31 +209,12 @@ impl PluginConfig {
 }
 
 // The default provider tracks the backend this package was built with, so a
-// fresh instance is usable without first opening the GUI to pick one. The
-// variants are mutually exclusive by cargo feature (one per distributed
-// package); a CPU-only build with none of them falls back to "cpu".
-#[cfg(feature = "windowsml")]
+// fresh instance is usable without first opening the GUI to pick one. Shared
+// with the CLI/GUI via `vc_core::default_provider`; the variants are mutually
+// exclusive by cargo feature (one per distributed package), and a CPU-only
+// build with none of them falls back to "cpu".
 fn default_provider() -> &'static str {
-    "windowsml"
-}
-
-#[cfg(all(feature = "tensorrt", not(feature = "windowsml")))]
-fn default_provider() -> &'static str {
-    "tensorrt"
-}
-
-#[cfg(all(
-    feature = "cuda",
-    not(feature = "windowsml"),
-    not(feature = "tensorrt")
-))]
-fn default_provider() -> &'static str {
-    "cuda"
-}
-
-#[cfg(not(any(feature = "windowsml", feature = "tensorrt", feature = "cuda")))]
-fn default_provider() -> &'static str {
-    "cpu"
+    vc_core::default_provider().label()
 }
 
 /// Resolve a requested GPU provider ("cuda" or "tensorrt") to the GPU backend

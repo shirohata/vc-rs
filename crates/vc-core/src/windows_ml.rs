@@ -113,14 +113,22 @@ impl CatalogExecutionProvider {
         }
     }
 
-    pub fn vc_provider_name(self) -> &'static str {
+    /// The `Provider` that selects this catalog EP. One half of the bijection
+    /// with [`Provider::catalog_ep`]; every other `CatalogExecutionProvider` ↔
+    /// `Provider` correspondence is derived from this pair.
+    pub fn vc_provider(self) -> crate::Provider {
         match self {
-            Self::NvTensorRtRtx => "windowsml-nvtrtx",
-            Self::Qnn => "windowsml-qnn",
-            Self::OpenVino => "windowsml-openvino",
-            Self::MiGraphX => "windowsml-migraphx",
-            Self::VitisAi => "windowsml-vitisai",
+            Self::NvTensorRtRtx => crate::Provider::WindowsMlNvTensorRtRtx,
+            Self::Qnn => crate::Provider::WindowsMlQnn,
+            Self::OpenVino => crate::Provider::WindowsMlOpenVino,
+            Self::MiGraphX => crate::Provider::WindowsMlMiGraphX,
+            Self::VitisAi => crate::Provider::WindowsMlVitisAi,
         }
+    }
+
+    pub fn vc_provider_name(self) -> &'static str {
+        // Derived from the provider's own label so the two can't drift.
+        self.vc_provider().label()
     }
 
     pub fn from_catalog_name(name: &str) -> Option<Self> {
@@ -128,6 +136,25 @@ impl CatalogExecutionProvider {
             .iter()
             .find(|candidate| candidate.catalog_name == name)
             .map(|candidate| candidate.provider)
+    }
+}
+
+impl crate::Provider {
+    /// The Windows ML catalog EP this provider selects, if any. The single
+    /// `Provider` → `CatalogExecutionProvider` map (inverse of
+    /// [`CatalogExecutionProvider::vc_provider`]); `sessions::load_session` and
+    /// [`provider_prepare_pending`] both read it here instead of re-deriving it.
+    pub fn catalog_ep(self) -> Option<CatalogExecutionProvider> {
+        match self {
+            crate::Provider::WindowsMlNvTensorRtRtx => {
+                Some(CatalogExecutionProvider::NvTensorRtRtx)
+            }
+            crate::Provider::WindowsMlQnn => Some(CatalogExecutionProvider::Qnn),
+            crate::Provider::WindowsMlOpenVino => Some(CatalogExecutionProvider::OpenVino),
+            crate::Provider::WindowsMlMiGraphX => Some(CatalogExecutionProvider::MiGraphX),
+            crate::Provider::WindowsMlVitisAi => Some(CatalogExecutionProvider::VitisAi),
+            _ => None,
+        }
     }
 }
 
@@ -327,13 +354,8 @@ pub fn catalog_provider_requires_prepare(provider: CatalogExecutionProvider) -> 
 /// but not-yet-ready Windows ML catalog EP. `NotPresent` is intentionally false:
 /// ordinary model load should not install absent catalog packages.
 pub fn provider_prepare_pending(provider: crate::Provider) -> bool {
-    let ep = match provider {
-        crate::Provider::WindowsMlNvTensorRtRtx => CatalogExecutionProvider::NvTensorRtRtx,
-        crate::Provider::WindowsMlOpenVino => CatalogExecutionProvider::OpenVino,
-        crate::Provider::WindowsMlQnn => CatalogExecutionProvider::Qnn,
-        crate::Provider::WindowsMlMiGraphX => CatalogExecutionProvider::MiGraphX,
-        crate::Provider::WindowsMlVitisAi => CatalogExecutionProvider::VitisAi,
-        _ => return false,
+    let Some(ep) = provider.catalog_ep() else {
+        return false;
     };
     matches!(catalog_provider_requires_prepare(ep), Ok(true))
 }
@@ -835,6 +857,23 @@ mod tests {
             ready_state,
             certification: 0,
             vc_provider: CatalogExecutionProvider::from_catalog_name(name),
+        }
+    }
+
+    #[test]
+    fn catalog_ep_and_vc_provider_are_inverses() {
+        // Every catalog EP round-trips through the single bijection, and its
+        // provider-name string stays in step with the provider's own label.
+        for ep in [
+            CatalogExecutionProvider::NvTensorRtRtx,
+            CatalogExecutionProvider::Qnn,
+            CatalogExecutionProvider::OpenVino,
+            CatalogExecutionProvider::MiGraphX,
+            CatalogExecutionProvider::VitisAi,
+        ] {
+            let provider = ep.vc_provider();
+            assert_eq!(provider.catalog_ep(), Some(ep));
+            assert_eq!(ep.vc_provider_name(), provider.label());
         }
     }
 
