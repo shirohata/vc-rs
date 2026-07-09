@@ -111,6 +111,7 @@ bootstrap it directly with `pwsh -File scripts/bootstrap.ps1`.)
 just setup              # one-time: Rust, Git, MSVC C++, just (winget scope)
 just test               # full workspace tests (activates GPU stack)
 just test-cpu           # fast tests, no GPU stack (VC_RS_ENABLE_NATIVE_TENSORRT=0)
+just test-ci            # exact mirror of the CI test job (cpu feature gates)
 just build              # dev CLI + GUI, whole workspace (both backends)
 just bundle             # VST3, Windows ML   (just bundle tensorrt for the TRT variant)
 just verify             # tests + bundle smoke test
@@ -150,6 +151,10 @@ stock GPU-less runner (`VC_RS_ENABLE_NATIVE_TENSORRT=0`):
 - **test (cpu)** — `cargo test -p vc-core -p vc-app -p vc-cli
   --no-default-features --features cpu`: the self-contained static-ORT-CPU path,
   so tests run deterministically without the Windows App SDK Runtime or GPU SDKs.
+  A second step runs `cargo test -p vc-gui -p vc-vst3` on the default feature
+  set — those crates have no `cpu` feature, and their tests never open an ORT
+  session, so load-dynamic never resolves the runtime DLLs. Reproduce the job
+  locally with `just test-ci` (the feature gates differ from `just test-cpu`).
 - **cargo-deny** — `deny.toml` gates licenses (allow-list mirrors
   `scripts/licenses/about.toml`), advisories, and banned/duplicate deps. Run it
   locally with `cargo deny check`.

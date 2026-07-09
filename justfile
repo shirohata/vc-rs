@@ -34,6 +34,12 @@ compare-audio *args:
 test-cpu:
     . ./scripts/rustflags.ps1; $env:VC_RS_ENABLE_NATIVE_TENSORRT = "0"; cargo test --workspace
 
+# Mirror the CI test job exactly (.github/workflows/ci.yml): the `cpu` feature
+# gates differ from test-cpu's default features, so cpu-only breakage only
+# shows up here. No GPU stack needed.
+test-ci:
+    . ./scripts/rustflags.ps1; $env:VC_RS_ENABLE_NATIVE_TENSORRT = "0"; cargo test -p vc-core -p vc-app -p vc-cli --no-default-features --features cpu && cargo test -p vc-gui -p vc-vst3
+
 # Full workspace tests with the native TensorRT shim (activates the GPU stack).
 test:
     . ./scripts/activate.ps1; . ./scripts/rustflags.ps1; cargo test --workspace

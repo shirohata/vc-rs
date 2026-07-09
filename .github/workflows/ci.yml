@@ -10,11 +10,17 @@
 #     via `just lint`; CI cannot cover it.
 #   * `windowsml` loads ORT/DirectML dynamically (ort load-dynamic), so it
 #     type-checks without the runtime DLL present — fine for clippy, which never
-#     opens a session. Tests, which would, run on the self-contained `cpu`
-#     feature (static ORT CPU) instead.
+#     opens a session. Tests that could open one run on the self-contained `cpu`
+#     feature (static ORT CPU) instead. vc-gui/vc-vst3 have no `cpu` feature, so
+#     their tests run on the default (shipped) feature set — safe on a stock
+#     runner because those tests are pure logic (config parsing, labels) and
+#     never open an ORT session, which is the only point load-dynamic resolves
+#     the runtime DLLs.
 #
 # So: clippy on the default (shipped) feature set is the lint gate; tests run on
-# the deterministic `cpu` feature. Keep this green — `-D warnings` is enforced.
+# the deterministic `cpu` feature (plus the session-free GUI/VST3 suites). Keep
+# this green — `-D warnings` is enforced. `just test-ci` mirrors the test job
+# locally.
 
 name: CI
 
@@ -64,6 +70,10 @@ jobs:
           cargo test
           -p vc-core -p vc-app -p vc-cli
           --no-default-features --features cpu
+      # GUI/VST3 unit tests never open an ORT session, so the shipped feature
+      # set runs without the Windows App SDK Runtime (see header).
+      - name: test (vc-gui + vc-vst3, default features)
+        run: cargo test -p vc-gui -p vc-vst3
 
   # ---- Supply chain: licenses, advisories, duplicate/banned deps ----
   cargo-deny:
