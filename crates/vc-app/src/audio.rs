@@ -1,5 +1,10 @@
 use anyhow::{anyhow, bail, Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
+use std::time::{Duration, Instant};
 
 use crate::AudioHost;
 use vc_core::dsp;
@@ -250,7 +255,7 @@ impl RealtimeAudio {
 }
 
 pub enum AudioStream {
-    Cpal(cpal::Stream),
+    Cpal(CpalStream),
     #[cfg(windows)]
     Wasapi(wasapi_audio::WasapiStream),
 }
@@ -258,10 +263,88 @@ pub enum AudioStream {
 impl AudioStream {
     pub fn play(&self) -> Result<()> {
         match self {
-            AudioStream::Cpal(stream) => stream.play().context("failed to start CPAL stream"),
+            AudioStream::Cpal(stream) => stream
+                .stream
+                .as_ref()
+                .expect("live CPAL stream")
+                .play()
+                .context("failed to start CPAL stream"),
             #[cfg(windows)]
             AudioStream::Wasapi(stream) => stream.play(),
         }
+    }
+}
+
+impl AudioStream {
+    /// Called only by the session control thread, never the audio callback.
+    pub(crate) fn report_errors(&mut self) {
+        if let Self::Cpal(stream) = self {
+            if stream.last_report.elapsed() >= Duration::from_secs(1) {
+                stream.errors.report(stream.direction);
+                stream.last_report = Instant::now();
+            }
+        }
+    }
+}
+
+const ERROR_KINDS: [cpal::ErrorKind; 14] = [
+    cpal::ErrorKind::DeviceBusy,
+    cpal::ErrorKind::DeviceChanged,
+    cpal::ErrorKind::DeviceNotAvailable,
+    cpal::ErrorKind::HostUnavailable,
+    cpal::ErrorKind::InvalidInput,
+    cpal::ErrorKind::PermissionDenied,
+    cpal::ErrorKind::RealtimeDenied,
+    cpal::ErrorKind::ResourceExhausted,
+    cpal::ErrorKind::StreamInvalidated,
+    cpal::ErrorKind::UnsupportedConfig,
+    cpal::ErrorKind::UnsupportedOperation,
+    cpal::ErrorKind::Xrun,
+    cpal::ErrorKind::BackendError,
+    cpal::ErrorKind::Other,
+];
+
+#[derive(Default)]
+struct StreamErrors {
+    counts: [AtomicUsize; ERROR_KINDS.len()],
+}
+
+impl StreamErrors {
+    // CPAL can deliver xruns on its audio thread. Keep recording bounded and
+    // free of formatting, allocation, logging and locks. Retain categories and
+    // counts instead of owned backend text, so repeated errors cannot grow a
+    // queue. Relaxed suffices: these counters publish no other shared data.
+    fn record(&self, kind: cpal::ErrorKind) {
+        let index = ERROR_KINDS
+            .iter()
+            .position(|candidate| *candidate == kind)
+            .unwrap_or(ERROR_KINDS.len() - 1);
+        self.counts[index].fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn report(&self, direction: &str) {
+        for (kind, count) in ERROR_KINDS.iter().zip(&self.counts) {
+            let count = count.swap(0, Ordering::Relaxed);
+            if count != 0 {
+                tracing::warn!(direction, ?kind, count, "audio stream errors: {kind}");
+            }
+        }
+    }
+}
+
+pub struct CpalStream {
+    stream: Option<cpal::Stream>,
+    errors: Arc<StreamErrors>,
+    direction: &'static str,
+    last_report: Instant,
+}
+
+impl Drop for CpalStream {
+    fn drop(&mut self) {
+        // Teardown runs on the control thread. Stop callbacks before draining
+        // final counts, including errors from short-lived streams.
+        drop(self.stream.take());
+        self.errors.report(self.direction);
     }
 }
 
@@ -478,7 +561,7 @@ fn build_cpal_input_stream<F>(
     device: &cpal::Device,
     config: &cpal::SupportedStreamConfig,
     mut on_samples: F,
-) -> Result<cpal::Stream>
+) -> Result<CpalStream>
 where
     F: FnMut(&[f32]) + Send + 'static,
 {
@@ -487,7 +570,9 @@ where
     // chunk size below is too, so every chunk holds whole frames.
     let channels = config.channels().max(1) as usize;
     let frames = cpal_scratch_frames(config);
-    let err_fn = |err| tracing::warn!("input stream error: {err}");
+    let errors = Arc::new(StreamErrors::default());
+    let callback_errors = Arc::clone(&errors);
+    let err_fn = move |err: cpal::Error| callback_errors.record(err.kind());
     match config.sample_format() {
         cpal::SampleFormat::F32 if channels == 1 => device.build_input_stream(
             stream_config,
@@ -573,13 +658,19 @@ where
     }
     .map_err(with_audclnt_hint)
     .context("failed to build input stream")
+    .map(|stream| CpalStream {
+        stream: Some(stream),
+        errors,
+        direction: "input",
+        last_report: Instant::now(),
+    })
 }
 
 fn build_cpal_output_stream<F>(
     device: &cpal::Device,
     config: &cpal::SupportedStreamConfig,
     mut fill: F,
-) -> Result<cpal::Stream>
+) -> Result<CpalStream>
 where
     F: FnMut(&mut [f32]) + Send + 'static,
 {
@@ -587,7 +678,9 @@ where
     // Same framing guarantee as the input path: chunks hold whole frames.
     let channels = config.channels().max(1) as usize;
     let frames = cpal_scratch_frames(config);
-    let err_fn = |err| tracing::warn!("output stream error: {err}");
+    let errors = Arc::new(StreamErrors::default());
+    let callback_errors = Arc::clone(&errors);
+    let err_fn = move |err: cpal::Error| callback_errors.record(err.kind());
     match config.sample_format() {
         cpal::SampleFormat::F32 if channels == 1 => device.build_output_stream(
             stream_config,
@@ -676,4 +769,53 @@ where
     }
     .map_err(with_audclnt_hint)
     .context("failed to build output stream")
+    .map(|stream| CpalStream {
+        stream: Some(stream),
+        errors,
+        direction: "output",
+        last_report: Instant::now(),
+    })
+}
+
+#[cfg(test)]
+mod error_tests {
+    use super::*;
+
+    #[test]
+    fn concurrent_error_reporting_preserves_counts() {
+        let errors = Arc::new(StreamErrors::default());
+        let producer = Arc::clone(&errors);
+        let worker = std::thread::spawn(move || {
+            for _ in 0..10_000 {
+                producer.record(cpal::ErrorKind::Xrun);
+                producer.record(cpal::ErrorKind::DeviceNotAvailable);
+            }
+        });
+        let mut totals = [0; ERROR_KINDS.len()];
+        while !worker.is_finished() {
+            for (total, count) in totals.iter_mut().zip(&errors.counts) {
+                *total += count.swap(0, Ordering::Relaxed);
+            }
+            std::thread::yield_now();
+        }
+        worker.join().unwrap();
+        for (total, count) in totals.iter_mut().zip(&errors.counts) {
+            *total += count.swap(0, Ordering::Relaxed);
+        }
+        for (kind, total) in ERROR_KINDS.iter().zip(totals) {
+            let expected = if matches!(
+                kind,
+                cpal::ErrorKind::Xrun | cpal::ErrorKind::DeviceNotAvailable
+            ) {
+                10_000
+            } else {
+                0
+            };
+            assert_eq!(total, expected, "{kind:?}");
+        }
+        assert!(errors
+            .counts
+            .iter()
+            .all(|count| count.load(Ordering::Relaxed) == 0));
+    }
 }

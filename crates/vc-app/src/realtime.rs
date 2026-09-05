@@ -533,6 +533,14 @@ fn control_loop(
             Ok(Command::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
             Err(RecvTimeoutError::Timeout) => {}
         }
+        if let Some(session) = session.as_mut() {
+            for stream in [&mut session.input_stream, &mut session.output_stream]
+                .into_iter()
+                .flatten()
+            {
+                stream.report_errors();
+            }
+        }
         if session
             .as_ref()
             .is_some_and(|s| !s.running.load(Ordering::Relaxed))

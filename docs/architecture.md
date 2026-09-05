@@ -79,6 +79,14 @@ ring buffers and emit silence on underrun; they do not run ONNX inference,
 perform chunk smoothing, write files, or log directly. Anything that can block,
 allocate heavily, or take model-scale CPU/GPU time is kept on the worker side.
 
+CPAL error callbacks also run on the audio thread on some backends. They only
+increment preallocated atomic counters by error category. The session control
+thread logs accumulated counts at most once per second per category/direction,
+and stream teardown drains the remaining counts after stopping callbacks.
+Backend-specific error text is not retained; synchronous open/build errors
+still include their original diagnostics. This keeps error storms bounded
+regardless of the configured log level.
+
 The threads carrying those callbacks run at OS real-time priority. The bespoke
 WASAPI path and the worker self-boost via `thread-priority`; the cpal-driven
 paths (WASAPI-shared, ASIO, …) get the same treatment from cpal's `realtime`

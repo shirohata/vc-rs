@@ -38,9 +38,9 @@ tracing.workspace = true
 # path and the worker already self-boost; this covers the cpal-driven paths that
 # otherwise run the audio callback at normal priority. Windows-safe: only pulls
 # audio_thread_priority (MMCSS); alsa-sys is target-gated to Linux.
-cpal = { version = "0.18", features = ["realtime"] }
+cpal = { version = "0.18.2", features = ["realtime"] }
 hound = "3.5"
-rtrb = "0.3"
+rtrb = "0.4"
 thread-priority = "3.0.0"
 
 [target.'cfg(windows)'.dependencies]
