@@ -52,3 +52,14 @@ licenses listed above (mere aggregation).
 The Rust crates statically linked into each shipped binary, and their full
 license texts, are listed in the `THIRD-PARTY-LICENSES*.md` file(s) generated
 directly into each distribution package.
+
+## Ported source: rvc-onnx-web
+
+The GUI's built-in `.pth` → `.onnx` model converter (the `vc-convert` crate)
+is a Rust port of [rvc-onnx-web](https://github.com/visgotti/rvc-onnx-web) by
+Joseph Viscardi (visgotti), MIT License. The full license text and porting
+notes are in `crates/vc-convert/THIRD_PARTY.md` in the source tree. The port
+is statically linked into `vc-gui.exe` only, so this section applies to the
+packages that ship the GUI. (cargo-about only enumerates crate dependencies,
+which is why this ported-source attribution is recorded here instead of the
+generated `THIRD-PARTY-LICENSES*.md`.)

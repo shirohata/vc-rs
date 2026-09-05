@@ -24,6 +24,9 @@ jack = ["vc-app/jack"]
 [dependencies]
 vc-app = { path = "../vc-app", default-features = false }
 vc-core = { path = "../vc-core" }
+# Offline .pth → .onnx converter behind the RVC model picker. ORT-free and
+# featureless, so it adds nothing to the inference feature matrix.
+vc-convert = { path = "../vc-convert" }
 eframe = { version = "0.34.1", default-features = false, features = ["glow", "default_fonts"] }
 egui = "0.34.1"
 rfd = "0.17"

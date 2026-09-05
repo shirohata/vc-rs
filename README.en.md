@@ -82,8 +82,10 @@ Windows (x64). There are four, depending on your front-end and hardware:
 `vc-rs` does not ship models. You supply three:
 
 1. **RVC voice conversion model** (`.onnx`) — the target voice. **Only ONNX is
-   supported**; `.pth` cannot be loaded directly (convert it to `.onnx` first
-   with RVC tools or VCClient).
+   supported**; `.pth` cannot be loaded directly, but picking a `.pth` in the
+   GUI's model browser opens the built-in converter (RVC v2 / F0 models),
+   which writes the `.onnx` next to it. For anything else (e.g. v1), convert
+   first with RVC tools or VCClient.
 2. **Embedder model** (ContentVec, `content_vec_500.onnx`)
 3. **F0 model** (RMVPE, `rmvpe.onnx`)
 
@@ -247,8 +249,9 @@ system Windows App SDK Runtime. A freshly extracted zip is fine; delete any DLLs
 you copied in from an older build.
 
 **Q. A `.pth` model won't load.**
-A. RVC voice models must be **`.onnx`**. Convert with RVC tools or VCClient
-first.
+A. RVC voice models must be **`.onnx`**. In the GUI, Browse for the `.pth`
+under "RVC model" to run the built-in converter (RVC v2 / F0 models only);
+otherwise convert with RVC tools or VCClient first.
 
 **Q. Real-time audio drops out or latency is high.**
 A. See *Tuning real-time settings*. Raise Chunk ms until dropouts stop, then

@@ -816,9 +816,9 @@ dependencies = [
 
 [[package]]
 name = "crossbeam-epoch"
-version = "0.9.18"
+version = "0.9.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b82ac4a3c2ca9c3460964f020e1402edd5753411d7737aa39c3714ad1b5420e"
+checksum = "2d6914041f254d6e9176c01941b21115dcfb7089e55135a35411081bd106ef3f"
 dependencies = [
  "crossbeam-utils",
 ]
@@ -3961,6 +3961,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "vc-convert"
+version = "0.4.0"
+dependencies = [
+ "anyhow",
+ "miniz_oxide",
+]
+
+[[package]]
 name = "vc-core"
 version = "0.4.0"
 dependencies = [
@@ -3976,6 +3984,7 @@ dependencies = [
  "realfft",
  "rubato",
  "tracing",
+ "vc-convert",
  "xxhash-rust",
 ]
 
@@ -3990,6 +3999,7 @@ dependencies = [
  "toml",
  "tracing-subscriber",
  "vc-app",
+ "vc-convert",
  "vc-core",
 ]
 

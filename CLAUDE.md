@@ -33,7 +33,8 @@ Cargo workspace (`resolver = "2"`); `tools/tensorrt_builder` is excluded.
 | `vc-core` | `crates/vc-core` | Audio-I/O-agnostic engine: RVC pipeline, DSP, SOLA/PSOLA, providers. Every front-end depends on it. |
 | `vc-app` | `crates/vc-app` | Shared realtime runtime for the standalone front-ends: CPAL/WASAPI device I/O + the engine worker thread (`EngineController` / `RealtimeConfig` in `realtime.rs`). |
 | `vc-cli` | `crates/vc-cli` | CLI binary `vc-rs` (clap); diagnostics, realtime, and WAV conversion driving `vc-app`. |
-| `vc-gui` | `crates/vc-gui` | Standalone desktop GUI (`vc-gui.exe`, eframe/egui) driving `vc-app`. |
+| `vc-convert` | `crates/vc-convert` | Offline RVC `.pth` → `.onnx` converter (pure-Rust port of rvc-onnx-web, MIT): ZIP+pickle checkpoint parser, node-by-node synthesizer graph builder, hand-rolled ONNX protobuf writer. ORT-free and featureless; used by `vc-gui`, tested against `vc-core`'s `onnx_meta` gatekeepers. |
+| `vc-gui` | `crates/vc-gui` | Standalone desktop GUI (`vc-gui.exe`, eframe/egui) driving `vc-app`; embeds the `.pth` converter behind the RVC model picker. |
 | `vc-vst3` | `crates/vc-vst3` | VST3 plugin (nice-plug + egui); feeds the pipeline from the host `process()` callback. |
 | `xtask` | `xtask` | `cargo xtask bundle …` plugin bundler (nice-plug-xtask). |
 
@@ -180,8 +181,11 @@ Optional headless TOML seed for fresh instances (see `crates/vc-vst3/README.md`)
 - **Keep conversion paths shared.** CLI, GUI, VST3, and WAV-specific code should
   adapt their I/O and scheduling constraints to shared conversion components.
   Follow `AGENTS.md` and the canonical boundaries in `docs/architecture.md`.
-- RVC models must be **`.onnx`** (`.pth` is not supported). Models are never
-  bundled; `download-models.ps1` fetches the reference ContentVec/RMVPE models.
+- RVC models must be **`.onnx`** at load time. The GUI can convert RVC v2/F0
+  `.pth` checkpoints in place via `vc-convert` (a pure-Rust port of
+  rvc-onnx-web; streaming + webui exports); other checkpoints need external
+  tools. Models are never bundled; `download-models.ps1` fetches the reference
+  ContentVec/RMVPE models.
 - For the **TensorRT VST3 package**, leftover ORT provider DLLs (e.g.
   `onnxruntime_providers_cuda.dll`) in the bundle crash the windowsml plugin in
   DAWs — Windows ML bundles must not contain ORT/DirectML/CUDA DLLs.

@@ -540,3 +540,328 @@ fn tensor_rt_cache_is_separated_by_gpu_device_id() {
             .join("audio_1x24000")
     );
 }
+
+// =============================================================================
+// vc-convert output acceptance
+//
+// vc-convert (the .pth→.onnx converter) must produce models this crate's
+// loaders accept. These tests run its tiny checked-in checkpoint through the
+// exact private gatekeepers a user's model passes at load time, and — under
+// the `ort` feature — through a real ORT CPU session, porting the streaming
+// phase-contract assertions of rvc-onnx-web's streaming-export.spec.ts.
+// =============================================================================
+
+fn vc_convert_tiny(mode: vc_convert::ExportMode) -> Vec<u8> {
+    let options = vc_convert::ConvertOptions {
+        export_mode: mode,
+        ..Default::default()
+    };
+    vc_convert::pth_to_onnx(
+        vc_convert::test_fixtures::tiny_v2_f0_pth(),
+        &options,
+        &mut |_| {},
+    )
+    .expect("tiny fixture converts")
+    .onnx_bytes
+}
+
+/// onnx_meta reads from a path, so round-trip through a temp file.
+fn with_temp_model<T>(name: &str, bytes: &[u8], f: impl FnOnce(&Path) -> T) -> T {
+    let dir = tensor_rt_temp_dir(name);
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("model.onnx");
+    fs::write(&path, bytes).unwrap();
+    let result = f(&path);
+    let _ = fs::remove_dir_all(&dir);
+    result
+}
+
+#[test]
+fn vc_convert_streaming_export_passes_onnx_meta_gatekeepers() {
+    let bytes = vc_convert_tiny(vc_convert::ExportMode::Streaming);
+    with_temp_model("convert-streaming", &bytes, |path| {
+        let io = super::onnx_meta::read_model_io(path).unwrap();
+
+        let names = io.resolve_rvc_io_names().unwrap();
+        assert_eq!(names.feats, "phone");
+        assert_eq!(names.p_len, "phone_lengths");
+        assert_eq!(names.pitch, "pitch");
+        assert_eq!(names.pitchf, "pitchf");
+        assert_eq!(names.sid, "ds");
+        assert_eq!(names.audio, "audio");
+        let rnd = names.rnd.expect("rnd input resolved");
+        assert_eq!(rnd.name, "rnd");
+        assert_eq!(rnd.channels, 8); // tiny fixture inter_channels
+        assert_eq!(names.nsf_noise.as_deref(), Some("nsf_noise"));
+        assert_eq!(names.phase_in.as_deref(), Some("phase_in"));
+        assert_eq!(names.phase_out.as_deref(), Some("streaming_nsf_phase"));
+
+        io.validate_rvc_metadata().unwrap();
+        assert_eq!(io.rvc_sample_rate(), Some(40_000));
+        assert_eq!(io.feat_channels(&names.feats).unwrap(), 768);
+
+        let stream = io.stream_format().unwrap().expect("streaming export");
+        assert_eq!(stream.version, 1);
+        assert_eq!(stream.frame_hop, 400);
+        assert_eq!(stream.sample_rate, 40_000);
+    });
+}
+
+#[test]
+fn vc_convert_webui_export_passes_onnx_meta_gatekeepers() {
+    let bytes = vc_convert_tiny(vc_convert::ExportMode::Webui);
+    with_temp_model("convert-webui", &bytes, |path| {
+        let io = super::onnx_meta::read_model_io(path).unwrap();
+
+        let names = io.resolve_rvc_io_names().unwrap();
+        assert_eq!(names.feats, "phone");
+        assert_eq!(names.sid, "ds");
+        assert!(names.rnd.is_some());
+        assert_eq!(names.nsf_noise, None);
+        assert_eq!(names.phase_in, None);
+        assert_eq!(names.phase_out, None);
+
+        io.validate_rvc_metadata().unwrap();
+        assert_eq!(io.rvc_sample_rate(), Some(40_000));
+        assert!(io.stream_format().unwrap().is_none());
+    });
+}
+
+/// ORT CPU execution of the converted streaming model (port of the runtime
+/// half of streaming-export.spec.ts). Runs in the CI `cpu` feature job; the
+/// tiny fixture keeps it sub-second.
+#[cfg(feature = "ort")]
+mod vc_convert_ort {
+    use ort::session::Session;
+    use ort::value::Tensor;
+
+    use super::vc_convert_tiny;
+
+    const HOP: usize = 400; // tiny fixture upsample rates 10*10*2*2
+    const INTER: usize = 8; // tiny fixture inter_channels
+
+    fn session() -> Session {
+        // Under the windowsml feature ORT is load-dynamic; bind it to the
+        // Windows App SDK runtime exactly like the real session path does.
+        #[cfg(all(windows, feature = "windowsml"))]
+        crate::windows_ml::ensure_initialized().unwrap();
+        Session::builder()
+            .unwrap()
+            .with_intra_threads(1)
+            .unwrap()
+            .commit_from_memory(&vc_convert_tiny(vc_convert::ExportMode::Streaming))
+            .expect("converted model loads under ORT CPU")
+    }
+
+    /// Port of the spec's makeFeeds: constant voiced pitch, zeroed NSF
+    /// noise, fixed posterior noise, one-hot phone frame.
+    fn run(session: &mut Session, phone_len: usize, phase_in: f32) -> (Vec<f32>, Vec<f32>) {
+        let audio_len = phone_len * HOP;
+        let mut phone = vec![0.0f32; phone_len * 768];
+        phone[0] = 1.0;
+        let outputs = session
+            .run(ort::inputs![
+                "phone" => Tensor::from_array(([1usize, phone_len, 768], phone)).unwrap(),
+                "phone_lengths" => Tensor::from_array(([1usize], vec![phone_len as i64])).unwrap(),
+                "pitch" => Tensor::from_array(([1usize, phone_len], vec![100i64; phone_len])).unwrap(),
+                "pitchf" => Tensor::from_array(([1usize, phone_len], vec![100.0f32; phone_len])).unwrap(),
+                "ds" => Tensor::from_array(([1usize], vec![0i64])).unwrap(),
+                "rnd" => Tensor::from_array(([1usize, INTER, phone_len], vec![0.25f32; INTER * phone_len])).unwrap(),
+                "nsf_noise" => Tensor::from_array(([1usize, audio_len, 1], vec![0.0f32; audio_len])).unwrap(),
+                "phase_in" => Tensor::from_array(([1usize, 1, 1], vec![phase_in])).unwrap(),
+            ])
+            .expect("streaming model runs");
+        let (audio_shape, audio) = outputs["audio"].try_extract_tensor::<f32>().unwrap();
+        let (phase_shape, phase) = outputs["streaming_nsf_phase"]
+            .try_extract_tensor::<f32>()
+            .unwrap();
+        assert_eq!(audio_shape.iter().product::<i64>(), audio_len as i64);
+        assert_eq!(
+            phase_shape.to_vec(),
+            vec![1, audio_len as i64, 1],
+            "phase output must be per-sample"
+        );
+        (audio.to_vec(), phase.to_vec())
+    }
+
+    fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
+        assert_eq!(a.len(), b.len());
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0, f32::max)
+    }
+
+    #[test]
+    fn streaming_session_is_reproducible_with_fixed_noise() {
+        let mut session = session();
+        let (audio1, phase1) = run(&mut session, 4, 0.125);
+        let (audio2, phase2) = run(&mut session, 4, 0.125);
+        assert_eq!(max_abs_diff(&audio1, &audio2), 0.0);
+        assert_eq!(max_abs_diff(&phase1, &phase2), 0.0);
+    }
+
+    #[test]
+    fn streaming_phase_is_continuous_across_split_windows() {
+        let mut session = session();
+
+        let (_, continuous) = run(&mut session, 4, 0.0);
+        let (_, first) = run(&mut session, 2, 0.0);
+        // Contract: the next window's phase_in comes from the previous
+        // window's streaming_nsf_phase at the next window's start.
+        let next_phase = *first.last().unwrap();
+        let (_, second) = run(&mut session, 2, next_phase);
+
+        let mut split = first.clone();
+        split.extend_from_slice(&second);
+        assert!(
+            max_abs_diff(&continuous, &split) < 1e-5,
+            "split-window phase diverged from the continuous run by {}",
+            max_abs_diff(&continuous, &split)
+        );
+        assert!((continuous.last().unwrap() - second.last().unwrap()).abs() < 1e-5);
+    }
+}
+
+/// Local-only validation against a real checkpoint (never runs in CI).
+///
+/// Set `VC_CONVERT_TEST_PTH` to a real RVC v2/F0 `.pth` and run
+/// `cargo test -p vc-core --features ort vc_convert_real -- --ignored --nocapture`.
+/// Optionally set `VC_CONVERT_TEST_REF_ONNX` to a streaming export of the same
+/// checkpoint produced by rvc-onnx-web to compare audio under identical noise.
+#[cfg(feature = "ort")]
+#[test]
+#[ignore = "needs VC_CONVERT_TEST_PTH pointing at a real checkpoint"]
+fn vc_convert_real_model_matches_reference() {
+    use ort::session::Session;
+    use ort::value::Tensor;
+
+    let pth_path = std::env::var("VC_CONVERT_TEST_PTH")
+        .expect("set VC_CONVERT_TEST_PTH to a real RVC v2/F0 .pth");
+    let pth = fs::read(&pth_path).unwrap();
+    let conversion =
+        vc_convert::pth_to_onnx(&pth, &vc_convert::ConvertOptions::default(), &mut |_| {})
+            .expect("real checkpoint converts");
+    println!(
+        "converted {} -> {} bytes, sr {}",
+        pth_path,
+        conversion.onnx_bytes.len(),
+        conversion.sample_rate
+    );
+
+    // The converted model must pass the same loader gatekeepers as the tiny
+    // fixture, and run under ORT CPU.
+    with_temp_model("convert-real", &conversion.onnx_bytes, |path| {
+        let io = super::onnx_meta::read_model_io(path).unwrap();
+        io.resolve_rvc_io_names().unwrap();
+        io.validate_rvc_metadata().unwrap();
+        assert!(io.stream_format().unwrap().is_some());
+    });
+
+    #[cfg(all(windows, feature = "windowsml"))]
+    crate::windows_ml::ensure_initialized().unwrap();
+    let build_session = |bytes: &[u8]| -> Session {
+        Session::builder()
+            .unwrap()
+            .with_intra_threads(1)
+            .unwrap()
+            .commit_from_memory(bytes)
+            .unwrap()
+    };
+    let mut session = build_session(&conversion.onnx_bytes);
+
+    // Deterministic feeds sized for a real v2 model (768 features,
+    // inter_channels 192). Fixed noise so a reference model given the same
+    // feeds must produce the same audio.
+    let phone_len = 32usize;
+    let inter = 192usize;
+    let rnd = io_names_rnd_channels(&conversion.onnx_bytes).unwrap_or(inter);
+    let hop = real_model_frame_hop(&conversion.onnx_bytes);
+    let audio_len = phone_len * hop;
+    // Exporters use different aliases (e.g. pitchf/nsff0 and ds/sid).
+    // Resolve each graph independently, as the production loader does.
+    let resolve_names = |bytes: &[u8]| {
+        with_temp_model("convert-real-names", bytes, |path| {
+            super::onnx_meta::read_model_io(path)
+                .unwrap()
+                .resolve_rvc_io_names()
+                .unwrap()
+        })
+    };
+    let names = resolve_names(&conversion.onnx_bytes);
+    let feeds = |phase_in: f32, names: &RvcIoNames| {
+        let mut phone = vec![0.0f32; phone_len * 768];
+        for (i, v) in phone.iter_mut().enumerate() {
+            *v = ((i % 97) as f32 / 97.0 - 0.5) * 0.1;
+        }
+        ort::inputs![
+            names.feats.clone() => Tensor::from_array(([1usize, phone_len, 768], phone)).unwrap(),
+            names.p_len.clone() => Tensor::from_array(([1usize], vec![phone_len as i64])).unwrap(),
+            names.pitch.clone() => Tensor::from_array(([1usize, phone_len], vec![120i64; phone_len])).unwrap(),
+            names.pitchf.clone() => Tensor::from_array(([1usize, phone_len], vec![160.0f32; phone_len])).unwrap(),
+            names.sid.clone() => Tensor::from_array(([1usize], vec![0i64])).unwrap(),
+            names.rnd.as_ref().unwrap().name.clone() => Tensor::from_array(([1usize, rnd, phone_len], vec![0.1f32; rnd * phone_len])).unwrap(),
+            names.nsf_noise.clone().unwrap() => Tensor::from_array(([1usize, audio_len, 1], vec![0.0f32; audio_len])).unwrap(),
+            names.phase_in.clone().unwrap() => Tensor::from_array(([1usize, 1, 1], vec![phase_in])).unwrap(),
+        ]
+    };
+    let outputs = session.run(feeds(0.0, &names)).expect("real model runs");
+    let (_, audio) = outputs[names.audio.as_str()]
+        .try_extract_tensor::<f32>()
+        .unwrap();
+    let peak = audio.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+    println!("audio: {} samples, peak {peak}", audio.len());
+    assert_eq!(audio.len(), audio_len);
+    assert!(
+        peak > 1e-4 && peak <= 1.0,
+        "audio is silent or clipped: peak {peak}"
+    );
+    let audio = audio.to_vec();
+    drop(outputs);
+
+    if let Ok(ref_path) = std::env::var("VC_CONVERT_TEST_REF_ONNX") {
+        let reference = fs::read(&ref_path).unwrap();
+        let mut ref_session = build_session(&reference);
+        let ref_names = resolve_names(&reference);
+        let ref_outputs = ref_session
+            .run(feeds(0.0, &ref_names))
+            .expect("reference model runs");
+        let (_, ref_audio) = ref_outputs[ref_names.audio.as_str()]
+            .try_extract_tensor::<f32>()
+            .unwrap();
+        assert_eq!(audio.len(), ref_audio.len());
+        assert!(audio.iter().chain(ref_audio).all(|v| v.is_finite()));
+        let max_diff = audio
+            .iter()
+            .zip(ref_audio)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        println!("max abs diff vs rvc-onnx-web reference: {max_diff}");
+        assert!(
+            max_diff < 1e-4,
+            "converted audio diverges from rvc-onnx-web reference by {max_diff}"
+        );
+    }
+}
+
+/// Best-effort rnd channel count from the converted model's own metadata
+/// (avoids hardcoding inter_channels for arbitrary real checkpoints).
+#[cfg(feature = "ort")]
+fn io_names_rnd_channels(onnx_bytes: &[u8]) -> Option<usize> {
+    with_temp_model("convert-real-io", onnx_bytes, |path| {
+        let io = super::onnx_meta::read_model_io(path).ok()?;
+        let names = io.resolve_rvc_io_names().ok()?;
+        usize::try_from(names.rnd?.channels).ok()
+    })
+}
+
+#[cfg(feature = "ort")]
+fn real_model_frame_hop(onnx_bytes: &[u8]) -> usize {
+    with_temp_model("convert-real-hop", onnx_bytes, |path| {
+        super::onnx_meta::read_model_io(path)
+            .ok()
+            .and_then(|io| io.stream_format().ok().flatten())
+            .map(|s| s.frame_hop)
+            .unwrap_or(400)
+    })
+}

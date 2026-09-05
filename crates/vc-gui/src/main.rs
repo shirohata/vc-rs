@@ -1,7 +1,7 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -342,6 +342,86 @@ struct VcGui {
     telemetry_updated_at: Instant,
     applied_chunk_ms: Option<u32>,
     gpu_devices: Arc<Mutex<GpuDeviceDiscovery>>,
+    pth_convert: Option<PthConvert>,
+}
+
+/// State of the `.pth` → `.onnx` conversion dialog. The conversion itself
+/// runs on a named worker thread (same pattern as GPU discovery); the shared
+/// state is how the thread reports progress back to the UI.
+struct PthConvert {
+    source: PathBuf,
+    mode: vc_convert::ExportMode,
+    state: Arc<Mutex<PthConvertState>>,
+}
+
+#[derive(Clone)]
+enum PthConvertState {
+    Configuring,
+    Running { stage: &'static str },
+    Done { output: PathBuf },
+    Failed { error: String },
+}
+
+impl PthConvert {
+    fn new(source: PathBuf) -> Self {
+        Self {
+            source,
+            mode: vc_convert::ExportMode::Streaming,
+            state: Arc::new(Mutex::new(PthConvertState::Configuring)),
+        }
+    }
+
+    fn output_path(&self) -> PathBuf {
+        self.source.with_extension("onnx")
+    }
+
+    fn start(&self) {
+        let state = Arc::clone(&self.state);
+        let source = self.source.clone();
+        let options = vc_convert::ConvertOptions {
+            export_mode: self.mode,
+            ..Default::default()
+        };
+        if let Ok(mut current) = self.state.lock() {
+            *current = PthConvertState::Running {
+                stage: vc_convert::ProgressStage::ReadArchive.label(),
+            };
+        }
+        let spawned = std::thread::Builder::new()
+            .name("vc-gui-pth-convert".to_string())
+            .spawn(move || {
+                let progress_state = Arc::clone(&state);
+                let mut progress = move |stage: vc_convert::ProgressStage| {
+                    if let Ok(mut current) = progress_state.lock() {
+                        *current = PthConvertState::Running {
+                            stage: stage.label(),
+                        };
+                    }
+                };
+                let result = vc_convert::convert_pth_file(&source, &options, &mut progress);
+                if let Ok(mut current) = state.lock() {
+                    *current = match result {
+                        Ok(output) => PthConvertState::Done { output },
+                        Err(err) => PthConvertState::Failed {
+                            error: format!("{err:#}"),
+                        },
+                    };
+                }
+            });
+        if let Err(err) = spawned {
+            if let Ok(mut current) = self.state.lock() {
+                *current = PthConvertState::Failed {
+                    error: format!("failed to spawn conversion thread: {err}"),
+                };
+            }
+        }
+    }
+}
+
+fn is_pth_path(value: &str) -> bool {
+    Path::new(value)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("pth"))
 }
 
 #[derive(Clone, Debug, Default)]
@@ -366,6 +446,7 @@ impl VcGui {
             telemetry_updated_at: Instant::now() - TELEMETRY_REFRESH,
             applied_chunk_ms: None,
             gpu_devices: Arc::new(Mutex::new(GpuDeviceDiscovery::default())),
+            pth_convert: None,
         }
     }
 
@@ -387,17 +468,141 @@ impl VcGui {
     }
 
     fn browse_into(&mut self, kind: ModelKind) {
-        if let Some(path) = rfd::FileDialog::new()
-            .add_filter("ONNX model", &["onnx"])
-            .pick_file()
-        {
+        // Only the RVC slot accepts .pth: picking one opens the conversion
+        // dialog instead of storing the path (the engine only loads .onnx).
+        let dialog = match kind {
+            ModelKind::Rvc => rfd::FileDialog::new()
+                .add_filter("RVC model", &["onnx", "pth"])
+                .add_filter("ONNX model", &["onnx"])
+                .add_filter("PyTorch checkpoint", &["pth"]),
+            ModelKind::Embedder | ModelKind::F0 => {
+                rfd::FileDialog::new().add_filter("ONNX model", &["onnx"])
+            }
+        };
+        if let Some(path) = dialog.pick_file() {
             let value = path.to_string_lossy().into_owned();
+            if matches!(kind, ModelKind::Rvc) && is_pth_path(&value) {
+                self.pth_convert = Some(PthConvert::new(path));
+                return;
+            }
             match kind {
                 ModelKind::Rvc => self.settings.model = value,
                 ModelKind::Embedder => self.settings.embedder = value,
                 ModelKind::F0 => self.settings.f0_model = value,
             }
             self.changed();
+        }
+    }
+
+    /// Render the `.pth` conversion dialog and apply its state transitions.
+    /// Actions mutate `self` after the window closure to keep borrows simple.
+    fn pth_convert_window(&mut self, ctx: &egui::Context) {
+        enum Action {
+            None,
+            Start,
+            Close,
+            Retry,
+            Accept(PathBuf),
+        }
+
+        let Some(convert) = &mut self.pth_convert else {
+            return;
+        };
+        let state = convert
+            .state
+            .lock()
+            .map(|state| state.clone())
+            .unwrap_or(PthConvertState::Configuring);
+        let mut action = Action::None;
+
+        egui::Window::new("Convert .pth to ONNX")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| match &state {
+                PthConvertState::Configuring => {
+                    ui.label(format!("Source: {}", convert.source.display()));
+                    let output = convert.output_path();
+                    ui.label(format!("Output: {}", output.display()));
+                    if output.exists() {
+                        ui.small("The existing file will be overwritten.");
+                    }
+                    egui::ComboBox::from_label("Export mode")
+                        .selected_text(match convert.mode {
+                            vc_convert::ExportMode::Streaming => "Streaming (recommended)",
+                            vc_convert::ExportMode::Webui => "WebUI-compatible",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut convert.mode,
+                                vc_convert::ExportMode::Streaming,
+                                "Streaming (recommended)",
+                            );
+                            ui.selectable_value(
+                                &mut convert.mode,
+                                vc_convert::ExportMode::Webui,
+                                "WebUI-compatible",
+                            );
+                        });
+                    ui.small(
+                        "Streaming exports carry NSF phase across chunks for the realtime engine.",
+                    );
+                    ui.horizontal(|ui| {
+                        if ui.button("Convert").clicked() {
+                            action = Action::Start;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            action = Action::Close;
+                        }
+                    });
+                }
+                PthConvertState::Running { stage } => {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::Spinner::new());
+                        ui.label(*stage);
+                    });
+                    // Keep repainting so the worker thread's progress shows
+                    // without user input.
+                    ctx.request_repaint_after(Duration::from_millis(100));
+                }
+                PthConvertState::Done { output } => {
+                    action = Action::Accept(output.clone());
+                }
+                PthConvertState::Failed { error } => {
+                    ui.colored_label(egui::Color32::LIGHT_RED, error);
+                    ui.horizontal(|ui| {
+                        if ui.button("Retry").clicked() {
+                            action = Action::Retry;
+                        }
+                        if ui.button("Close").clicked() {
+                            action = Action::Close;
+                        }
+                    });
+                }
+            });
+
+        match action {
+            Action::None => {}
+            Action::Start => {
+                if let Some(convert) = &self.pth_convert {
+                    convert.start();
+                }
+            }
+            Action::Retry => {
+                if let Some(convert) = &self.pth_convert {
+                    if let Ok(mut state) = convert.state.lock() {
+                        *state = PthConvertState::Configuring;
+                    }
+                }
+            }
+            Action::Close => {
+                self.pth_convert = None;
+            }
+            Action::Accept(output) => {
+                self.settings.model = output.to_string_lossy().into_owned();
+                self.pth_convert = None;
+                self.changed();
+            }
         }
     }
 
@@ -429,6 +634,7 @@ impl VcGui {
 impl eframe::App for VcGui {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.maybe_save();
+        self.pth_convert_window(ui.ctx());
         let (status, latest_telemetry, devices) = self.controller.snapshot();
         if self.telemetry_updated_at.elapsed() >= TELEMETRY_REFRESH {
             self.telemetry = latest_telemetry;
@@ -495,6 +701,17 @@ impl eframe::App for VcGui {
             changed |= path_changed;
             if browse_clicked {
                 self.browse_into(ModelKind::Rvc);
+            }
+            // A .pth typed or pasted into the field can't be loaded directly;
+            // offer the converter instead of failing later at Apply/Start.
+            if is_pth_path(&self.settings.model) {
+                ui.horizontal(|ui| {
+                    ui.small("PyTorch checkpoints must be converted to ONNX first.");
+                    if ui.small_button("Convert to ONNX…").clicked() {
+                        self.pth_convert =
+                            Some(PthConvert::new(PathBuf::from(&self.settings.model)));
+                    }
+                });
             }
             let (path_changed, browse_clicked) =
                 model_path_control(ui, "Embedder", &mut self.settings.embedder);

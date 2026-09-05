@@ -1,0 +1,20 @@
+[package]
+name = "vc-convert"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Offline RVC .pth → .onnx converter (pure-Rust port of rvc-onnx-web)"
+
+[lints]
+workspace = true
+
+[features]
+# Exposes the tiny checked-in .pth fixtures to other crates' tests
+# (vc-core's onnx_meta round-trip suite). Never enabled by shipped builds.
+test-fixtures = []
+
+[dependencies]
+anyhow = { workspace = true }
+# Inflate only — used for the rare deflated ZIP entry inside a .pth. PyTorch
+# ≥1.6 writes stored (uncompressed) entries, which we read zero-copy.
+miniz_oxide = "0.8"

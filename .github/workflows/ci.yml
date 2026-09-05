@@ -71,9 +71,10 @@ jobs:
           -p vc-core -p vc-app -p vc-cli
           --no-default-features --features cpu
       # GUI/VST3 unit tests never open an ORT session, so the shipped feature
-      # set runs without the Windows App SDK Runtime (see header).
-      - name: test (vc-gui + vc-vst3, default features)
-        run: cargo test -p vc-gui -p vc-vst3
+      # set runs without the Windows App SDK Runtime (see header). vc-convert
+      # is ORT-free by design (hand-rolled ONNX writer) and featureless.
+      - name: test (vc-gui + vc-vst3 + vc-convert, default features)
+        run: cargo test -p vc-gui -p vc-vst3 -p vc-convert
 
   # ---- Supply chain: licenses, advisories, duplicate/banned deps ----
   cargo-deny:

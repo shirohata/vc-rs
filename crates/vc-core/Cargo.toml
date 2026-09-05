@@ -65,6 +65,10 @@ cc = "1"
 
 [dev-dependencies]
 approx = "0.5"
+# The .pth→.onnx converter, tested here against the real onnx_meta gatekeepers
+# (round-trip) and ORT CPU (streaming phase contract). Dev-only: nothing shipped
+# links it, and `test-fixtures` merely exposes the tiny checked-in checkpoints.
+vc-convert = { path = "../vc-convert", features = ["test-fixtures"] }
 # Microbenchmark harness for the CPU hot paths (dsp/sola). Dev-only, so it never
 # ships in a distribution build. Pure-CPU benches don't enable the `tensorrt`
 # feature, so build.rs never compiles the native shim — `cargo bench -p vc-core`
