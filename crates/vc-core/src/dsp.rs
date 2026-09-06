@@ -1,8 +1,10 @@
 #![allow(dead_code)]
 
 use anyhow::{anyhow, Result};
-use audioadapter_buffers::direct::SequentialSlice;
-use rubato::{Fft, FixedSync, Resampler};
+// Use rubato's re-export so the buffer adapter always implements the exact
+// trait version accepted by the resampler across dependency upgrades.
+use rubato::audioadapter_buffers::direct::SequentialSlice;
+use rubato::{Fft, FixedSync, Resampler, WindowFunction};
 
 const STREAM_RESAMPLE_CHUNK: usize = 480;
 const STREAM_RESAMPLE_COMPACT_THRESHOLD: usize = STREAM_RESAMPLE_CHUNK * 8;
@@ -333,7 +335,17 @@ pub fn resample_mono(input: &[f32], from_hz: usize, to_hz: usize) -> Result<Vec<
     }
 
     let requested_chunk = 1024;
-    let mut resampler = Fft::<f32>::new(from_hz, to_hz, requested_chunk, 1, 1, FixedSync::Both)?;
+    // Preserve rubato 3's FFT partitioning and anti-aliasing filter. The newer
+    // `new` auto-selects sub-chunks, which can change delay and the passband.
+    let mut resampler = Fft::<f32>::new_custom(
+        from_hz,
+        to_hz,
+        requested_chunk,
+        1,
+        1,
+        WindowFunction::BlackmanHarris2,
+        FixedSync::Both,
+    )?;
     let out_frames = resampler.process_all_needed_output_len(input.len()).max(1);
     let input_adapter = SequentialSlice::new(input, 1, input.len())?;
     let mut output = vec![0.0; out_frames];
@@ -364,12 +376,15 @@ impl StreamingResampleMono {
         let resampler = if from_hz == to_hz {
             None
         } else {
-            Some(Fft::<f32>::new(
+            // Keep this filter and single sub-chunk aligned with resample_mono;
+            // changing them requires checking waveforms and startup trimming.
+            Some(Fft::<f32>::new_custom(
                 from_hz,
                 to_hz,
                 STREAM_RESAMPLE_CHUNK,
                 1,
                 1,
+                WindowFunction::BlackmanHarris2,
                 FixedSync::Input,
             )?)
         };

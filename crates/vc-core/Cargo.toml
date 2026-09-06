@@ -50,7 +50,6 @@ tracing.workspace = true
 rubato.workspace = true
 libloading = { workspace = true, optional = true }
 ort = { workspace = true, optional = true }
-audioadapter-buffers = "3"
 xxhash-rust = { version = "0.8.15", default-features = false, features = ["xxh3"] }
 clap = { version = "4.5", features = ["derive"], optional = true }
 nnnoiseless = { version = "0.5.2", default-features = false, optional = true }

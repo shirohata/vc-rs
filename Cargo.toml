@@ -29,7 +29,7 @@ strip = true
 [workspace.dependencies]
 anyhow = "1.0"
 tracing = "0.1"
-rubato = "3"
+rubato = "5"
 libloading = "0.8"
 # Base ONNX Runtime: CPU core only. Provider features are opt-in in `vc-core`:
 # Windows ML loads the system Windows App SDK Runtime ORT dynamically, CUDA pulls
