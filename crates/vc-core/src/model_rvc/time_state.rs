@@ -157,8 +157,9 @@ pub(super) struct StreamParams {
 ///
 /// The exporter's contract (`rvc.streaming.phase_contract`) is
 /// `absolute_window_start`: `phase_in` is the normalized phase at the window's
-/// first generated sample, `phase_out` the phase after its last. The model adds
-/// `phase_in` to the within-window cumulative phase, which starts at 0.
+/// start before its first sample increment, `phase_out` the phase after its last.
+/// The model adds `phase_in` to the within-window cumulative phase, whose first
+/// output already includes the first sample's increment.
 ///
 /// vc-rs feeds *overlapping* windows, so the exporter's "carry phase_out only to
 /// an immediately adjacent next window" rule does not apply — successive windows
@@ -170,7 +171,7 @@ pub(super) struct StreamParams {
 /// `f0 / sample_rate * frame_hop` exactly, on the CPU.
 struct PhaseState {
     /// Normalized phase (fraction of a cycle, `[0, 1)`) at the current window's
-    /// first generated sample — fed straight to `phase_in`.
+    /// start before its first sample increment — fed straight to `phase_in`.
     window_start_phase: f64,
 }
 
@@ -316,10 +317,11 @@ impl RvcTimeState {
     }
 
     /// Set the next chunk's window-start phase directly from the model's
-    /// per-sample phase output (`streaming_nsf_phase`), per the exporter contract
-    /// "select the next phase_in from streaming_nsf_phase at the next input window
-    /// start". The next window starts `advance_frames * frame_hop` samples into the
-    /// current output, so that element is the next `phase_in`.
+    /// per-sample phase output (`streaming_nsf_phase`). Each output includes that
+    /// sample's phase increment, whereas `phase_in` precedes the first increment.
+    /// Therefore a window advancing N samples carries output[N - 1], not output[N];
+    /// the latter would add one extra increment on every chunk. Keep the overlapping
+    /// model-window regression in tests.rs aligned with this boundary convention.
     ///
     /// Returns `false` (leaving the phase unchanged) for non-streaming exports or
     /// when the output is too short to contain that sample — the caller then falls
@@ -333,7 +335,11 @@ impl RvcTimeState {
         let Some(phase) = self.phase.as_mut() else {
             return false;
         };
-        let Some(&value) = phase_samples.get(advance_samples) else {
+        // A stationary window keeps its phase even when no output is available.
+        let Some(index) = advance_samples.checked_sub(1) else {
+            return true;
+        };
+        let Some(&value) = phase_samples.get(index) else {
             return false;
         };
         phase.window_start_phase = (value as f64).rem_euclid(1.0);
@@ -645,19 +651,24 @@ mod tests {
     }
 
     #[test]
-    fn phase_from_output_picks_next_window_start_sample() {
+    fn phase_from_output_picks_sample_before_next_window() {
         let frame_hop = 4;
         let total = 8;
         let advance = 2;
         let mut state = streaming_state(frame_hop, 48_000);
-        state.roll(advance, total); // last_advance_frames = 2 -> advance_samples = 8
-                                    // Per-sample phase output, audio_len = total * frame_hop = 32.
+        state.roll(advance, total);
         let phase: Vec<f32> = (0..total * frame_hop).map(|i| i as f32 / 100.0).collect();
         assert!(state.set_phase_from_output(&phase));
-        // The next window starts at sample advance*frame_hop = 8 -> phase[8] = 0.08.
-        assert!((state.phase_in().unwrap() - 0.08).abs() < 1e-5);
+        // Eight consumed samples carry the phase after sample 7.
+        assert!((state.phase_in().unwrap() - 0.07).abs() < 1e-5);
+        // Exactly N outputs suffice, including for adjacent, non-overlapping windows.
+        assert!(state.set_phase_from_output(&phase[..8]));
         // A too-short output leaves the phase unchanged and reports no update.
-        assert!(!state.set_phase_from_output(&phase[..4]));
+        assert!(!state.set_phase_from_output(&phase[..7]));
+        assert!((state.phase_in().unwrap() - 0.07).abs() < 1e-5);
+        state.roll(0, total);
+        assert!(state.set_phase_from_output(&[]));
+        assert!((state.phase_in().unwrap() - 0.07).abs() < 1e-5);
     }
 
     #[test]

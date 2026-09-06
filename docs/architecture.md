@@ -220,12 +220,14 @@ without touching callers.
     rolled on the output-sample grid (`* frame_hop`) with the same alignment as
     `rnd` (distinct seed, so it is independent of `rnd`).
   - **NSF phase (`phase_in` `[1,1,1]` → `streaming_nsf_phase` `[1, audio_len, 1]`)**
-    — `phase_in` is the normalized phase at the window's first generated sample.
+    — `phase_in` is the normalized phase before the window's first sample increment.
     vc-rs feeds *overlapping* windows, so a naive carry of the last sample's phase
     is wrong. The current export emits the per-sample `streaming_nsf_phase`, and
-    the contract is "select the next `phase_in` from `streaming_nsf_phase` at the
-    next input window start": the next window starts `advance_frames * frame_hop`
-    samples into this output, so that element is the next `phase_in`. The host
+    each output element already includes that sample's phase increment. The next
+    window starts `N = advance_frames * frame_hop` samples into this output, so
+    `streaming_nsf_phase[N - 1]` is the next `phase_in`; selecting element `N`
+    would add an extra sample's increment every chunk. Zero advance retains the
+    existing phase. The host
     reads the output back and picks it ([`set_phase_from_output`]). For an earlier
     export that emitted only a scalar phase (or none), it falls back to CPU
     accumulation: advance the window-start phase past the frames the window scrolls

@@ -702,13 +702,48 @@ mod vc_convert_ort {
     }
 
     #[test]
+    fn streaming_phase_matches_across_overlapping_windows() {
+        use super::super::time_state::{RvcTimeState, StreamParams};
+
+        let mut session = session();
+        let frames = 4;
+        let advance = 2;
+        let mut state = RvcTimeState::new(
+            None,
+            Some(StreamParams {
+                frame_hop: HOP,
+                sample_rate: 40_000,
+            }),
+        );
+        let (_, mut previous) = run(&mut session, frames, state.phase_in().unwrap());
+        // Exercise the production carry, not a hand-picked output index. Repeated
+        // overlapping windows expose a per-chunk phase increment that adjacent
+        // windows using first.last() would never catch. Phase is periodic, so
+        // compare circular distance to tolerate equivalent 0/1 representations.
+        for _ in 0..4 {
+            state.roll(advance, frames);
+            assert!(state.set_phase_from_output(&previous));
+            let (_, current) = run(&mut session, frames, state.phase_in().unwrap());
+            let error = previous[advance * HOP..]
+                .iter()
+                .zip(&current)
+                .map(|(a, b)| {
+                    let delta = (a - b).abs().rem_euclid(1.0);
+                    delta.min(1.0 - delta)
+                })
+                .fold(0.0, f32::max);
+            assert!(error < 1e-5, "overlapping phase diverged by {error} cycles");
+            previous = current;
+        }
+    }
+
+    #[test]
     fn streaming_phase_is_continuous_across_split_windows() {
         let mut session = session();
 
         let (_, continuous) = run(&mut session, 4, 0.0);
         let (_, first) = run(&mut session, 2, 0.0);
-        // Contract: the next window's phase_in comes from the previous
-        // window's streaming_nsf_phase at the next window's start.
+        // Adjacent windows carry the phase after the previous window's last sample.
         let next_phase = *first.last().unwrap();
         let (_, second) = run(&mut session, 2, next_phase);
 
