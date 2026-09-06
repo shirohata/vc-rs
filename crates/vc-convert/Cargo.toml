@@ -15,6 +15,5 @@ test-fixtures = []
 
 [dependencies]
 anyhow = { workspace = true }
-# Inflate only — used for the rare deflated ZIP entry inside a .pth. PyTorch
-# ≥1.6 writes stored (uncompressed) entries, which we read zero-copy.
-miniz_oxide = "0.8"
+# ZIP parsing stays in the maintained library; PTH needs only Stored and Deflate.
+zip = { version = "8.6", default-features = false, features = ["deflate"] }

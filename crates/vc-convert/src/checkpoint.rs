@@ -93,7 +93,7 @@ pub fn parse_pth(bytes: &[u8]) -> Result<ParsedCheckpoint> {
              legacy pickle-only .pth files are not supported"
         );
     }
-    let archive = ZipArchive::parse(bytes).context("failed to read .pth archive")?;
+    let mut archive = ZipArchive::parse(bytes).context("failed to read .pth archive")?;
 
     // Locate the pickle (usually "archive/data.pkl") and derive the tensor
     // data prefix ("archive/data/").
@@ -106,8 +106,8 @@ pub fn parse_pth(bytes: &[u8]) -> Result<ParsedCheckpoint> {
     let dir = &pickle_name[..pickle_name.rfind('/').map_or(0, |i| i + 1)];
     let data_prefix = format!("{dir}data/");
 
-    let pickle_bytes = archive.read(&pickle_name)?.into_owned();
-    let resolver = |key: &str| {
+    let pickle_bytes = archive.read_pickle(&pickle_name)?;
+    let mut resolver = |key: &str| {
         for candidate in [
             format!("{data_prefix}{key}"),
             format!("data/{key}"),
@@ -115,12 +115,12 @@ pub fn parse_pth(bytes: &[u8]) -> Result<ParsedCheckpoint> {
             key.to_owned(),
         ] {
             if archive.has_entry(&candidate) {
-                return archive.read(&candidate).map(|c| c.into_owned());
+                return archive.read(&candidate);
             }
         }
         Err(anyhow!("storage key not found in archive: {key}"))
     };
-    let checkpoint = Unpickler::new(&pickle_bytes, &resolver)
+    let checkpoint = Unpickler::new(&pickle_bytes, &mut resolver)
         .load()
         .context("failed to unpickle checkpoint")?;
 

@@ -1,311 +1,373 @@
-//! Minimal ZIP reader for PyTorch `.pth` archives.
-//!
-//! Ported from rvc-onnx-web (https://github.com/visgotti/rvc-onnx-web),
-//! MIT License — where `src/pth-parser.ts` delegates to `fflate.unzipSync`,
-//! this module reads the archive directly so stored entries (PyTorch ≥1.6
-//! always writes `ZIP_STORED`) come back as zero-copy slices of the input.
-//!
-//! Scope: read-only, central-directory driven, methods 0 (stored) and
-//! 8 (deflate), with ZIP64 offsets/sizes (PyTorch's miniz writer emits ZIP64
-//! fields for large checkpoints). Anything else errors — a `.pth` never needs
-//! encryption, spanning, or exotic compression.
+//! Bounded PTH ZIP access. ZIP/ZIP64 structure and CRC validation belong to `zip`,
+//! not a second parser here. Only requested entries are inflated, never extracted.
+use std::io::{Cursor, Read};
+use std::path::Path;
 
-use std::borrow::Cow;
-
+use ::zip::CompressionMethod;
 use anyhow::{anyhow, bail, Context, Result};
 
-const EOCD_SIG: u32 = 0x0605_4b50;
-const EOCD64_LOCATOR_SIG: u32 = 0x0706_4b50;
-const EOCD64_SIG: u32 = 0x0606_4b50;
-const CENTRAL_SIG: u32 = 0x0201_4b50;
-const LOCAL_SIG: u32 = 0x0403_4b50;
-/// EOCD is 22 bytes plus a comment of at most 65535 bytes.
-const EOCD_SEARCH_MAX: usize = 22 + 65_535;
+// These bound archive I/O, not subsequent pickle objects, widened tensors or ONNX
+// graphs. Keep the file and in-memory entry points on the same input limit.
+#[derive(Clone, Copy)]
+struct Limits {
+    input: u64,
+    entries: usize,
+    total: u64,
+    entry: u64,
+    pickle: u64,
+}
+const LIMITS: Limits = Limits {
+    input: 2 * 1024 * 1024 * 1024,
+    entries: 100_000,
+    total: 2 * 1024 * 1024 * 1024,
+    entry: 1024 * 1024 * 1024,
+    pickle: 64 * 1024 * 1024,
+};
 
-pub(crate) struct ZipEntry {
-    pub name: String,
-    method: u16,
-    compressed_size: u64,
-    uncompressed_size: u64,
-    local_header_offset: u64,
+/// Do not reserve using untrusted metadata or use unbounded read_to_end. Probe
+/// one byte beyond the remaining budget to distinguish exact EOF from overflow.
+fn read_bounded(reader: &mut impl Read, limit: u64, consumed: &mut u64) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let remaining = limit.saturating_sub(out.len() as u64);
+        let want = remaining.saturating_add(1).min(buf.len() as u64) as usize;
+        let n = match reader.read(&mut buf[..want]) {
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            other => other?,
+        };
+        if n == 0 {
+            return Ok(out);
+        }
+        *consumed = consumed
+            .checked_add(n as u64)
+            .ok_or_else(|| anyhow!("read size overflow"))?;
+        if n as u64 > remaining {
+            bail!("read exceeds limit of {limit} bytes");
+        }
+        out.try_reserve(n)
+            .context("unable to allocate read buffer")?;
+        out.extend_from_slice(&buf[..n]);
+    }
+}
+
+pub(crate) fn read_pth_file(path: &Path) -> Result<Vec<u8>> {
+    read_file_with_limit(path, LIMITS.input)
+}
+fn read_file_with_limit(path: &Path, limit: u64) -> Result<Vec<u8>> {
+    let read = || -> Result<Vec<u8>> {
+        let mut file = std::fs::File::open(path)?;
+        if file.metadata()?.len() > limit {
+            bail!("input exceeds limit of {limit} bytes");
+        }
+        read_bounded(&mut file, limit, &mut 0)
+    };
+    read().with_context(|| format!("failed to read PTH {}", path.display()))
 }
 
 pub(crate) struct ZipArchive<'a> {
-    data: &'a [u8],
-    entries: Vec<ZipEntry>,
+    inner: ::zip::ZipArchive<Cursor<&'a [u8]>>,
+    limits: Limits,
+    consumed: u64,
 }
-
-fn u16_at(data: &[u8], pos: usize) -> Result<u16> {
-    let bytes: [u8; 2] = data
-        .get(pos..pos + 2)
-        .ok_or_else(|| anyhow!("ZIP truncated at offset {pos}"))?
-        .try_into()
-        .expect("slice length checked");
-    Ok(u16::from_le_bytes(bytes))
-}
-
-fn u32_at(data: &[u8], pos: usize) -> Result<u32> {
-    let bytes: [u8; 4] = data
-        .get(pos..pos + 4)
-        .ok_or_else(|| anyhow!("ZIP truncated at offset {pos}"))?
-        .try_into()
-        .expect("slice length checked");
-    Ok(u32::from_le_bytes(bytes))
-}
-
-fn u64_at(data: &[u8], pos: usize) -> Result<u64> {
-    let bytes: [u8; 8] = data
-        .get(pos..pos + 8)
-        .ok_or_else(|| anyhow!("ZIP truncated at offset {pos}"))?
-        .try_into()
-        .expect("slice length checked");
-    Ok(u64::from_le_bytes(bytes))
-}
-
 impl<'a> ZipArchive<'a> {
     pub fn parse(data: &'a [u8]) -> Result<Self> {
-        let eocd = find_eocd(data)?;
-        let mut entry_count = u64::from(u16_at(data, eocd + 10)?);
-        let mut cd_offset = u64::from(u32_at(data, eocd + 16)?);
-
-        // ZIP64: the 16-bit/32-bit EOCD fields saturate and the real values
-        // live in the ZIP64 EOCD record, found via the locator just before
-        // the EOCD.
-        if entry_count == 0xFFFF || cd_offset == 0xFFFF_FFFF {
-            let locator = eocd
-                .checked_sub(20)
-                .ok_or_else(|| anyhow!("ZIP64 archive missing EOCD64 locator"))?;
-            if u32_at(data, locator)? != EOCD64_LOCATOR_SIG {
-                bail!("ZIP64 archive missing EOCD64 locator");
-            }
-            let eocd64 = usize::try_from(u64_at(data, locator + 8)?)
-                .map_err(|_| anyhow!("ZIP64 EOCD offset out of range"))?;
-            if u32_at(data, eocd64)? != EOCD64_SIG {
-                bail!("invalid ZIP64 end-of-central-directory record");
-            }
-            entry_count = u64_at(data, eocd64 + 32)?;
-            cd_offset = u64_at(data, eocd64 + 48)?;
-        }
-
-        let mut pos = usize::try_from(cd_offset)
-            .map_err(|_| anyhow!("central directory offset out of range"))?;
-        let mut entries = Vec::with_capacity(usize::try_from(entry_count).unwrap_or(0));
-        for _ in 0..entry_count {
-            if u32_at(data, pos)? != CENTRAL_SIG {
-                bail!("invalid central directory entry at offset {pos}");
-            }
-            let method = u16_at(data, pos + 10)?;
-            let mut compressed_size = u64::from(u32_at(data, pos + 20)?);
-            let mut uncompressed_size = u64::from(u32_at(data, pos + 24)?);
-            let name_len = usize::from(u16_at(data, pos + 28)?);
-            let extra_len = usize::from(u16_at(data, pos + 30)?);
-            let comment_len = usize::from(u16_at(data, pos + 32)?);
-            let mut local_header_offset = u64::from(u32_at(data, pos + 42)?);
-            let name_bytes = data
-                .get(pos + 46..pos + 46 + name_len)
-                .ok_or_else(|| anyhow!("ZIP truncated in entry name"))?;
-            let name = String::from_utf8_lossy(name_bytes).into_owned();
-
-            // ZIP64 extended-information extra field: only the fields whose
-            // 32-bit form saturated are present, in this fixed order.
-            let mut extra_pos = pos + 46 + name_len;
-            let extra_end = extra_pos + extra_len;
-            while extra_pos + 4 <= extra_end {
-                let id = u16_at(data, extra_pos)?;
-                let size = usize::from(u16_at(data, extra_pos + 2)?);
-                if id == 0x0001 {
-                    let mut field = extra_pos + 4;
-                    if uncompressed_size == 0xFFFF_FFFF {
-                        uncompressed_size = u64_at(data, field)?;
-                        field += 8;
-                    }
-                    if compressed_size == 0xFFFF_FFFF {
-                        compressed_size = u64_at(data, field)?;
-                        field += 8;
-                    }
-                    if local_header_offset == 0xFFFF_FFFF {
-                        local_header_offset = u64_at(data, field)?;
-                    }
-                }
-                extra_pos += 4 + size;
-            }
-
-            entries.push(ZipEntry {
-                name,
-                method,
-                compressed_size,
-                uncompressed_size,
-                local_header_offset,
-            });
-            pos = extra_end + comment_len;
-        }
-
-        Ok(ZipArchive { data, entries })
+        Self::with_limits(data, LIMITS)
     }
 
+    fn with_limits(data: &'a [u8], limits: Limits) -> Result<Self> {
+        if data.len() as u64 > limits.input {
+            bail!("PTH input exceeds limit of {} bytes", limits.input);
+        }
+        let mut inner =
+            ::zip::ZipArchive::new(Cursor::new(data)).context("invalid PTH ZIP archive")?;
+        if inner.len() > limits.entries {
+            bail!("ZIP entry count exceeds limit of {}", limits.entries);
+        }
+        let mut total = 0u64;
+        for i in 0..inner.len() {
+            // Raw access inspects metadata without inflating even unused entries.
+            let file = inner
+                .by_index_raw(i)
+                .context("invalid ZIP entry metadata")?;
+            if file.size() > limits.entry {
+                bail!(
+                    "ZIP entry {} exceeds limit of {} bytes",
+                    file.name(),
+                    limits.entry
+                );
+            }
+            total = total
+                .checked_add(file.size())
+                .ok_or_else(|| anyhow!("ZIP declared size overflow at {}", file.name()))?;
+            if total > limits.total {
+                bail!(
+                    "ZIP declared total exceeds limit of {} bytes at {}",
+                    limits.total,
+                    file.name()
+                );
+            }
+        }
+        Ok(Self {
+            inner,
+            limits,
+            consumed: 0,
+        })
+    }
     pub fn entry_names(&self) -> impl Iterator<Item = &str> {
-        self.entries.iter().map(|e| e.name.as_str())
+        (0..self.inner.len()).filter_map(|i| self.inner.name_for_index(i))
     }
-
     pub fn has_entry(&self, name: &str) -> bool {
-        self.entries.iter().any(|e| e.name == name)
+        self.inner.index_for_name(name).is_some()
     }
-
-    /// Read one entry. Stored entries borrow from the archive buffer;
-    /// deflated entries allocate.
-    pub fn read(&self, name: &str) -> Result<Cow<'a, [u8]>> {
-        let entry = self
-            .entries
-            .iter()
-            .find(|e| e.name == name)
-            .ok_or_else(|| anyhow!("ZIP entry not found: {name}"))?;
-
-        // The local header repeats name/extra with potentially different extra
-        // fields (PyTorch pads the extra field to 64-byte-align tensor data),
-        // so the data offset must come from the local header, not the central
-        // directory.
-        let lho = usize::try_from(entry.local_header_offset)
-            .map_err(|_| anyhow!("local header offset out of range"))?;
-        if u32_at(self.data, lho)? != LOCAL_SIG {
-            bail!("invalid local file header for ZIP entry {name}");
-        }
-        let name_len = usize::from(u16_at(self.data, lho + 26)?);
-        let extra_len = usize::from(u16_at(self.data, lho + 28)?);
-        let data_start = lho + 30 + name_len + extra_len;
-        let comp_len = usize::try_from(entry.compressed_size)
-            .map_err(|_| anyhow!("compressed size out of range"))?;
-        let raw = self
-            .data
-            .get(data_start..data_start + comp_len)
-            .ok_or_else(|| anyhow!("ZIP truncated in data of entry {name}"))?;
-
-        match entry.method {
-            0 => Ok(Cow::Borrowed(raw)),
-            8 => {
-                let inflated = miniz_oxide::inflate::decompress_to_vec(raw)
-                    .map_err(|e| anyhow!("failed to inflate ZIP entry {name}: {e}"))?;
-                if inflated.len() as u64 != entry.uncompressed_size {
+    pub fn read_pickle(&mut self, name: &str) -> Result<Vec<u8>> {
+        self.read_entry(name, self.limits.pickle.min(self.limits.entry))
+    }
+    pub fn read(&mut self, name: &str) -> Result<Vec<u8>> {
+        self.read_entry(name, self.limits.entry)
+    }
+    fn read_entry(&mut self, name: &str, entry_limit: u64) -> Result<Vec<u8>> {
+        let mut read = || -> Result<Vec<u8>> {
+            let index = self
+                .inner
+                .index_for_name(name)
+                .ok_or_else(|| anyhow!("entry not found"))?;
+            {
+                let file = self.inner.by_index_raw(index)?;
+                if file.encrypted() {
+                    bail!("encrypted entries are unsupported");
+                }
+                if !matches!(
+                    file.compression(),
+                    CompressionMethod::Stored | CompressionMethod::Deflated
+                ) {
                     bail!(
-                        "ZIP entry {name} inflated to {} bytes, expected {}",
-                        inflated.len(),
-                        entry.uncompressed_size
+                        "unsupported ZIP compression method {:?}",
+                        file.compression()
                     );
                 }
-                Ok(Cow::Owned(inflated))
             }
-            other => bail!("unsupported ZIP compression method {other} for entry {name}"),
-        }
-    }
-}
-
-fn find_eocd(data: &[u8]) -> Result<usize> {
-    let search_start = data.len().saturating_sub(EOCD_SEARCH_MAX);
-    let mut pos = data
-        .len()
-        .checked_sub(22)
-        .context("file too small for ZIP")?;
-    loop {
-        if u32_at(data, pos)? == EOCD_SIG {
-            return Ok(pos);
-        }
-        if pos == search_start {
-            bail!("ZIP end-of-central-directory record not found");
-        }
-        pos -= 1;
+            let mut file = self.inner.by_index(index)?;
+            let remaining = self
+                .limits
+                .total
+                .checked_sub(self.consumed)
+                .ok_or_else(|| anyhow!("ZIP cumulative read limit exceeded"))?;
+            let limit = entry_limit.min(remaining);
+            if file.size() > limit {
+                bail!("declared size exceeds entry or remaining cumulative limit of {limit} bytes");
+            }
+            let expected = file.size();
+            // Read through EOF so zip's CRC check executes. Include repeated reads
+            // in the budget; storage references must not bypass the archive cap.
+            let out = read_bounded(&mut file, limit, &mut self.consumed)?;
+            if out.len() as u64 != expected {
+                bail!("ZIP size mismatch: read {}, expected {expected}", out.len());
+            }
+            Ok(out)
+        };
+        read().with_context(|| format!("failed to read ZIP entry {name}"))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ::zip::{write::SimpleFileOptions, ZipWriter};
+    use std::io::Write;
 
-    /// Build a single-entry ZIP by hand (mirrors onnx_meta's hand-assembled
-    /// protobuf test style).
-    fn build_zip(name: &str, payload: &[u8], method: u16, stored: &[u8]) -> Vec<u8> {
-        let mut out = Vec::new();
-        // Local header
-        out.extend_from_slice(&LOCAL_SIG.to_le_bytes());
-        out.extend_from_slice(&[20, 0]); // version needed
-        out.extend_from_slice(&[0, 0]); // flags
-        out.extend_from_slice(&method.to_le_bytes());
-        out.extend_from_slice(&[0, 0, 0, 0]); // time+date
-        out.extend_from_slice(&[0, 0, 0, 0]); // crc32 (unchecked)
-        out.extend_from_slice(&(stored.len() as u32).to_le_bytes());
-        out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-        out.extend_from_slice(&(name.len() as u16).to_le_bytes());
-        out.extend_from_slice(&[4, 0]); // extra len: 4-byte pad like torch alignment
-        out.extend_from_slice(name.as_bytes());
-        out.extend_from_slice(&[0xEE, 0xEE, 0, 0]); // dummy extra field header
-        let data_offset = out.len();
-        assert_eq!(data_offset, 30 + name.len() + 4);
-        out.extend_from_slice(stored);
-        // Central directory
-        let cd_offset = out.len();
-        out.extend_from_slice(&CENTRAL_SIG.to_le_bytes());
-        out.extend_from_slice(&[20, 0, 20, 0]); // versions
-        out.extend_from_slice(&[0, 0]); // flags
-        out.extend_from_slice(&method.to_le_bytes());
-        out.extend_from_slice(&[0, 0, 0, 0]); // time+date
-        out.extend_from_slice(&[0, 0, 0, 0]); // crc32
-        out.extend_from_slice(&(stored.len() as u32).to_le_bytes());
-        out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-        out.extend_from_slice(&(name.len() as u16).to_le_bytes());
-        out.extend_from_slice(&[0, 0]); // extra len
-        out.extend_from_slice(&[0, 0]); // comment len
-        out.extend_from_slice(&[0, 0]); // disk number
-        out.extend_from_slice(&[0, 0]); // internal attrs
-        out.extend_from_slice(&[0, 0, 0, 0]); // external attrs
-        out.extend_from_slice(&(0u32).to_le_bytes()); // local header offset
-        out.extend_from_slice(name.as_bytes());
-        let cd_size = out.len() - cd_offset;
-        // EOCD
-        out.extend_from_slice(&EOCD_SIG.to_le_bytes());
-        out.extend_from_slice(&[0, 0, 0, 0]); // disk numbers
-        out.extend_from_slice(&1u16.to_le_bytes()); // entries on disk
-        out.extend_from_slice(&1u16.to_le_bytes()); // total entries
-        out.extend_from_slice(&(cd_size as u32).to_le_bytes());
-        out.extend_from_slice(&(cd_offset as u32).to_le_bytes());
-        out.extend_from_slice(&[0, 0]); // comment len
-        out
+    fn fixture(method: CompressionMethod, large: bool) -> Vec<u8> {
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+        if large {
+            // Force an actual ZIP64 end record without allocating gigabytes or
+            // creating thousands of entries; large_file covers local size fields.
+            writer.set_raw_zip64_extensible_data_sector(Box::new([]));
+        }
+        for name in ["archive/data.pkl", "archive/data/0"] {
+            writer
+                .start_file(
+                    name,
+                    SimpleFileOptions::default()
+                        .compression_method(method)
+                        .large_file(large)
+                        .with_alignment(64),
+                )
+                .unwrap();
+            writer.write_all(b"abcdefgh").unwrap();
+        }
+        writer.finish().unwrap().into_inner()
+    }
+    fn small(data: &[u8]) -> Limits {
+        Limits {
+            input: data.len() as u64,
+            entries: 2,
+            total: 16,
+            entry: 8,
+            pickle: 8,
+        }
+    }
+    fn offset(data: &[u8], signature: u32) -> usize {
+        data.windows(4)
+            .position(|w| w == signature.to_le_bytes())
+            .unwrap()
+    }
+    fn put32(data: &mut [u8], pos: usize, n: u32) {
+        data[pos..pos + 4].copy_from_slice(&n.to_le_bytes());
+    }
+    fn rejects(data: &[u8]) {
+        // A panic naturally fails this test; the public parser must return Err.
+        assert!(crate::parse_pth(data).is_err());
     }
 
     #[test]
-    fn reads_stored_entry_zero_copy() {
-        let payload = b"hello tensor data";
-        let zip = build_zip("archive/data/0", payload, 0, payload);
-        let archive = ZipArchive::parse(&zip).unwrap();
-        assert!(archive.has_entry("archive/data/0"));
-        let read = archive.read("archive/data/0").unwrap();
-        assert_eq!(&*read, payload);
-        assert!(matches!(read, Cow::Borrowed(_)));
+    fn reads_stored_deflated_and_zip64_with_local_alignment() {
+        for method in [CompressionMethod::Stored, CompressionMethod::Deflated] {
+            for large in [false, true] {
+                let data = fixture(method, large);
+                if large {
+                    assert!(data.windows(4).any(|w| w == 0x06064b50u32.to_le_bytes()));
+                }
+                let mut archive = ZipArchive::with_limits(&data, small(&data)).unwrap();
+                assert_eq!(
+                    archive.entry_names().collect::<Vec<_>>(),
+                    ["archive/data.pkl", "archive/data/0"]
+                );
+                assert!(archive.has_entry("archive/data/0"));
+                assert_eq!(
+                    archive.read_pickle("archive/data.pkl").unwrap(),
+                    b"abcdefgh"
+                );
+                assert_eq!(archive.read("archive/data/0").unwrap(), b"abcdefgh");
+            }
+        }
     }
-
     #[test]
-    fn reads_deflated_entry() {
-        let payload = vec![42u8; 4096];
-        let compressed = miniz_oxide::deflate::compress_to_vec(&payload, 6);
-        let zip = build_zip("data.pkl", &payload, 8, &compressed);
-        let archive = ZipArchive::parse(&zip).unwrap();
-        let read = archive.read("data.pkl").unwrap();
-        assert_eq!(&*read, payload.as_slice());
-        assert!(matches!(read, Cow::Owned(_)));
+    fn malformed_zip64_entry_count_returns_error() {
+        let mut data = vec![0u8; 98];
+        put32(&mut data, 0, 0x06064b50);
+        data[32..40].copy_from_slice(&u64::MAX.to_le_bytes());
+        put32(&mut data, 56, 0x07064b50);
+        put32(&mut data, 76, 0x06054b50);
+        data[86..88].copy_from_slice(&u16::MAX.to_le_bytes());
+        rejects(&data);
     }
-
     #[test]
-    fn rejects_unknown_compression_method() {
-        let payload = b"x";
-        let zip = build_zip("f", payload, 99, payload);
-        let archive = ZipArchive::parse(&zip).unwrap();
-        let err = archive.read("f").unwrap_err().to_string();
-        assert!(
-            err.contains("unsupported ZIP compression method 99"),
-            "{err}"
+    fn rejects_truncation_and_invalid_offsets() {
+        let original = fixture(CompressionMethod::Stored, false);
+        for end in [0, 4, 30, original.len() - 1] {
+            rejects(&original[..end]);
+        }
+        let mut data = original;
+        let cd = offset(&data, 0x02014b50);
+        put32(&mut data, cd + 42, u32::MAX - 1);
+        rejects(&data);
+    }
+    #[test]
+    fn rejects_crc_corruption_with_entry_context() {
+        for method in [CompressionMethod::Stored, CompressionMethod::Deflated] {
+            let mut data = fixture(method, false);
+            let cd = offset(&data, 0x02014b50);
+            put32(&mut data, 14, 123);
+            put32(&mut data, cd + 16, 123);
+            let mut archive = ZipArchive::parse(&data).unwrap();
+            let error = archive.read_pickle("archive/data.pkl").unwrap_err();
+            assert!(format!("{error:#}").contains("archive/data.pkl"));
+        }
+    }
+    #[test]
+    fn rejects_unsupported_compression_and_encryption() {
+        for encrypted in [false, true] {
+            let mut data = fixture(CompressionMethod::Stored, false);
+            let cd = offset(&data, 0x02014b50);
+            if encrypted {
+                data[6] |= 1;
+                data[cd + 8] |= 1;
+            } else {
+                data[8..10].copy_from_slice(&99u16.to_le_bytes());
+                data[cd + 10..cd + 12].copy_from_slice(&99u16.to_le_bytes());
+            }
+            rejects(&data);
+        }
+    }
+    #[test]
+    fn checks_input_entry_count_and_declared_size_limits() {
+        let data = fixture(CompressionMethod::Stored, false);
+        let limits = small(&data);
+        assert!(ZipArchive::with_limits(&data, limits).is_ok());
+        for too_small in [
+            Limits {
+                input: limits.input - 1,
+                ..limits
+            },
+            Limits {
+                entries: 1,
+                ..limits
+            },
+            Limits {
+                total: 15,
+                ..limits
+            },
+            Limits { entry: 7, ..limits },
+        ] {
+            assert!(ZipArchive::with_limits(&data, too_small).is_err());
+        }
+        let mut archive = ZipArchive::with_limits(
+            &data,
+            Limits {
+                pickle: 7,
+                ..limits
+            },
+        )
+        .unwrap();
+        assert!(archive.read_pickle("archive/data.pkl").is_err());
+    }
+    #[test]
+    fn repeated_reads_use_cumulative_budget() {
+        let data = fixture(CompressionMethod::Deflated, false);
+        let mut archive = ZipArchive::with_limits(&data, small(&data)).unwrap();
+        assert_eq!(archive.read("archive/data/0").unwrap().len(), 8);
+        assert_eq!(archive.read("archive/data/0").unwrap().len(), 8);
+        assert!(archive.read("archive/data/0").is_err());
+    }
+    #[test]
+    fn rejects_declared_size_mismatch() {
+        for method in [CompressionMethod::Stored, CompressionMethod::Deflated] {
+            for size in [1, 9] {
+                let mut data = fixture(method, false);
+                let cd = offset(&data, 0x02014b50);
+                put32(&mut data, 22, size);
+                put32(&mut data, cd + 24, size);
+                rejects(&data);
+                if let Ok(mut archive) = ZipArchive::parse(&data) {
+                    assert!(archive.read_pickle("archive/data.pkl").is_err());
+                }
+            }
+        }
+    }
+    #[test]
+    fn bounded_reader_checks_actual_bytes_and_counter_overflow() {
+        let mut count = 0;
+        assert_eq!(
+            read_bounded(&mut &b"abcd"[..], 4, &mut count).unwrap(),
+            b"abcd"
         );
+        assert_eq!(count, 4);
+        assert!(read_bounded(&mut &b"abcde"[..], 4, &mut count).is_err());
+        let mut overflowing = u64::MAX;
+        assert!(read_bounded(&mut &b"a"[..], 1, &mut overflowing).is_err());
+        assert!(read_bounded(&mut &b""[..], 0, &mut 0).unwrap().is_empty());
     }
-
     #[test]
-    fn rejects_non_zip() {
-        assert!(ZipArchive::parse(b"not a zip file at all......").is_err());
-        assert!(ZipArchive::parse(b"").is_err());
+    fn file_input_is_bounded_before_reading() {
+        let path =
+            std::env::temp_dir().join(format!("vc-convert-zip-limit-{}.pth", std::process::id()));
+        std::fs::write(&path, b"abcd").unwrap();
+        let result = (
+            read_file_with_limit(&path, 4),
+            read_file_with_limit(&path, 3),
+        );
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(result.0.unwrap(), b"abcd");
+        assert!(result.1.is_err());
     }
 }

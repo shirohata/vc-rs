@@ -167,7 +167,7 @@ fn is_contiguous(shape: &[usize], stride: &[usize]) -> bool {
 }
 
 /// Handle a persistent id: `("storage", storage_type, key, location, numel)`.
-pub(crate) fn persistent_load(pid: &Value, resolver: &StorageResolver<'_>) -> Result<Value> {
+pub(crate) fn persistent_load(pid: &Value, resolver: &mut StorageResolver<'_>) -> Result<Value> {
     let items = match pid {
         Value::Tuple(items) => items.as_ref(),
         other => bail!("unsupported persistent id of type {}", other.type_name()),

@@ -129,8 +129,7 @@ pub fn convert_pth_file(
     progress: &mut dyn FnMut(ProgressStage),
 ) -> Result<PathBuf> {
     progress(ProgressStage::ReadArchive);
-    let bytes =
-        std::fs::read(input).with_context(|| format!("failed to read {}", input.display()))?;
+    let bytes = zip::read_pth_file(input)?;
 
     let conversion = pth_to_onnx(&bytes, options, progress)?;
 

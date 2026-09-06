@@ -136,7 +136,9 @@ impl Value {
 /// Resolves a persistent-id storage key (e.g. `"0"`) to raw bytes. Returns
 /// owned bytes: the payload is immediately re-encoded into a typed vector by
 /// `torch::widen_storage`, so borrowing wouldn't save the copy that matters.
-pub(crate) type StorageResolver<'a> = dyn Fn(&str) -> Result<Vec<u8>> + 'a;
+/// Mutable access lets the ZIP reader seek and enforce a cumulative read budget
+/// across repeated storage references without locks or interior mutability.
+pub(crate) type StorageResolver<'a> = dyn FnMut(&str) -> Result<Vec<u8>> + 'a;
 
 pub(crate) struct Unpickler<'a> {
     data: &'a [u8],
@@ -144,11 +146,11 @@ pub(crate) struct Unpickler<'a> {
     stack: Vec<Value>,
     marks: Vec<usize>,
     memo: Vec<Value>,
-    storage_resolver: &'a StorageResolver<'a>,
+    storage_resolver: &'a mut StorageResolver<'a>,
 }
 
 impl<'a> Unpickler<'a> {
-    pub fn new(data: &'a [u8], storage_resolver: &'a StorageResolver<'a>) -> Self {
+    pub fn new(data: &'a [u8], storage_resolver: &'a mut StorageResolver<'a>) -> Self {
         Unpickler {
             data,
             pos: 0,
@@ -613,8 +615,8 @@ mod tests {
     use crate::tensor::TensorData;
 
     fn load(bytes: &[u8]) -> Result<Value> {
-        let resolver = |key: &str| Err(anyhow!("no storage in test: {key}"));
-        Unpickler::new(bytes, &resolver).load()
+        let mut resolver = |key: &str| Err(anyhow!("no storage in test: {key}"));
+        Unpickler::new(bytes, &mut resolver).load()
     }
 
     #[test]
@@ -731,11 +733,11 @@ mod tests {
             .iter()
             .flat_map(|f| f.to_le_bytes())
             .collect();
-        let resolver = |key: &str| {
+        let mut resolver = |key: &str| {
             assert_eq!(key, "0");
             Ok(payload.clone())
         };
-        let value = Unpickler::new(&s, &resolver).load().unwrap();
+        let value = Unpickler::new(&s, &mut resolver).load().unwrap();
         let Value::Tensor(tensor) = value else {
             panic!("expected tensor, got {}", value.type_name());
         };
