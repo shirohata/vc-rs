@@ -104,11 +104,23 @@ pub fn run_realtime(args: RunArgs) -> Result<()> {
         }
         if last_log.elapsed() >= Duration::from_secs(1) {
             last_log = Instant::now();
+            let content_delay_ms = metrics
+                .content_delay_samples
+                .filter(|_| status.output_sample_rate > 0)
+                .map(|samples| {
+                    format!(
+                        "{:.3}",
+                        samples as f64 * 1000.0 / status.output_sample_rate as f64
+                    )
+                })
+                .unwrap_or_else(|| "unknown".to_string());
             info!(
-                "state={:?} chunks={} infer={}us input_rms={:.8} output_rms={:.8} input_overruns={} output_underruns={} output_dropped_samples={} output_buffer_samples={}",
+                "state={:?} chunks={} infer={}us processing={}us content_delay_ms={} (nominal; excludes devices, queues and chunk accumulation) input_rms={:.8} output_rms={:.8} input_overruns={} output_underruns={} output_dropped_samples={} output_buffer_samples={}",
                 status.state,
                 metrics.chunks,
                 metrics.inference_us,
+                metrics.processing_us,
+                content_delay_ms,
                 metrics.input_rms,
                 metrics.output_rms,
                 metrics.input_overruns,

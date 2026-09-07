@@ -545,6 +545,7 @@ impl RvcPipeline {
                 rnd_channels,
                 stream_params,
                 config.sample_rate,
+                chunk_timing.input_chunk_samples,
             )?,
             chunk_timing,
             input_sample_rate: config.sample_rate,
@@ -1044,6 +1045,7 @@ impl RvcPipeline {
                 rnd_channels,
                 stream_params,
                 config.sample_rate,
+                chunk_timing.input_chunk_samples,
             )?,
             chunk_timing,
             input_sample_rate: config.sample_rate,
@@ -1163,6 +1165,7 @@ impl RvcPipeline {
             self.rnd_channels,
             self.stream_params,
             self.input_sample_rate,
+            self.chunk_timing.input_chunk_samples,
         )?;
         #[cfg(feature = "gtcrn")]
         if let Some(mut gtcrn) = gtcrn {

@@ -6,10 +6,17 @@ use anyhow::{anyhow, Result};
 use rubato::audioadapter_buffers::direct::SequentialSlice;
 use rubato::{Fft, FixedSync, Resampler, WindowFunction};
 
+// Explicit paths also let the CPU bench compile these private adapters from
+// their source module without exposing their fixed-hop API to library users.
+#[path = "dsp/fixed_hop.rs"]
+mod fixed_hop;
+#[path = "dsp/input_resample.rs"]
 mod input_resample;
+#[path = "dsp/output_resample.rs"]
 mod output_resample;
 pub(crate) use input_resample::FixedInputResampler;
 pub(crate) use output_resample::OutputResampler;
+pub use output_resample::ResampleMonoScratch;
 
 const STREAM_RESAMPLE_CHUNK: usize = 480;
 const STREAM_RESAMPLE_COMPACT_THRESHOLD: usize = STREAM_RESAMPLE_CHUNK * 8;
@@ -367,14 +374,28 @@ pub struct StreamingResampleMono {
 
 impl StreamingResampleMono {
     pub fn new(from_hz: usize, to_hz: usize) -> Result<Self> {
+        Self::build(from_hz, to_hz, FixedSync::Input)
+    }
+
+    // Only FixedInputResampler selects this, after validating its lifetime hop.
+    // Both uses the same 480 hint, single sub-chunk and window, so the actual
+    // FFT/filter stay identical. At 44.1k -> 16k this feeds the 882-frame FFT
+    // directly instead of first waiting for 480-frame batches. Keep the public
+    // constructor's buffering contract unchanged for denoisers/passthrough.
+    fn for_fixed_hop(from_hz: usize, to_hz: usize) -> Result<Self> {
+        Self::build(from_hz, to_hz, FixedSync::Both)
+    }
+
+    fn build(from_hz: usize, to_hz: usize, fixed: FixedSync) -> Result<Self> {
         if from_hz == 0 || to_hz == 0 {
             return Err(anyhow!("resampler sample rates must be positive"));
         }
         let resampler = if from_hz == to_hz {
             None
         } else {
-            // Keep this filter and single sub-chunk aligned with resample_mono;
-            // changing them requires checking waveforms and startup trimming.
+            // Preserve this path's historical filter and single sub-chunk.
+            // Input/Both equivalence depends on keeping all three settings;
+            // changing the hint, split count or window needs waveform checks.
             Some(Fft::<f32>::new_custom(
                 from_hz,
                 to_hz,
@@ -382,7 +403,7 @@ impl StreamingResampleMono {
                 1,
                 1,
                 WindowFunction::BlackmanHarris2,
-                FixedSync::Input,
+                fixed,
             )?)
         };
         let discard_output = resampler

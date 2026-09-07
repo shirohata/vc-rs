@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
@@ -21,6 +21,11 @@ pub struct ChunkOutputConfig {
 pub struct ChunkStats {
     pub silent: bool,
     pub inference_time: Duration,
+    /// Worker time including model processing, joining and output resampling.
+    pub processing_time: Duration,
+    /// Nominal retained content in output samples, excluding chunk accumulation,
+    /// device/queue latency and inference wall time. None until initialized.
+    pub content_delay_samples: Option<usize>,
     pub input_rms: f32,
     pub output_rms: f32,
     pub model_output_samples: usize,
@@ -137,13 +142,14 @@ impl<M: VoiceModel> ChunkConverter<M> {
         input_sample_rate: u32,
         out: &mut Vec<f32>,
     ) -> Result<ChunkStats> {
+        let started = Instant::now();
         let meta = self.model.process(
             input,
             input_sample_rate,
             &mut self.model_audio,
             &mut self.model_pitchf,
         )?;
-        let stats = chunk_stats(&meta, self.model_audio.len());
+        let mut stats = chunk_stats(&meta, self.model_audio.len());
         let model_sample_rate = meta.sample_rate;
         let output_chunk_samples = self.output.output_chunk_samples;
         self.ensure_smoother(model_sample_rate)?;
@@ -155,6 +161,8 @@ impl<M: VoiceModel> ChunkConverter<M> {
             .as_mut()
             .expect("resampler set above")
             .process_fixed(smoother.output(), output_chunk_samples, out)?;
+        stats.content_delay_samples = Some(self.output_content_delay_samples());
+        stats.processing_time = started.elapsed();
         Ok(stats)
     }
 
@@ -162,16 +170,19 @@ impl<M: VoiceModel> ChunkConverter<M> {
     /// emits no audio. WAV conversion uses this for its historical silent
     /// preroll; realtime paths deliberately start from their first real chunk.
     pub fn prime(&mut self, input: &[f32], input_sample_rate: u32) -> Result<ChunkStats> {
+        let started = Instant::now();
         let meta = self.model.process(
             input,
             input_sample_rate,
             &mut self.model_audio,
             &mut self.model_pitchf,
         )?;
-        let stats = chunk_stats(&meta, self.model_audio.len());
+        let mut stats = chunk_stats(&meta, self.model_audio.len());
         self.ensure_smoother(meta.sample_rate)?;
         let smoother = &mut self.smoother.as_mut().expect("smoother set above").1;
         smoother.prime_model_output(&self.model_audio, &self.model_pitchf);
+        stats.content_delay_samples = Some(self.output_content_delay_samples());
+        stats.processing_time = started.elapsed();
         Ok(stats)
     }
 
@@ -189,10 +200,11 @@ impl<M: VoiceModel> ChunkConverter<M> {
                 sola_search_ms: self.output.sola_search_ms,
                 tail_discard_ms: self.output.tail_discard_ms,
             });
-            let resampler = OutputResampler::new(
+            let resampler = OutputResampler::new_fixed(
                 model_sample_rate as usize,
                 self.output.output_sample_rate as usize,
                 smoother.chunk_samples(),
+                self.output.output_chunk_samples,
             )?;
             self.smoother = Some((model_sample_rate, smoother));
             self.output_resampler = Some(resampler);
@@ -205,6 +217,8 @@ fn chunk_stats(meta: &ModelOutput, model_output_samples: usize) -> ChunkStats {
     ChunkStats {
         silent: meta.silent,
         inference_time: meta.inference_time,
+        processing_time: Duration::ZERO,
+        content_delay_samples: None,
         input_rms: meta.input_rms,
         output_rms: meta.output_rms,
         // This is the length immediately before smoothing, not the pipeline's
@@ -311,6 +325,11 @@ mod tests {
         assert_eq!(out.len(), 4);
         assert!(stats.silent);
         assert_eq!(stats.inference_time, Duration::from_micros(123));
+        assert!(stats.processing_time > Duration::ZERO);
+        assert_eq!(
+            stats.content_delay_samples,
+            Some(converter.output_content_delay_samples())
+        );
         assert_eq!(stats.input_rms, 0.25);
         assert_eq!(stats.output_rms, 0.75);
         assert_eq!(stats.model_output_samples, 8);

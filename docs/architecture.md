@@ -224,8 +224,8 @@ played.
 Rubato can emit samples in bursts whose sizes differ from the logical RVC hop.
 `dsp::FixedInputResampler` buffers that continuous output and supplies exactly the
 validated 16 kHz increment to `RvcStreamState` on every call. Its FIFO starts
-with one declared delay that covers filter startup and incomplete FFT/input
-blocks across every batch phase. It then retains all excess output for later
+with one declared delay calculated from the loaded hop, covering filter startup
+and incomplete FFT/input blocks across every reachable batch phase. It retains all excess output for later
 hops; it never truncates a burst or inserts fresh silence to conceal an underrun.
 An underrun is an error in the timing contract. Equal rates bypass resampling
 and add no resampler delay.
@@ -243,6 +243,37 @@ the filter timeline and can create audible seams.
 startup-delay removal. It remains appropriate for isolated buffers such as the
 RMS reference; the committed converted output uses the persistent adapter owned
 by `ChunkConverter`.
+
+The fixed-hop adapters keep the same FFT size, window and filter coefficients as
+before. `dsp::fixed_hop` computes the smallest safe FIFO preload from the full
+batch/FFT phase cycle. With input batch B, FFT input/output F/O, hop H/K, and
+trimmed filter delay D, raw production after n calls is
+`E(n) = floor(floor(n*H/B)*B/F)*O`. The required preload is
+`D + max(n*K - E(n))` over `lcm(B,F)/gcd(H,lcm(B,F))` calls. A first-call-only
+estimate fails for the generic Input mode at 44.1 kHz; its 30 ms hops have a
+160-call cycle. Equal-rate
+adapters still have zero delay. Fixed adapters reject any changed input or output
+hop before consuming samples, even if the new hops have equal durations. The
+generic append/finite adapter retains its conservative, arbitrary-length bound.
+At 48 kHz input / 16 kHz model input, valid 10 ms-grid hops now retain 80 samples
+(5 ms), instead of the former 400 (25 ms).
+
+The fixed model-input adapter now selects `FixedSync::Both` with the same 480
+hint, one sub-chunk and `BlackmanHarris2` window. This preserves the actual FFT
+and filter, while feeding their natural block directly: 44.1 kHz -> 16 kHz uses
+882 -> 320 frames rather than an extra 480-frame batching stage. A 200 ms hop
+there retains 160 output samples (10 ms), down from 480 (30 ms) with the former
+fixed-hop Input adapter. The 48 kHz hold remains 5 ms. Do not globally switch
+`StreamingResampleMono::new`: its Input-mode contract is still used by generic
+denoiser and passthrough adapters. Stream rate/hop changes rebuild the fixed-hop
+resampler and all model histories together; `ContentDelay` propagates its new
+retention through WAV trimming and host latency reporting.
+
+RMS references use `dsp::ResampleMonoScratch` owned by `RvcStreamState`. It reuses
+FFT plans and allocated storage but resets the filter/FIFO for each independent
+window, preserving finite trim/drain behavior. These reference windows overlap:
+carrying signal history across calls would duplicate content and change the
+gain envelope. Only committed joined output uses a continuous filter timeline.
 
 ### Generator time state (`rnd` noise, NSF phase, `nsf_noise`)
 
@@ -374,6 +405,13 @@ discard; with crossfade disabled only tail discard remains. SOLA/PSOLA can
 advance the selected content within the search window, so this hold is a
 nominal bound rather than an exact source-time mapping for every chunk.
 An unprimed smoother's first silent output hop is separate startup behavior.
+`ChunkStats::processing_time` includes the model, join and output resampler;
+the standalone telemetry additionally times live updates and resume resets on
+the worker. The legacy inference time remains the model pipeline's existing
+measurement. `content_delay_samples` is optional until the converter initializes,
+and is unknown on standalone passthrough (whose variable-burst adapter does not
+declare a fixed content delay). CLI/GUI present this nominal content hold
+separately from processing time: neither is a measured device-to-device latency.
 VST3 initially reports a buffering estimate and, after the converter's first
 successful chunk determines the model rate and resampler delays, reports one
 input hop plus the shared converter's content delay. The callback only relays

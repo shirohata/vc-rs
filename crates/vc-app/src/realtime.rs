@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle, Thread};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Result};
 use rtrb::RingBuffer;
@@ -361,6 +361,10 @@ pub struct DeviceList {
 pub struct TelemetrySnapshot {
     pub chunks: u64,
     pub inference_us: u64,
+    pub processing_us: u64,
+    /// Nominal content hold in output samples; not device-to-device latency.
+    /// None before the first RVC chunk and while passthrough is active.
+    pub content_delay_samples: Option<u64>,
     pub input_rms: f32,
     pub output_rms: f32,
     pub input_overruns: u64,
@@ -373,6 +377,10 @@ pub struct TelemetrySnapshot {
 struct Telemetry {
     chunks: AtomicU64,
     inference_us: AtomicU64,
+    processing_us: AtomicU64,
+    // Zero encodes unknown; sample count + 1 encodes a known value, including
+    // zero. One atomic avoids racing a validity flag against the sample count.
+    content_delay_encoded: AtomicU64,
     input_rms_bits: AtomicU32,
     output_rms_bits: AtomicU32,
     input_overruns: AtomicU64,
@@ -385,6 +393,8 @@ impl Telemetry {
     fn reset(&self) {
         self.chunks.store(0, Ordering::Relaxed);
         self.inference_us.store(0, Ordering::Relaxed);
+        self.processing_us.store(0, Ordering::Relaxed);
+        self.content_delay_encoded.store(0, Ordering::Relaxed);
         self.input_rms_bits.store(0, Ordering::Relaxed);
         self.output_rms_bits.store(0, Ordering::Relaxed);
         self.input_overruns.store(0, Ordering::Relaxed);
@@ -397,6 +407,11 @@ impl Telemetry {
         TelemetrySnapshot {
             chunks: self.chunks.load(Ordering::Relaxed),
             inference_us: self.inference_us.load(Ordering::Relaxed),
+            processing_us: self.processing_us.load(Ordering::Relaxed),
+            content_delay_samples: self
+                .content_delay_encoded
+                .load(Ordering::Relaxed)
+                .checked_sub(1),
             input_rms: f32::from_bits(self.input_rms_bits.load(Ordering::Relaxed)),
             output_rms: f32::from_bits(self.output_rms_bits.load(Ordering::Relaxed)),
             input_overruns: self.input_overruns.load(Ordering::Relaxed),
@@ -787,6 +802,7 @@ impl PassthroughProcessor {
         live: &LiveParams,
         prepared: &mut Vec<f32>,
     ) -> Result<ChunkStats> {
+        let started = Instant::now();
         self.update_live_denoiser(live);
         self.input_scratch.clear();
         self.input_scratch.extend(
@@ -815,11 +831,14 @@ impl PassthroughProcessor {
                 *sample = (*sample * output_gain).clamp(-1.0, 1.0);
             }
         }
+        let output_rms = dsp::rms(prepared);
         Ok(ChunkStats {
             silent: false,
             inference_time: Duration::ZERO,
+            processing_time: started.elapsed(),
+            content_delay_samples: None,
             input_rms,
-            output_rms: dsp::rms(prepared),
+            output_rms,
             model_output_samples: prepared.len(),
         })
     }
@@ -1131,6 +1150,7 @@ impl RealtimeSession {
                                 samples.extend_from_slice(&input_acc[..input_chunk]);
                             }
                         }
+                        let process_start = Instant::now();
                         let stats = model.process_chunk(
                             &input_acc[..input_chunk],
                             input_rate,
@@ -1138,6 +1158,7 @@ impl RealtimeSession {
                             passthrough_live.load(Ordering::Relaxed),
                             &mut prepared,
                         );
+                        let processing_time = process_start.elapsed();
                         input_acc.clear();
                         let stats = match stats {
                             Ok(stats) => stats,
@@ -1158,6 +1179,15 @@ impl RealtimeSession {
                         worker_telemetry
                             .inference_us
                             .store(stats.inference_time.as_micros() as u64, Ordering::Relaxed);
+                        worker_telemetry
+                            .processing_us
+                            .store(processing_time.as_micros() as u64, Ordering::Relaxed);
+                        worker_telemetry.content_delay_encoded.store(
+                            stats
+                                .content_delay_samples
+                                .map_or(0, |samples| (samples as u64).saturating_add(1)),
+                            Ordering::Relaxed,
+                        );
                         worker_telemetry
                             .input_rms_bits
                             .store(stats.input_rms.to_bits(), Ordering::Relaxed);
@@ -1261,9 +1291,11 @@ impl Drop for RealtimeSession {
 }
 
 fn should_queue_silent_output(buffered: usize, output_chunk: usize) -> bool {
-    // Keep at most one generated-silence chunk queued. Filling the output ring
-    // during quiet periods delays or drops the first converted speech when
-    // input resumes.
+    // Only append silence when at most one chunk is already queued; appending
+    // may bring the ring to two chunks. Skip this newly generated chunk above
+    // the threshold, rather than removing samples already queued for playback.
+    // This drains excess output backlog during quiet periods, but does not
+    // reset or advance the upstream resampler/model/smoother signal histories.
     buffered <= output_chunk
 }
 
@@ -1365,6 +1397,27 @@ pub fn write_wav_mono(path: &Path, samples: &[f32], sample_rate: u32) -> Result<
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn telemetry_distinguishes_unknown_and_zero_content_delay_and_resets() {
+        let telemetry = super::Telemetry::default();
+        assert_eq!(telemetry.snapshot().content_delay_samples, None);
+        telemetry
+            .content_delay_encoded
+            .store(1, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(telemetry.snapshot().content_delay_samples, Some(0));
+        telemetry
+            .content_delay_encoded
+            .store(5377, std::sync::atomic::Ordering::Relaxed);
+        telemetry
+            .processing_us
+            .store(12345, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(telemetry.snapshot().content_delay_samples, Some(5376));
+        assert_eq!(telemetry.snapshot().processing_us, 12345);
+        telemetry.reset();
+        assert_eq!(telemetry.snapshot().content_delay_samples, None);
+        assert_eq!(telemetry.snapshot().processing_us, 0);
+    }
+
     use super::*;
 
     #[test]

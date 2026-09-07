@@ -80,3 +80,7 @@ divan = "0.1"
 [[bench]]
 name = "pipeline"
 harness = false
+
+[[bench]]
+name = "fixed_resample"
+harness = false

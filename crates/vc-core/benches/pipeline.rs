@@ -125,6 +125,33 @@ mod dsp_bench {
         });
     }
 
+    // Keep a same-window baseline beside the warmed scratch benchmark so FFT
+    // planning/allocation savings are not confounded by different input sizes.
+    #[divan::bench(args = [32_000, 40_000, 48_000])]
+    fn one_shot_rms_reference(bencher: Bencher, to: usize) {
+        let input = synthetic_signal(16_000 * 307 / 1000, 16_000);
+        bencher.bench_local(|| {
+            black_box(dsp::resample_mono(black_box(&input), 16_000, to).unwrap());
+        });
+    }
+
+    // 200 ms committed audio plus 85/12/10 ms joining allowance, matching the
+    // independent RMS reference window. AllocProfiler must report zero warmed
+    // allocations; signal state is reset each time, FFT plans are retained.
+    #[divan::bench(args = [32_000, 40_000, 48_000])]
+    fn reusable_rms_reference(bencher: Bencher, to: usize) {
+        let input = synthetic_signal(16_000 * 307 / 1000, 16_000);
+        let mut scratch = dsp::ResampleMonoScratch::default();
+        let mut out = Vec::new();
+        scratch.process_into(&input, 16_000, to, &mut out).unwrap();
+        bencher.bench_local(|| {
+            scratch
+                .process_into(black_box(&input), 16_000, to, &mut out)
+                .unwrap();
+            black_box(&out);
+        });
+    }
+
     // SOLA offset search: normalized cross-correlation over a crossfade-sized
     // reference against a candidate with the search window appended. Sizes are
     // the CLI defaults at 48 kHz (85 ms crossfade, 12 ms search).
@@ -341,17 +368,23 @@ mod model_free_pipeline_bench {
         audio: Vec<f32>,
         pitchf: Vec<f32>,
         output_rms: f32,
+        sample_rate: u32,
     }
 
     impl MockVoiceModel {
         fn new(output_samples: usize) -> Self {
-            let audio = synthetic_signal(output_samples, 48_000);
-            let pitchf = vec![220.0f32; (output_samples / 480).max(1)];
+            Self::at_rate(output_samples, 48_000)
+        }
+
+        fn at_rate(output_samples: usize, sample_rate: u32) -> Self {
+            let audio = synthetic_signal(output_samples, sample_rate);
+            let pitchf = vec![220.0f32; (output_samples / (sample_rate as usize / 100)).max(1)];
             let output_rms = dsp::rms(&audio);
             Self {
                 audio,
                 pitchf,
                 output_rms,
+                sample_rate,
             }
         }
     }
@@ -374,7 +407,7 @@ mod model_free_pipeline_bench {
             // measures the shared chunk conversion and join boundary without
             // charging ContentVec/RMVPE/RVC generator execution or model loads.
             Ok(ModelOutput {
-                sample_rate: 48_000,
+                sample_rate: self.sample_rate,
                 inference_time: Duration::ZERO,
                 embedder_time: Duration::ZERO,
                 pitch_time: Duration::ZERO,
@@ -408,6 +441,34 @@ mod model_free_pipeline_bench {
 
     fn model_output_samples_for(output_chunk_samples: usize) -> usize {
         output_chunk_samples + dsp::chunk_samples_for_rate(48_000, 85 + 12 + 10)
+    }
+
+    // Main latency comparison: 200 ms chunks with identical generated model
+    // samples across revisions. This includes joining, output resampling and
+    // ChunkStats bookkeeping, but excludes RVC preprocessing and all inference.
+    #[divan::bench(args = [
+        (32_000, 44_100), (32_000, 48_000),
+        (40_000, 44_100), (40_000, 48_000),
+        (48_000, 44_100), (48_000, 48_000),
+    ])]
+    fn fixed_200ms_conversion(bencher: Bencher, (model_rate, output_rate): (u32, u32)) {
+        let input = synthetic_signal(9600, 48_000);
+        let model = MockVoiceModel::at_rate(model_rate as usize * 307 / 1000, model_rate);
+        let mut config = output_config(SmoothingKind::Sola, output_rate as usize / 5);
+        config.output_sample_rate = output_rate;
+        let mut converter = ChunkConverter::new(model, config);
+        let mut output = Vec::new();
+        for _ in 0..200 {
+            converter
+                .process_chunk(&input, 48_000, &mut output)
+                .unwrap();
+        }
+        bencher.bench_local(|| {
+            let stats = converter
+                .process_chunk(black_box(&input), 48_000, &mut output)
+                .unwrap();
+            black_box((stats, &output));
+        });
     }
 
     // Integrated model-free chunk path: fake model output -> ChunkConverter ->

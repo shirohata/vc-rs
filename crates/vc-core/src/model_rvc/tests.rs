@@ -360,15 +360,15 @@ fn stream_state_derives_out_size_from_extra_convert_size() {
 fn stream_state_zero_pads_initial_buffer() {
     let mut state = RvcStreamState::new(48_000, None, None);
     let out = state
-        .generate_input(&[1.0, 2.0, 3.0, 4.0], 48_000, 0, 0, 4_096)
+        .generate_input(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], 48_000, 0, 0, 4_096)
         .unwrap();
     assert_eq!(state.audio_buffer.len(), out.convert_size);
-    assert!(state.audio_buffer[..state.audio_buffer.len() - 4]
+    assert!(state.audio_buffer[..state.audio_buffer.len() - 6]
         .iter()
         .all(|x| *x == 0.0));
     assert_eq!(
-        &state.audio_buffer[state.audio_buffer.len() - 4..],
-        &[1.0, 2.0, 3.0, 4.0]
+        &state.audio_buffer[state.audio_buffer.len() - 6..],
+        &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
     );
 }
 

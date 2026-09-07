@@ -921,6 +921,16 @@ impl eframe::App for VcGui {
             ui.separator();
             ui.heading("Telemetry");
             egui::Grid::new("telemetry").show(ui, |ui| {
+                let processing = format!("{:.1} ms", telemetry.processing_us as f64 / 1000.0);
+                let color = (status.state == EngineState::Running)
+                    .then(|| self.applied_chunk_ms.and_then(|ms| inference_color(telemetry.processing_us, ms)))
+                    .flatten();
+                if let Some(color) = color {
+                    colored_metric(ui, "Processing (total)", processing, color);
+                } else {
+                    metric(ui, "Processing (total)", processing);
+                }
+                metric(ui, "Content delay (nominal)", format_content_delay(telemetry.content_delay_samples, status.output_sample_rate));
                 let inference_ms = telemetry.inference_us.saturating_add(500) / 1_000;
                 let inference_color = (status.state == EngineState::Running)
                     .then(|| {
@@ -948,8 +958,18 @@ impl eframe::App for VcGui {
                     telemetry.output_buffer_samples,
                 );
             });
+            ui.small("Content delay excludes devices, queues, chunk accumulation and processing time.");
         });
         ui.ctx().request_repaint_after(Duration::from_millis(33));
+    }
+}
+
+fn format_content_delay(samples: Option<u64>, output_rate: u32) -> String {
+    match (samples, output_rate) {
+        (Some(samples), rate) if rate > 0 => {
+            format!("{:.2} ms", samples as f64 * 1000.0 / rate as f64)
+        }
+        _ => "Unknown".to_string(),
     }
 }
 
@@ -1309,6 +1329,15 @@ fn default_provider_name() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn content_delay_display_keeps_unknown_distinct_from_zero() {
+        assert_eq!(format_content_delay(None, 48_000), "Unknown");
+        assert_eq!(format_content_delay(Some(240), 0), "Unknown");
+        assert_eq!(format_content_delay(Some(0), 48_000), "0.00 ms");
+        assert_eq!(format_content_delay(Some(240), 48_000), "5.00 ms");
+        assert_eq!(format_content_delay(Some(1323), 44_100), "30.00 ms");
+    }
 
     #[test]
     fn settings_toml_ignores_unknown_fields() {

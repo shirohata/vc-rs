@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, ensure, Result};
 
 use crate::dsp;
 
@@ -30,7 +30,7 @@ impl RvcStreamState {
     /// model's input for every denoiser mode. Callers pass `input_sample_rate =
     /// EMBEDDER_SAMPLE_RATE`.
     pub(super) fn output_reference_audio<'a>(
-        &'a self,
+        &'a mut self,
         input_sample_rate: u32,
         output_sample_rate: u32,
         output_samples: usize,
@@ -61,12 +61,12 @@ impl RvcStreamState {
         if input_sample_rate == output_sample_rate {
             scratch.extend_from_slice(input_tail);
         } else {
-            let reference = dsp::resample_mono(
+            self.reference_resampler.process_into(
                 input_tail,
                 input_sample_rate as usize,
                 output_sample_rate as usize,
+                scratch,
             )?;
-            scratch.extend_from_slice(&reference);
         }
         keep_tail_in_place(scratch, output_samples);
         left_pad_to_len_in_place(scratch, output_samples);
@@ -98,6 +98,8 @@ pub(super) struct RvcStreamState {
     /// the device/input rate. Sizes `out_size` and the RVC-domain conversions.
     pub(super) rvc_sample_rate: u32,
     pub(super) resampler_16k: Option<dsp::FixedInputResampler>,
+    input_hop: usize,
+    reference_resampler: dsp::ResampleMonoScratch,
     // Backend-neutral CPU time state (latent `rnd` noise; Step 2 adds NSF
     // phase / nsf_noise). Rolled in lockstep with `pitchf_buffer` so per-frame
     // noise tracks the same absolute feature window. Inert when the model has no
@@ -130,6 +132,8 @@ impl RvcStreamState {
             sample_rate: 0,
             rvc_sample_rate,
             resampler_16k: None,
+            input_hop: 0,
+            reference_resampler: dsp::ResampleMonoScratch::default(),
             time_state: RvcTimeState::new(rnd_channels, stream),
             #[cfg(feature = "gtcrn")]
             gtcrn: None,
@@ -141,9 +145,10 @@ impl RvcStreamState {
         rnd_channels: Option<usize>,
         stream: Option<StreamParams>,
         input_sample_rate: u32,
+        input_hop: usize,
     ) -> Result<Self> {
         let mut state = Self::new(rvc_sample_rate, rnd_channels, stream);
-        state.configure_input_rate(input_sample_rate)?;
+        state.configure_input_rate(input_sample_rate, input_hop)?;
         Ok(state)
     }
 
@@ -154,16 +159,26 @@ impl RvcStreamState {
         delay
     }
 
-    fn configure_input_rate(&mut self, sample_rate: u32) -> Result<()> {
-        let resampler =
-            dsp::FixedInputResampler::new(sample_rate as usize, EMBEDDER_SAMPLE_RATE as usize)?;
+    fn configure_input_rate(&mut self, sample_rate: u32, input_hop: usize) -> Result<()> {
+        ensure!(sample_rate > 0, "input sample rate must be positive");
+        let output_hop = usize::try_from(
+            input_hop as u128 * EMBEDDER_SAMPLE_RATE as u128 / sample_rate as u128,
+        )?;
+        let resampler = dsp::FixedInputResampler::new(
+            sample_rate as usize,
+            EMBEDDER_SAMPLE_RATE as usize,
+            input_hop,
+            output_hop,
+        )?;
         self.audio_buffer.clear();
         self.audio_16k_buffer.clear();
         self.pitchf_buffer.clear();
         self.prev_vol = 0.0;
         self.prev_silence = false;
         self.sample_rate = sample_rate;
+        self.input_hop = input_hop;
         self.resampler_16k = Some(resampler);
+        self.reference_resampler = dsp::ResampleMonoScratch::default();
         // A new input timeline must reset waveform, F0, random/phase histories
         // and denoiser caches together. Production changes rebuild the pipeline
         // so fixed profiles and device-rate denoising also use the new rate.
@@ -184,8 +199,14 @@ impl RvcStreamState {
         extra_convert_samples: usize,
     ) -> Result<RvcStreamInput> {
         if self.sample_rate != sample_rate {
-            self.configure_input_rate(sample_rate)?;
+            self.configure_input_rate(sample_rate, new_audio.len())?;
         }
+        // Check before appending waveform or advancing pitch/noise histories.
+        // Public RvcPipeline also validates its loaded rate and 10 ms grid.
+        ensure!(
+            new_audio.len() == self.input_hop,
+            "RVC stream hop changed; rebuild the stream"
+        );
 
         // RvcPipeline validates a fixed whole-10-ms hop before reaching this
         // worker-only helper. Consequently this division is exact and the
@@ -327,7 +348,7 @@ mod timeline_tests {
 
     #[test]
     fn waveform_pitch_and_generator_noise_advance_together_at_44100_hz() {
-        for chunk_ms in [20, 30, 100, 500] {
+        for chunk_ms in [20, 30, 100, 200, 600] {
             let chunk_samples = 44_100 * chunk_ms / 1000;
             let hop = 16_000 * chunk_ms / 1000;
             let advance_frames = hop / 160;
@@ -339,10 +360,24 @@ mod timeline_tests {
                     sample_rate: 48_000,
                 }),
                 44_100,
+                chunk_samples,
             )
             .unwrap();
             let mut reference_resampler = dsp::StreamingResampleMono::new(44_100, 16_000).unwrap();
             let mut reference = vec![0.0; state.input_content_delay_16k()];
+            // Independently resample the complete signal using the unchanged
+            // generic Input mode. Its per-call buffering is longer than the
+            // fixed-hop Both path, so produce the reference before inspecting
+            // rolling windows. EOF zeros supply only the final filter support.
+            let reference_input: Vec<f32> = (0..100 * chunk_samples)
+                .map(|i| ((i as f64 * 0.037).sin() * 0.4) as f32)
+                .collect();
+            reference_resampler
+                .process_into(&reference_input, &mut reference)
+                .unwrap();
+            reference_resampler
+                .process_into(&vec![0.0; 2 * chunk_samples], &mut reference)
+                .unwrap();
             let mut previous_audio = Vec::new();
             let mut previous_pitch = Vec::new();
             let mut previous_rnd = Vec::new();
@@ -352,9 +387,6 @@ mod timeline_tests {
                 for (i, sample) in input.iter_mut().enumerate() {
                     *sample = (((call * chunk_samples + i) as f64 * 0.037).sin() * 0.4) as f32;
                 }
-                reference_resampler
-                    .process_into(&input, &mut reference)
-                    .unwrap();
                 let result = state
                     .generate_input(&input, 44_100, 960, 0, 24_000)
                     .unwrap();

@@ -898,7 +898,7 @@ mod tests {
     }
 
     #[test]
-    fn wav_defaults_to_cpu_provider() {
+    fn wav_defaults_to_build_provider() {
         let cli = Cli::try_parse_from([
             "vc-rs",
             "wav",
@@ -918,7 +918,9 @@ mod tests {
             panic!("expected wav command");
         };
 
-        assert_eq!(args.provider, Provider::Cpu);
+        // Single-provider packages (including TensorRT) use their compiled
+        // backend; the combined developer build falls back to CPU.
+        assert_eq!(args.provider, default_provider());
     }
 
     #[test]

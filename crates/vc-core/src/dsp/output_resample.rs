@@ -4,6 +4,8 @@ use anyhow::{ensure, Result};
 use rubato::audioadapter_buffers::direct::SequentialSlice;
 use rubato::{Fft, FixedSync, Resampler, WindowFunction};
 
+use super::fixed_hop::FixedHop;
+
 /// Worker-side model-output resampling. Only committed, non-overlapping joined
 /// samples belong here: feeding each candidate's search/crossfade margin again
 /// would repeat audio and corrupt the filter timeline.
@@ -20,10 +22,30 @@ pub(crate) struct OutputResampler {
     total_input: u64,
     total_taken: u64,
     finished: bool,
+    fixed_hop: Option<FixedHop>,
 }
 
 impl OutputResampler {
     pub(crate) fn new(from_hz: usize, to_hz: usize, max_input_chunk: usize) -> Result<Self> {
+        Self::build(from_hz, to_hz, max_input_chunk, None)
+    }
+
+    pub(crate) fn new_fixed(
+        from_hz: usize,
+        to_hz: usize,
+        input_hop: usize,
+        output_hop: usize,
+    ) -> Result<Self> {
+        let hop = FixedHop::new(from_hz, to_hz, input_hop, output_hop)?;
+        Self::build(from_hz, to_hz, input_hop, Some(hop))
+    }
+
+    fn build(
+        from_hz: usize,
+        to_hz: usize,
+        max_input_chunk: usize,
+        fixed_hop: Option<FixedHop>,
+    ) -> Result<Self> {
         ensure!(
             from_hz > 0 && to_hz > 0,
             "output sample rates must be positive"
@@ -52,7 +74,17 @@ impl OutputResampler {
         // guarantees fixed-duration reads forever, not just for the first hop:
         // (D+O) + floor(N/B)*O - D >= N*to/from. Never conceal a later deficit
         // with fresh zeros; it indicates a broken hop-duration contract.
-        let delay_samples = discard_output + output_block_samples;
+        // The generic append/finish adapter keeps its conservative bound. Only
+        // lifetime-fixed reads may use the smaller phase-specific preload.
+        let delay_samples = match (fixed_hop, resampler.as_ref()) {
+            (Some(hop), Some(fft)) => hop.delay(
+                input_block_samples,
+                fft.fft_size_in(),
+                fft.fft_size_out(),
+                discard_output,
+            )?,
+            _ => discard_output + output_block_samples,
+        };
         let max_output_chunk =
             (max_input_chunk as u128 * to_hz as u128).div_ceil(from_hz as u128) as usize;
         let mut fifo =
@@ -71,6 +103,7 @@ impl OutputResampler {
             total_input: 0,
             total_taken: 0,
             finished: false,
+            fixed_hop,
         })
     }
 
@@ -86,6 +119,9 @@ impl OutputResampler {
         output_samples: usize,
         out: &mut Vec<f32>,
     ) -> Result<()> {
+        if let Some(hop) = self.fixed_hop {
+            hop.validate(input.len(), output_samples)?;
+        }
         ensure!(
             input.len() as u128 * self.to_hz as u128
                 == output_samples as u128 * self.from_hz as u128,
@@ -97,6 +133,9 @@ impl OutputResampler {
 
     pub(crate) fn append(&mut self, mut input: &[f32]) -> Result<()> {
         ensure!(!self.finished, "output resampler is already finished");
+        if let Some(hop) = self.fixed_hop {
+            hop.validate(input.len(), hop.output)?;
+        }
         self.total_input += input.len() as u64;
         if self.resampler.is_none() {
             self.fifo.extend(input.iter().copied());
@@ -171,6 +210,68 @@ impl OutputResampler {
         self.take(remaining, out)?;
         self.fifo.clear();
         self.finished = true;
+        Ok(())
+    }
+
+    /// Restart an isolated finite window without rebuilding FFT plans/scratch.
+    /// RMS references overlap across calls: carrying filter state between them
+    /// would process repeated content as new audio and alter the gain envelope.
+    fn reset(&mut self) {
+        if let Some(fft) = self.resampler.as_mut() {
+            fft.reset();
+        }
+        self.input_block.clear();
+        self.fifo.clear();
+        self.fifo.resize(self.delay_samples, 0.0);
+        self.discard_output = self.resampler.as_ref().map_or(0, |r| r.output_delay());
+        self.total_input = 0;
+        self.total_taken = 0;
+        self.finished = false;
+    }
+}
+
+/// Reusable worker-side scratch for *independent*, possibly overlapping finite
+/// windows. Same filter/EOF semantics as `resample_mono`; equal-rate calls copy.
+/// This must not replace the persistent resampler of committed output audio.
+#[derive(Default)]
+pub struct ResampleMonoScratch {
+    resampler: Option<OutputResampler>,
+}
+
+impl ResampleMonoScratch {
+    pub fn process_into(
+        &mut self,
+        input: &[f32],
+        from_hz: usize,
+        to_hz: usize,
+        out: &mut Vec<f32>,
+    ) -> Result<()> {
+        ensure!(
+            from_hz > 0 && to_hz > 0,
+            "resampler sample rates must be positive"
+        );
+        out.clear();
+        if input.is_empty() {
+            return Ok(());
+        }
+        if from_hz == to_hz {
+            out.extend_from_slice(input);
+            return Ok(());
+        }
+        if !self
+            .resampler
+            .as_ref()
+            .is_some_and(|r| r.from_hz == from_hz && r.to_hz == to_hz)
+        {
+            self.resampler = Some(OutputResampler::new(from_hz, to_hz, input.len())?);
+        }
+        let resampler = self.resampler.as_mut().expect("resampler initialized");
+        resampler.reset();
+        resampler.append(input)?;
+        resampler.finish(out)?;
+        let delay = resampler.delay_samples();
+        out.copy_within(delay.., 0);
+        out.truncate(out.len() - delay);
         Ok(())
     }
 }
@@ -264,19 +365,30 @@ mod tests {
     #[test]
     fn output_stream_has_no_dc_seams_or_unbounded_fifo_at_supported_hops() {
         for (from, to) in [
+            (32_000, 44_100),
             (32_000, 48_000),
+            (40_000, 44_100),
             (40_000, 48_000),
             (48_000, 44_100),
+            (48_000, 48_000),
             (44_100, 48_000),
         ] {
-            for ms in [20, 100, 500, 2000] {
+            for ms in [20, 30, 100, 200, 600] {
                 let input_hop = from * ms / 1000;
                 let output_hop = to * ms / 1000;
-                let mut resampler = OutputResampler::new(from, to, input_hop).unwrap();
+                let mut resampler =
+                    OutputResampler::new_fixed(from, to, input_hop, output_hop).unwrap();
                 let capacity = resampler.fifo.capacity();
                 let input = vec![0.25; input_hop];
                 let mut out = Vec::new();
-                for index in 0..40 {
+                let period = resampler.resampler.as_ref().map_or(1, |fft| {
+                    resampler
+                        .fixed_hop
+                        .unwrap()
+                        .phase_period(resampler.input_block_samples, fft.fft_size_in())
+                        .unwrap()
+                });
+                for index in 0..(2 * period + 10) {
                     resampler
                         .process_fixed(&input, output_hop, &mut out)
                         .unwrap();
@@ -307,5 +419,123 @@ mod tests {
         resampler.append(&[4.0, 5.0]).unwrap();
         resampler.finish(&mut out).unwrap();
         assert_eq!(out, [4.0, 5.0]);
+    }
+
+    #[test]
+    fn fixed_output_preserves_waveform_and_tail_at_every_phase() {
+        for from in [32_000, 40_000, 48_000] {
+            for to in [44_100, 48_000] {
+                for ms in [20, 30, 100, 200, 600] {
+                    let ih = from * ms / 1000;
+                    let oh = to * ms / 1000;
+                    let mut fixed = OutputResampler::new_fixed(from, to, ih, oh).unwrap();
+                    let period = fixed.resampler.as_ref().map_or(1, |fft| {
+                        fixed
+                            .fixed_hop
+                            .unwrap()
+                            .phase_period(fixed.input_block_samples, fft.fft_size_in())
+                            .unwrap()
+                    });
+                    let mut signal: Vec<f32> = (0..ih * (2 * period + 3))
+                        .map(|i| ((i as f64 * 0.071).sin() * 0.2) as f32)
+                        .collect();
+                    signal[0] = 1.0;
+                    *signal.last_mut().unwrap() = 0.9;
+                    let expected = if from == to {
+                        signal.clone()
+                    } else {
+                        continuous_block_reference(&signal, from, to)
+                    };
+                    let mut actual = Vec::new();
+                    let mut out = Vec::new();
+                    let mut max_deficit = 0;
+                    for chunk in signal.chunks_exact(ih) {
+                        fixed.process_fixed(chunk, oh, &mut out).unwrap();
+                        actual.extend_from_slice(&out);
+                        let produced =
+                            fixed.total_taken as usize + fixed.fifo.len() - fixed.delay_samples();
+                        max_deficit =
+                            max_deficit.max((fixed.total_taken as usize).saturating_sub(produced));
+                    }
+                    assert_eq!(
+                        fixed.delay_samples(),
+                        max_deficit,
+                        "minimal preload {from}->{to} / {ms}"
+                    );
+                    fixed.finish(&mut out).unwrap();
+                    actual.extend_from_slice(&out);
+                    assert_eq!(
+                        &actual[fixed.delay_samples()..],
+                        expected,
+                        "{from}->{to} / {ms}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fixed_output_rejects_equal_duration_hop_changes_before_mutation() {
+        for (from, to) in [(40_000, 48_000), (48_000, 48_000)] {
+            let ih = from / 5;
+            let oh = to / 5;
+            let mut used = OutputResampler::new_fixed(from, to, ih, oh).unwrap();
+            let mut fresh = OutputResampler::new_fixed(from, to, ih, oh).unwrap();
+            let mut actual = vec![7.0];
+            assert!(used
+                .process_fixed(&vec![1.0; ih / 2], oh / 2, &mut actual)
+                .is_err());
+            assert!(used.append(&vec![1.0; ih / 2]).is_err());
+            assert_eq!(actual, [7.0]);
+            assert_eq!(used.total_input, 0);
+            let mut expected = Vec::new();
+            used.process_fixed(&vec![0.2; ih], oh, &mut actual).unwrap();
+            fresh
+                .process_fixed(&vec![0.2; ih], oh, &mut expected)
+                .unwrap();
+            assert_eq!(actual, expected);
+            used.reset();
+            fresh.reset();
+            used.process_fixed(&vec![0.3; ih], oh, &mut actual).unwrap();
+            fresh
+                .process_fixed(&vec![0.3; ih], oh, &mut expected)
+                .unwrap();
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn finite_scratch_matches_independent_windows_and_keeps_fft_storage() {
+        let mut scratch = ResampleMonoScratch::default();
+        let mut out = Vec::new();
+        for (from, to) in [
+            (16_000, 32_000),
+            (16_000, 40_000),
+            (16_000, 48_000),
+            (48_000, 44_100),
+        ] {
+            for len in [1, 7, 1023, 1024, 1025, 4912, 0, 3] {
+                let signal: Vec<f32> = (0..len).map(|i| ((i as f32 * 0.17).sin()) * 0.3).collect();
+                let expected = if len == 0 {
+                    Vec::new()
+                } else {
+                    continuous_block_reference(&signal, from, to)
+                };
+                scratch.process_into(&signal, from, to, &mut out).unwrap();
+                assert_eq!(out.len(), expected.len());
+                assert!(out.iter().zip(expected).all(|(a, b)| (a - b).abs() < 1e-6));
+                if len > 0 {
+                    let r = scratch.resampler.as_ref().unwrap();
+                    let storage = (r.input_block.as_ptr(), r.output_scratch.as_ptr());
+                    scratch.process_into(&signal, from, to, &mut out).unwrap();
+                    let r = scratch.resampler.as_ref().unwrap();
+                    assert_eq!(storage, (r.input_block.as_ptr(), r.output_scratch.as_ptr()));
+                }
+            }
+        }
+        scratch
+            .process_into(&[0.3, 0.7], 48_000, 48_000, &mut out)
+            .unwrap();
+        assert_eq!(out, [0.3, 0.7]);
     }
 }
