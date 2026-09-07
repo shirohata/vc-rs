@@ -2,7 +2,7 @@ use std::{
     env,
     ffi::CString,
     os::raw::{c_char, c_int},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 unsafe extern "C" {
@@ -45,7 +45,7 @@ enum Mode {
     },
 }
 
-fn cstring_path(path: &PathBuf, label: &str) -> CString {
+fn cstring_path(path: &Path, label: &str) -> CString {
     match CString::new(path.to_string_lossy().as_bytes()) {
         Ok(path) => path,
         Err(_) => {

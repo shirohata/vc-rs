@@ -1,7 +1,8 @@
 # Build environment setup (Windows)
 
-Only the **CUDA 13 / TensorRT 11** line is supported. Run scripts from the repo
-root with `pwsh`.
+The recommended GPU baseline is **CUDA 13.3 Update 1 / TensorRT 11.2.1**.
+Automatic discovery stays on the CUDA 13 / TensorRT 11 line. Run scripts from
+the repo root with `pwsh`.
 
 ## First-time setup
 
@@ -10,15 +11,18 @@ root with `pwsh`.
    workload; needed because the `cc` crate compiles the native TensorRT shim).
    Idempotent. CMake is intentionally NOT required. Use `-Force` to repair.
 
-2. **Login-gated NVIDIA SDKs (manual)** — not scriptable here; downloading
-   requires an NVIDIA Developer login and EULA acceptance, so do this yourself.
-   - CUDA Toolkit **v13.2** — https://developer.nvidia.com/cuda-toolkit-archive
-   - cuDNN **v9.x** — https://developer.nvidia.com/cudnn-downloads
-     (older builds: https://developer.nvidia.com/cudnn-archive)
-   - TensorRT **11** — https://developer.nvidia.com/tensorrt
-     (downloads: https://developer.nvidia.com/tensorrt-download). Extract under
-     `external\nvidia\`; `crates/vc-core/build.rs` auto-discovers the newest
-     `TensorRT-*` folder there.
+2. **NVIDIA SDKs** — install CUDA Toolkit **13.3 Update 1** from
+   https://developer.nvidia.com/cuda-13-3-1-download-archive. Download the
+   **TensorRT 11.2.1 Windows amd64, cuda-13.3 ZIP** from
+   https://developer.nvidia.com/tensorrt/download (NVIDIA Developer login required).
+   Extract under `external\nvidia\`; a direct SDK root or one wrapping
+   `TensorRT-*` directory is supported. Python wheels are not needed for this
+   project's native C++ backend. Keep older installs when rollback is needed.
+   See NVIDIA's [prerequisites](https://docs.nvidia.com/deeplearning/tensorrt/latest/installing-tensorrt/prerequisites.html).
+
+   cuDNN **9.x** is optional for native TensorRT; the separate ORT CUDA backend
+   may need it. Obtain it from https://developer.nvidia.com/cudnn-downloads
+   (older builds: https://developer.nvidia.com/cudnn-archive).
 
 ## Per shell session
 
@@ -27,9 +31,40 @@ root with `pwsh`.
 ```
 
 Dot-source it (not a child shell) so the env applies to your session. It puts
-the matched CUDA/cuDNN/TensorRT on PATH and sets `CUDA_PATH`, `TENSORRT_ROOT`,
-`ORT_CUDA_VERSION`. Auto-discovers paths; override with `-CudaPath` /
-`-TensorRtRoot` / `-CuDnnBin`.
+the matched CUDA/cuDNN/TensorRT on PATH and sets `CUDA_PATH`, `CUDA_HOME`,
+`TENSORRT_ROOT`, and `ORT_CUDA_VERSION`. Selection precedence is explicit
+`-TensorRtRoot` / `-CudaPath`, then environment variables, then discovery.
+An environment CUDA path from a different major is ignored. `-CuDnnBin` remains
+an optional override.
+
+Both Rust build scripts share SDK discovery; activation and packaging share the
+PowerShell resolver. They compare all four numeric version components from
+`NvInferVersion.h` (including the `TRT_*_ENTERPRISE` aliases), require complete
+headers/import libraries/runtime DLLs, and auto-select only TensorRT 11.x.
+An invalid explicit SDK fails instead of silently selecting another install.
+The selected full version is printed during activation/build/packaging.
+
+When upgrading, explicitly select the new SDK and CUDA once if your shell still
+has the old `TENSORRT_ROOT` or `CUDA_PATH`. For example, with the extracted SDK
+root assigned to `$sdkRoot`:
+
+```powershell
+. scripts/activate.ps1 -TensorRtRoot $sdkRoot -CudaPath 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3'
+```
+
+Native caches are stored under `native-trt-<major.minor.patch.build>` inside the
+existing cache root. An SDK upgrade rebuilds engines and timing caches on first
+use; later starts reuse them. Old caches are retained for rollback and remain
+visible to the existing cache inspection/clear commands. Windows ML TensorRT RTX
+cache paths are unchanged. Rebuild the app/plugin **and** builder helper for each
+SDK; copying only new runtime DLLs into an old build is not an upgrade workflow.
+
+SDK-selection regression tests need no GPU or SDK:
+
+```powershell
+pwsh -File scripts/test-tensorrt-sdk.ps1
+cargo test -p vc-core --test tensorrt_sdk --no-default-features
+```
 
 ## Optional: ASIO audio backend (`--features asio`)
 

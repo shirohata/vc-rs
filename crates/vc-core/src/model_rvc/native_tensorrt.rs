@@ -637,8 +637,24 @@ fn native_gtcrn_profile(
 
 fn native_engine_path(profile: &TensorRtSessionProfile) -> Result<PathBuf> {
     Ok(profile
-        .cache_dir_from_root(&tensor_rt_cache_root()?)?
+        .cache_dir_from_root(&native_cache_root()?)?
         .join("native.engine"))
+}
+
+// Serialized engines are not interchangeable between TensorRT minor/build
+// versions. Keep this native-only namespace above the existing device/model/
+// shape hierarchy: Windows ML's TensorRT RTX cache must retain its own layout.
+// The numeric build metadata avoids loading GPU DLLs merely to show cache status.
+// Old unversioned caches stay available for rollback and the cache-management UI.
+fn native_cache_root_for_version(root: &Path, version: &str) -> PathBuf {
+    root.join(format!("native-trt-{version}"))
+}
+
+fn native_cache_root() -> Result<PathBuf> {
+    Ok(native_cache_root_for_version(
+        &tensor_rt_cache_root()?,
+        option_env!("VC_RS_TENSORRT_VERSION").unwrap_or("unavailable"),
+    ))
 }
 
 pub(super) fn native_engine_is_cached(profile: &TensorRtSessionProfile) -> bool {
@@ -712,8 +728,9 @@ fn build_engine(
     // Persistent timing cache shared by every engine build (all model roles and
     // shapes), so high builder optimization levels reuse measured tactic timings
     // instead of re-timing from scratch on each cache miss. Lives at the cache
-    // root; TensorRT validates its header and ignores an incompatible blob.
-    let timing_cache = tensor_rt_cache_root()?
+    // versioned native root, so upgrading does not overwrite the old SDK's
+    // timings. TensorRT still validates GPU compatibility within each version.
+    let timing_cache = native_cache_root()?
         .join(format!("device-{gpu_device_id}"))
         .join("timing.cache");
     if let Some(parent) = timing_cache.parent() {
@@ -1461,5 +1478,50 @@ mod tests {
             candidates.first(),
             Some(&module_dir.join("vc-tensorrt-builder.exe"))
         );
+    }
+}
+
+#[cfg(test)]
+mod cache_version_tests {
+    use super::*;
+
+    #[test]
+    fn sdk_upgrade_does_not_reuse_or_overwrite_previous_engines() {
+        let root = std::env::temp_dir().join(format!(
+            "vc-rs-native-cache-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let profile = TensorRtSessionProfile::single_input(ModelRole::ContentVec, "audio", 24_000)
+            .with_model_cache_key("model")
+            .with_gpu_device_id(2);
+        let path_for = |version: &str| {
+            profile
+                .cache_dir_from_root(&native_cache_root_for_version(&root, version))
+                .unwrap()
+                .join("native.engine")
+        };
+        let legacy = profile
+            .cache_dir_from_root(&root)
+            .unwrap()
+            .join("native.engine");
+        let old = path_for("11.1.0.106");
+        let new = path_for("11.2.1.2");
+        for path in [&legacy, &old] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"old engine").unwrap();
+        }
+        assert!(!new.exists(), "an SDK upgrade must be a cache miss");
+        std::fs::create_dir_all(new.parent().unwrap()).unwrap();
+        std::fs::write(&new, b"new engine").unwrap();
+        assert!(path_for("11.2.1.2").metadata().unwrap().len() > 0);
+        assert!(!path_for("11.2.1.3").exists(), "build numbers matter too");
+        for path in [&legacy, &old] {
+            assert_eq!(std::fs::read(path).unwrap(), b"old engine");
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

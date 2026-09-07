@@ -8,7 +8,7 @@
     rely on (CUDA_PATH, TENSORRT_ROOT, ORT_CUDA_VERSION).
 
     The pieces are version-coupled, mirroring crates/vc-core/build.rs:
-    TensorRT 11 <-> CUDA 13 (cuDNN bin\13.2). Components are auto-discovered;
+    TensorRT 11.2.1 / CUDA 13.3 Update 1 is the recommended baseline. Components are auto-discovered;
     override any of them with -CudaPath / -TensorRtRoot / -CuDnnBin.
 
     Supersedes tmp/env.ps1 (which hardcoded paths and used a $use12 toggle).
@@ -29,7 +29,8 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 
-# Fixed CUDA 13 / TensorRT 11 line (CUDA 12 / TensorRT 10 support was dropped).
+. (Join-Path $PSScriptRoot "tensorrt-sdk.ps1")
+
 $CudaMajor = 13
 $trtMajor = 11
 
@@ -42,16 +43,6 @@ function Add-PathFirst([string]$Dir) {
     # Avoid piling up duplicates on repeated activation in the same session.
     $parts = $env:PATH -split ';' | Where-Object { $_ -and $_ -ne $resolved }
     $env:PATH = (@($resolved) + $parts) -join ';'
-}
-
-# --- Discover the CUDA Toolkit ($CudaMajor.x, newest minor) ------------------
-function Find-CudaToolkit([int]$Major) {
-    $base = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA"
-    if (-not (Test-Path $base)) { return $null }
-    Get-ChildItem $base -Directory |
-        Where-Object { $_.Name -match "^v$Major\.(\d+)$" } |
-        Sort-Object { [int]($_.Name -replace "^v$Major\.", '') } -Descending |
-        Select-Object -First 1 -ExpandProperty FullName
 }
 
 # --- Discover cuDNN bin matching the CUDA toolkit's major.minor --------------
@@ -68,43 +59,22 @@ function Find-CuDnnBin([string]$CudaToolkit) {
         Select-Object -First 1
 }
 
-# --- Discover the TensorRT root with nvinfer_<trtMajor> ----------------------
-# Mirrors build.rs: a candidate is a dir holding include/ and lib/nvinfer_<N>.lib;
-# the install may be the dir itself or a nested TensorRT-* subdir.
-function Find-TensorRtRoot([int]$Major) {
-    $candidates = @()
-    $searchRoots = @(
-        (Join-Path $repoRoot 'external\nvidia'),
-        (Join-Path $repoRoot 'external'),
-        $repoRoot
-    ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -Unique
-
-    foreach ($searchRoot in $searchRoots) {
-        foreach ($dir in (Get-ChildItem $searchRoot -Directory | Where-Object { $_.Name -match '(?i)tensorrt' })) {
-            $candidates += $dir.FullName
-            $candidates += (Get-ChildItem $dir.FullName -Directory -ErrorAction SilentlyContinue |
-                Where-Object { $_.Name -match '(?i)^tensorrt-' } | Select-Object -ExpandProperty FullName)
-        }
-    }
-    foreach ($root in $candidates) {
-        if ((Test-Path (Join-Path $root "include")) -and
-            (Test-Path (Join-Path $root "lib\nvinfer_$Major.lib"))) {
-            return $root
-        }
-    }
-    return $null
+# Explicit parameters win over environment variables, then full-version discovery.
+$sdk = Resolve-TensorRtSdk -RepoRoot $repoRoot -ExplicitRoot $TensorRtRoot
+if ($sdk) {
+    $TensorRtRoot = $sdk.Root
+    $trtMajor = $sdk.Version.Major
+    $CudaMajor = Get-TensorRtCudaMajor $trtMajor
 }
-
-# --- Resolve (explicit override wins over discovery) ------------------------
-if (-not $CudaPath)     { $CudaPath     = Find-CudaToolkit $CudaMajor }
-if (-not $TensorRtRoot) { $TensorRtRoot = Find-TensorRtRoot $trtMajor }
-if (-not $CuDnnBin)     { $CuDnnBin     = Find-CuDnnBin $CudaPath }
+$CudaPath = Resolve-TensorRtCudaRoot -Major $CudaMajor -ExplicitRoot $CudaPath
+if (-not $CuDnnBin) { $CuDnnBin = Find-CuDnnBin $CudaPath }
 
 Write-Host "== Activating vc-rs env: CUDA $CudaMajor / TensorRT $trtMajor ==" -ForegroundColor Cyan
 
 # --- CUDA -------------------------------------------------------------------
 if ($CudaPath) {
     $env:CUDA_PATH = $CudaPath
+    $env:CUDA_HOME = $CudaPath
     $env:ORT_CUDA_VERSION = "$CudaMajor"
     Add-PathFirst (Join-Path $CudaPath "bin")
     # CUDA 13 split native DLLs into bin\x64; harmless to add when absent.
@@ -119,7 +89,7 @@ if ($CuDnnBin) {
     Add-PathFirst $CuDnnBin
     Write-Host "[cudnn]    $CuDnnBin" -ForegroundColor Green
 } else {
-    Write-Warning "cuDNN bin for CUDA $CudaMajor not found."
+    Write-Host "[cudnn]    not found for this toolkit (optional for native TensorRT)"
 }
 
 # --- TensorRT ---------------------------------------------------------------
@@ -127,7 +97,7 @@ if ($TensorRtRoot) {
     $env:TENSORRT_ROOT = $TensorRtRoot
     Add-PathFirst (Join-Path $TensorRtRoot "bin")
     Add-PathFirst (Join-Path $TensorRtRoot "lib")
-    Write-Host "[tensorrt] $TensorRtRoot" -ForegroundColor Green
+    Write-Host "[tensorrt] $($sdk.Version) ($TensorRtRoot)" -ForegroundColor Green
 } else {
     Write-Warning "TensorRT $trtMajor root not found under $repoRoot\external\nvidia."
 }

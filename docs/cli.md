@@ -208,7 +208,11 @@ For detailed performance characteristics see
 
 Engines built by TensorRT (tensorrt package) and by Windows ML TensorRT-RTX
 (`windowsml-nvtrtx`) are stored under `%LOCALAPPDATA%\vc-rs\tensorrt-cache` and
-shared by both backends (override the location with `VC_RS_TENSORRT_CACHE_DIR`).
+share that root (override the location with `VC_RS_TENSORRT_CACHE_DIR`). Native
+TensorRT uses a `native-trt-<major.minor.patch.build>` subdirectory so SDK upgrades
+rebuild engines and timings once without reusing incompatible caches. Old SDK
+caches remain available for rollback. Windows ML TensorRT-RTX keeps its existing
+cache layout.
 Inspect the location/size and clear the cache from the CLI:
 
 ```powershell

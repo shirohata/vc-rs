@@ -139,12 +139,12 @@ Write-Host ""
 Write-Host "== winget-scope prerequisites done ==" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "Still required (login-gated, not handled here):" -ForegroundColor Magenta
-Write-Host "  - CUDA Toolkit  (v12.9 for TensorRT 10 / v13.2 for TensorRT 11)"
+Write-Host "  - CUDA Toolkit  (v13.3 Update 1 for TensorRT 11.2.1)"
 Write-Host "  - cuDNN v9.x"
 Write-Host "  - TensorRT      (extract under external\nvidia; build.rs auto-discovers it)"
 Write-Host ""
 Write-Host "Then, per shell session:" -ForegroundColor Magenta
-Write-Host "  . .\tmp\env.ps1          # put CUDA/cuDNN/TensorRT bin on PATH"
+Write-Host "  . .\scripts\activate.ps1 # put CUDA/cuDNN/TensorRT bin on PATH"
 Write-Host "  .\download-models.ps1    # fetch reference ONNX models (optional)"
 Write-Host ""
 Write-Host "Note: open a NEW terminal so freshly installed tools are on PATH." -ForegroundColor DarkYellow

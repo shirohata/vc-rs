@@ -20,9 +20,9 @@
 
     Toolchain note: the tensorrt build compiles native code that needs the
     matching CUDA/TensorRT toolchain reachable (e.g. dot-source
-    scripts\activate.ps1 first). This script does not modify your environment;
-    set it up before running so the tensorrt (CUDA 13.x / TensorRT) build links
-    correctly.
+    scripts\activate.ps1 first). For TensorRT this script resolves the SDK before
+    building and sets matching environment variables and DLL paths for all
+    child processes.
 
 .PARAMETER Variant
     Which backend package to build: windowsml (default) or tensorrt.
@@ -134,6 +134,13 @@ $bundleFeatureArgs = switch ($Variant) {
     'tensorrt' { @('--no-default-features', '--features', 'tensorrt') }
 }
 
+# Pin one complete SDK for the main binaries, helper, and runtime collection.
+if ($Variant -eq 'tensorrt') {
+    . (Join-Path $repoRoot 'scripts\tensorrt-sdk.ps1')
+    $sdkSelection = Initialize-TensorRtPackageSdk -RepoRoot $repoRoot -TensorRtBin $TensorRtBin
+    $TensorRtBin = $sdkSelection.TensorRtBin
+}
+
 Push-Location $repoRoot
 try {
     # 1. Build the bundle into a CLEAN target\bundled. We wipe it first on every
@@ -196,6 +203,16 @@ try {
     $stagedBundle = Join-Path $staging $installBundleName
     Copy-Item -Path $rawVst3 -Destination $stagedBundle -Recurse -Force
 
+    # Windows VST3 hosts derive the module filename from the outer bundle name.
+    # Renaming only the directory produces an "Invalid Module" in Steinberg's
+    # validator, even when every TensorRT DLL is present beside the binary.
+    foreach ($archDir in (Get-ChildItem -LiteralPath (Join-Path $stagedBundle 'Contents') -Directory |
+            Where-Object { $_.Name -like '*-win' })) {
+        $rawModule = Join-Path $archDir.FullName 'vc-vst3.vst3'
+        if (-not (Test-Path -LiteralPath $rawModule -PathType Leaf)) { throw "Missing VST3 module: $rawModule" }
+        Rename-Item -LiteralPath $rawModule -NewName $installBundleName
+    }
+
     # 4. Populate the STAGED bundle with the variant's runtime DLLs + licenses,
     #    forwarding only the parameters the caller actually supplied. -BundleName
     #    points the populate script at the variant-named staged bundle instead of
@@ -210,6 +227,11 @@ try {
     }
     foreach ($name in $forwardable) {
         if ($PSBoundParameters.ContainsKey($name)) { $forward[$name] = $PSBoundParameters[$name] }
+    }
+    # Forward the resolved absolute paths, not the original relative overrides;
+    # Push-Location and helper subprocesses must see the exact SDK used to build.
+    if ($Variant -eq 'tensorrt') {
+        $forward['TensorRtBin'] = $sdkSelection.TensorRtBin
     }
     # BuilderExe may have been resolved above rather than passed in.
     if ($Variant -eq 'tensorrt' -and $BuilderExe -and -not $forward.ContainsKey('BuilderExe')) {

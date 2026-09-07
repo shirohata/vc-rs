@@ -2,7 +2,8 @@
 //!
 //! Both inference backends that build serialized GPU engines persist them under
 //! one root (`super::tensorrt::tensor_rt_cache_root`): the native TensorRT path
-//! writes `native.engine` files plus a shared `timing.cache`, and the Windows ML
+//! writes `native.engine` files plus a shared `timing.cache` inside a
+//! `native-trt-<major.minor.patch.build>` namespace, and the Windows ML
 //! `NvTensorRtRtx` (TensorRT-RTX) EP writes its runtime cache into the same
 //! per-model/per-shape sub-directories (see `sessions.rs`). These engines are
 //! rebuildable derived data — safe to delete; the next session just re-builds

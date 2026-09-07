@@ -102,6 +102,24 @@ In particular, verify:
 - The [`../CHANGELOG.md`](../CHANGELOG.md) has a finalized entry for the version
   being shipped (see [Versioning](#versioning)).
 
+## Native TensorRT SDK upgrades
+
+The recommended packaging baseline is TensorRT **11.2.1** with CUDA **13.3
+Update 1**. Activate that pair before packaging (see `scripts/README.md`). The
+package entrypoints resolve one complete SDK before building the app/plugin and
+builder helper; `-TensorRtBin` selects both build headers/libraries and staged
+DLLs. Explicit arguments override environment variables, which override numeric
+SDK discovery. Do not use `-SkipBuild`, an old `-BuilderExe`, or `-RuntimeOnly` for
+an SDK-upgrade verification: all binaries and builder resources must be rebuilt
+and staged from the selected SDK. Retain the old SDK separately for rollback.
+
+Versioned native caches rebuild on the first run after an SDK upgrade, so test
+both an empty cache and a second run reusing that cache. Test the staged package
+with SDK directories removed from PATH to detect missing runtime dependencies.
+Continue bundling every GPU builder resource and the licenses from the selected
+SDK/toolkit. Never include SDK headers, models, or local engine/timing caches in
+distributable archives. This upgrade does not update Windows ML's TensorRT RTX EP.
+
 ## Versioning
 
 The release version lives in exactly one place: `[workspace.package].version` in

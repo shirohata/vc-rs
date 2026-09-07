@@ -87,65 +87,7 @@ function Find-LicenseText([string]$root) {
         Select-Object -First 1
 }
 
-# Detect the TensorRT major version (10, 11, ...) from nvinfer_<N>.dll in a bin dir.
-function Get-NvinferMajor([string]$binDir) {
-    if (-not (Test-Path $binDir)) { return $null }
-    $dll = Get-ChildItem -Path $binDir -Filter 'nvinfer_*.dll' -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -match '^nvinfer_(\d+)\.dll$' } |
-        Sort-Object { [int]($_.Name -replace '^nvinfer_(\d+)\.dll$', '$1') } -Descending |
-        Select-Object -First 1
-    if (-not $dll) { return $null }
-    return [int]($dll.Name -replace '^nvinfer_(\d+)\.dll$', '$1')
-}
-
-# Newest TensorRT bin (highest nvinfer_<N>.dll) under external\nvidia. A
-# TensorRT folder is either the install root itself or wraps a single
-# TensorRT-* subdir. The repo root remains as a fallback for older local trees.
-function Find-NewestTensorRtBin([string]$root) {
-    $best = $null; $bestMajor = -1
-    $searchRoots = @(
-        (Join-Path $root 'external\nvidia'),
-        (Join-Path $root 'external'),
-        $root
-    ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -Unique
-
-    foreach ($searchRoot in $searchRoots) {
-        foreach ($dir in (Get-ChildItem -Path $searchRoot -Directory -ErrorAction SilentlyContinue |
-                Where-Object { $_.Name -match 'TensorRT' })) {
-            $candidates = @($dir.FullName)
-            $candidates += (Get-ChildItem -Path $dir.FullName -Directory -ErrorAction SilentlyContinue |
-                Where-Object { $_.Name -like 'TensorRT-*' } | ForEach-Object { $_.FullName })
-            foreach ($c in $candidates) {
-                $major = Get-NvinferMajor (Join-Path $c 'bin')
-                if ($null -ne $major -and $major -gt $bestMajor) {
-                    $bestMajor = $major; $best = (Join-Path $c 'bin')
-                }
-            }
-        }
-    }
-    return $best
-}
-
-# Parse the major from a CUDA toolkit dir named like v13.2.
-function Get-CudaDirMajor([string]$path) {
-    if ((Split-Path $path -Leaf) -match '^[vV](\d+)\.(\d+)$') { return [int]$Matches[1] }
-    return $null
-}
-
-# CUDA bin matching $cudaMajor: %CUDA_PATH% when its major matches, else the
-# newest matching toolkit under the standard install directory.
-function Find-CudaBin([int]$cudaMajor) {
-    if ($env:CUDA_PATH -and (Get-CudaDirMajor $env:CUDA_PATH) -eq $cudaMajor) {
-        return (Join-Path $env:CUDA_PATH 'bin')
-    }
-    $base = 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA'
-    $dir = Get-ChildItem -Path $base -Directory -ErrorAction SilentlyContinue |
-        Where-Object { (Get-CudaDirMajor $_.FullName) -eq $cudaMajor } |
-        Sort-Object { [int]($_.Name -replace '^[vV]\d+\.(\d+)$', '$1') } -Descending |
-        Select-Object -First 1
-    if ($dir) { return (Join-Path $dir.FullName 'bin') }
-    return $null
-}
+. (Join-Path $repoRoot "scripts\tensorrt-sdk.ps1")
 
 if (-not $DestDir) { $DestDir = Join-Path $repoRoot 'target\release' }
 $DestDir = Resolve-Required $DestDir 'DestDir'
@@ -153,27 +95,11 @@ if (-not (Test-Path (Join-Path $DestDir 'vc-rs.exe'))) {
     throw "vc-rs.exe not found in $DestDir. Build it first: cargo build --release -p vc-cli --no-default-features --features tensorrt,rnnoise,gtcrn"
 }
 
-if (-not $TensorRtBin) {
-    $TensorRtBin = Find-NewestTensorRtBin $repoRoot
-    if (-not $TensorRtBin) {
-        throw "No TensorRT install found under $repoRoot\external\nvidia. Set TENSORRT_ROOT or pass -TensorRtBin."
-    }
-}
-$TensorRtBin = Resolve-Required $TensorRtBin 'TensorRtBin (set TENSORRT_ROOT or pass -TensorRtBin)'
-
-# TensorRT major drives every versioned DLL name; CUDA major is paired per
-# NVIDIA's support matrix (TRT10 -> CUDA12, TRT11 -> CUDA13).
-$major = Get-NvinferMajor $TensorRtBin
-if ($null -eq $major) { throw "Could not find nvinfer_<N>.dll in $TensorRtBin" }
-$cudaMajor = if ($major -eq 10) { 12 } elseif ($major -eq 11) { 13 } else { $major + 2 }
-
-if (-not $CudaBin) {
-    $CudaBin = Find-CudaBin $cudaMajor
-    if (-not $CudaBin) {
-        throw "No CUDA $cudaMajor.x toolkit found (needed for TensorRT $major). Set CUDA_PATH or pass -CudaBin."
-    }
-}
-$CudaBin = Resolve-Required $CudaBin 'CudaBin (set CUDA_PATH or pass -CudaBin)'
+$sdkSelection = Initialize-TensorRtPackageSdk -RepoRoot $repoRoot -TensorRtBin $TensorRtBin -CudaBin $CudaBin
+$TensorRtBin = $sdkSelection.TensorRtBin
+$CudaBin = $sdkSelection.CudaBin
+$major = $sdkSelection.Sdk.Version.Major
+$cudaMajor = Get-TensorRtCudaMajor $major
 
 # CUDA's local EULA is copied into the package. TensorRT's SDK distribution
 # terms are linked from THIRD-PARTY-NOTICES.md because NVIDIA's zip packages do
@@ -187,7 +113,7 @@ if (-not $cudaLic) { throw "CUDA license/EULA not found under $cudaRoot." }
 # <toolkit>\bin\x64; CUDA 12 keeps them directly in bin. Search both.
 $cudartDll = @($CudaBin, (Join-Path $CudaBin 'x64')) |
     Where-Object { Test-Path $_ } |
-    ForEach-Object { Get-ChildItem -Path $_ -Filter 'cudart64_*.dll' -ErrorAction SilentlyContinue } |
+    ForEach-Object { Get-ChildItem -Path $_ -Filter "cudart64_$cudaMajor.dll" -ErrorAction SilentlyContinue } |
     Select-Object -First 1
 if (-not $cudartDll) { throw "No cudart64_*.dll found under $CudaBin (checked .\ and .\x64)" }
 
@@ -223,6 +149,7 @@ $($candidates -join "`n")
     # Builder-resource DLLs. These are GPU-architecture specific and very large;
     # distribution packages bundle every SM tag for full GPU compatibility.
     $allResources = Get-ChildItem -Path $TensorRtBin -Filter "nvinfer_builder_resource_*_$major.dll"
+    if (-not $allResources) { throw "No TensorRT builder-resource DLLs found in $TensorRtBin." }
     $builderSources += $allResources.FullName
     $bytes = ($allResources | Measure-Object -Property Length -Sum).Sum
     Write-Host ("Bundling ALL builder-resource DLLs ({0:N1} GB) for full GPU compatibility." -f ($bytes / 1GB)) -ForegroundColor Cyan

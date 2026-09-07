@@ -1,7 +1,7 @@
 ## Build environment
 
 First-time setup (winget + NVIDIA SDKs): see `scripts/README.md`. The line is
-Windows, CUDA 13 / TensorRT 11. Day-to-day:
+Windows, CUDA 13.3 Update 1 / TensorRT 11.2.1. Day-to-day:
 - Per shell session, dot-source `. scripts/activate.ps1` before building/testing
   (puts CUDA/cuDNN/TensorRT on PATH; without it test exes fail to launch with
   `STATUS_DLL_NOT_FOUND`). To run tests without the GPU stack, set

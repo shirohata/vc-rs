@@ -99,7 +99,7 @@ Distribution packages build single-provider variants with `--no-default-features
 
 ## Build & test
 
-GPU build/run line is **CUDA 13 / TensorRT 11** (CUDA 12 / TRT 10 dropped). CPU
+GPU build/run baseline is **CUDA 13.3 Update 1 / TensorRT 11.2.1** (CUDA 12 / TRT 10 dropped). CPU
 or Windows-ML-only work needs none of the NVIDIA SDKs.
 
 The [`justfile`](justfile) is the preferred entry point — recipes wrap the long

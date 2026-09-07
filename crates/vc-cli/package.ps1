@@ -20,9 +20,9 @@
 
     Toolchain note: the tensorrt build compiles native code that needs the
     matching CUDA/TensorRT toolchain reachable (e.g. dot-source scripts\activate.ps1
-    first). This script does not modify your environment; set it up before running
-    so the tensorrt build links correctly. The windowsml build needs no GPU
-    toolchain.
+    first). For TensorRT this script resolves the SDK before building and sets
+    matching environment variables and DLL paths for all child processes.
+    The windowsml build needs no GPU toolchain.
 
 .PARAMETER Variant
     Which backend package to build: windowsml (default) or tensorrt.
@@ -150,6 +150,14 @@ $features = switch ($Variant) {
 if ($Asio) { $features += ',asio' }
 $buildFeatureArgs = @('--no-default-features', '--features', $features)
 
+# Pin one complete SDK for the main binaries, helper, and runtime collection.
+if ($Variant -eq 'tensorrt') {
+    . (Join-Path $repoRoot 'scripts\tensorrt-sdk.ps1')
+    $sdkSelection = Initialize-TensorRtPackageSdk -RepoRoot $repoRoot -TensorRtBin $TensorRtBin -CudaBin $CudaBin
+    $TensorRtBin = $sdkSelection.TensorRtBin
+    $CudaBin = $sdkSelection.CudaBin
+}
+
 Push-Location $repoRoot
 try {
     # 1. Build the GUI and CLI with the same provider feature set. Keeping this
@@ -209,6 +217,12 @@ try {
     }
     foreach ($name in $forwardable) {
         if ($PSBoundParameters.ContainsKey($name)) { $forward[$name] = $PSBoundParameters[$name] }
+    }
+    # Forward the resolved absolute paths, not the original relative overrides;
+    # Push-Location and helper subprocesses must see the exact SDK used to build.
+    if ($Variant -eq 'tensorrt') {
+        $forward['TensorRtBin'] = $sdkSelection.TensorRtBin
+        $forward['CudaBin'] = $sdkSelection.CudaBin
     }
     # BuilderExe may have been resolved above rather than passed in.
     if ($Variant -eq 'tensorrt' -and $BuilderExe -and -not $forward.ContainsKey('BuilderExe')) {

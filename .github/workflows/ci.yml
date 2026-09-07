@@ -65,6 +65,8 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: TensorRT SDK selection (synthetic fixtures, no NVIDIA SDK)
+        run: pwsh -File scripts/test-tensorrt-sdk.ps1
       - name: test (cpu feature)
         run: >
           cargo test
