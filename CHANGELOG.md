@@ -11,6 +11,43 @@ Version numbers come from `[workspace.package].version` in the root
 release archives. See [`docs/distribution.md`](docs/distribution.md) for the full
 versioning and publishing procedure.
 
+## [0.5.0] - 2026-09-07
+
+### Added
+
+- Built-in RVC PTH-to-ONNX conversion with GUI integration.
+- Support for rvc-onnx-web streaming exports, including NSF phase and noise
+  inputs, on native TensorRT and Windows ML TensorRT RTX.
+- Realtime worker stop causes in engine status and usable execution providers
+  from the live Windows ML catalog in provider pickers.
+
+### Changed
+
+- Windows ML packages now require Windows App SDK Runtime 2.1 or newer and use
+  ONNX Runtime API 24 through ort 2.0.0-rc.13.
+- Upgraded native TensorRT to 11.2.1 with CUDA 13.3 Update 1 and isolated native
+  caches by SDK version. Existing engines rebuild on first use after upgrading.
+- Consolidated provider abstraction in the shared core and updated dependencies.
+- Release publishing now requires the CI formatting and Clippy checks to pass.
+
+### Fixed
+
+- Corrected resampling timelines and preserved final WAV tails.
+- Corrected NSF phase carry across overlapping windows and kept RVC latent
+  noise on an absolute frame timeline.
+- Bounded PTH ZIP parsing with the zip crate and updated dependencies for
+  security fixes.
+- Deferred audio stream error logging away from the realtime callback.
+
+### Performance
+
+- Reduced fixed-hop resampler latency and reused RMS scratch buffers.
+
+### Distribution notes
+
+- Windows binaries are not code-signed; Windows may display a security warning
+  when downloading or running them.
+
 ## [0.4.0] - 2026-06-25
 
 ### Added
@@ -146,6 +183,7 @@ Initial release.
 - One-shot distribution packaging scripts for all four Windows x64 variants.
 - Auto-generated bundled third-party license notices during packaging.
 
+[0.5.0]: https://github.com/shirohata/vc-rs/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/shirohata/vc-rs/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/shirohata/vc-rs/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/shirohata/vc-rs/compare/v0.2.0...v0.2.1

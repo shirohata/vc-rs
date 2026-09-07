@@ -4,7 +4,7 @@ members = ["crates/vc-core", "crates/vc-app", "crates/vc-cli", "crates/vc-conver
 exclude = ["tools/tensorrt_builder", "tools/audio_compare"]
 
 [workspace.package]
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 license = "MIT"
 

@@ -3930,7 +3930,7 @@ checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 
 [[package]]
 name = "vc-app"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "approx",
@@ -3946,7 +3946,7 @@ dependencies = [
 
 [[package]]
 name = "vc-cli"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "approx",
@@ -3962,7 +3962,7 @@ dependencies = [
 
 [[package]]
 name = "vc-convert"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "zip",
@@ -3970,7 +3970,7 @@ dependencies = [
 
 [[package]]
 name = "vc-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "approx",
@@ -3989,7 +3989,7 @@ dependencies = [
 
 [[package]]
 name = "vc-gui"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "eframe",
  "egui",
@@ -4004,7 +4004,7 @@ dependencies = [
 
 [[package]]
 name = "vc-vst3"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "egui",
