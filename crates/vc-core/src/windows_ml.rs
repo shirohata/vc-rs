@@ -6,6 +6,8 @@
 //! a model/session drop path or from realtime audio code.
 
 use std::ffi::{c_char, c_void, CStr, CString};
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
+use std::path::PathBuf;
 use std::ptr;
 use std::sync::OnceLock;
 
@@ -65,6 +67,8 @@ struct WinMLEpInfoRaw {
 #[link(name = "kernel32")]
 extern "system" {
     fn LoadLibraryW(name: *const u16) -> Hmodule;
+    fn GetModuleHandleExW(flags: u32, address: *const u16, module: *mut Hmodule) -> i32;
+    fn GetModuleFileNameW(module: Hmodule, filename: *mut u16, size: u32) -> u32;
     fn GetProcAddress(module: Hmodule, name: *const c_char) -> Farproc;
     fn GetCurrentPackageFullName(
         package_full_name_length: *mut u32,
@@ -395,17 +399,52 @@ fn initialize() -> Result<BootstrapState, String> {
     initialize_inner().map_err(|err| format!("{err:#}"))
 }
 
+fn bundled_bootstrap_path() -> Result<PathBuf> {
+    // vc-core is linked into the EXE or VST3 DLL. current_exe() would locate
+    // the DAW, and AddDllDirectory does not affect ordinary LoadLibraryW unless
+    // the host opts into that search policy. Resolve our own module by address
+    // instead; never change the DAW's process-wide DLL policy to load Windows ML.
+    let mut module = ptr::null_mut();
+    let flags = 0x0000_0004 | 0x0000_0002; // FROM_ADDRESS | UNCHANGED_REFCOUNT
+    if unsafe {
+        GetModuleHandleExW(
+            flags,
+            bundled_bootstrap_path as *const () as *const u16,
+            &mut module,
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error()).context("failed to locate Windows ML module");
+    }
+    let mut buffer = vec![0u16; 260];
+    loop {
+        let len = unsafe { GetModuleFileNameW(module, buffer.as_mut_ptr(), buffer.len() as u32) };
+        if len == 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("failed to resolve Windows ML module path");
+        }
+        if (len as usize) < buffer.len() {
+            let mut path = PathBuf::from(std::ffi::OsString::from_wide(&buffer[..len as usize]));
+            path.set_file_name("Microsoft.WindowsAppRuntime.Bootstrap.dll");
+            return Ok(path);
+        }
+        buffer.resize(buffer.len() * 2, 0);
+    }
+}
+
 fn initialize_inner() -> Result<BootstrapState> {
     let com = ComInit::new()?;
-    let (bootstrap_path, bootstrap_path_from_env) = std::env::var(WINDOWS_ML_BOOTSTRAP_ENV)
-        .map(|path| (path, true))
-        .unwrap_or_else(|_| {
-            (
-                "Microsoft.WindowsAppRuntime.Bootstrap.dll".to_string(),
-                false,
-            )
-        });
-    let wide_path = wide(&bootstrap_path);
+    let (bootstrap_path, bootstrap_path_from_env) = match std::env::var_os(WINDOWS_ML_BOOTSTRAP_ENV)
+    {
+        Some(path) => (PathBuf::from(path), true),
+        None => (bundled_bootstrap_path()?, false),
+    };
+    let wide_path: Vec<u16> = bootstrap_path
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let bootstrap_path = bootstrap_path.display();
     let module = unsafe { LoadLibraryW(wide_path.as_ptr()) };
     let module = if module.is_null() {
         let load_error = std::io::Error::last_os_error();
@@ -884,6 +923,16 @@ fn wide(s: &str) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bundled_bootstrap_is_next_to_the_containing_module() {
+        // Unit tests are EXEs. A hosted DLL smoke test must additionally check
+        // this resolves beside the plugin rather than beside its host EXE.
+        let expected = std::env::current_exe()
+            .unwrap()
+            .with_file_name("Microsoft.WindowsAppRuntime.Bootstrap.dll");
+        assert_eq!(bundled_bootstrap_path().unwrap(), expected);
+    }
 
     fn provider(name: &str, ready_state: CatalogReadyState) -> CatalogProviderInfo {
         CatalogProviderInfo {

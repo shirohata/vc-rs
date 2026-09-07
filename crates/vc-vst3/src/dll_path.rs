@@ -8,6 +8,8 @@
 //! list before any ONNX Runtime session is created, while deliberately avoiding
 //! process-wide default DLL policy changes that could affect the DAW or other
 //! plugins.
+//! Windows ML's bootstrapper is loaded by absolute module-relative path in
+//! vc-core: AddDllDirectory alone does not affect a plain LoadLibraryW call.
 //!
 //! Windows ML dynamically loads the Windows App SDK Runtime ORT core. CUDA
 //! builds use the traditional ORT CUDA EP packaging.

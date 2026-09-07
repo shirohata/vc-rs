@@ -32,6 +32,8 @@ versioning and publishing procedure.
 
 ### Fixed
 
+- Resolved the Windows ML bootstrapper beside the VST3 plugin instead of
+  depending on the DAW's DLL search policy.
 - Corrected resampling timelines and preserved final WAV tails.
 - Corrected NSF phase carry across overlapping windows and kept RVC latent
   noise on an absolute frame timeline.
