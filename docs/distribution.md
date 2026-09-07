@@ -58,7 +58,9 @@ binary produced for another variant.
 
 - Windows ML packages must not contain ONNX Runtime, DirectML, CUDA, cuDNN, or
   TensorRT DLLs. They contain the Windows App SDK bootstrapper and require the
-  Windows App SDK Runtime on the user's machine.
+  Windows App SDK Runtime 2.x (minimum 2.1) on the user's machine.
+  The shared runtime uses ORT API 24; keep that Cargo API feature and the
+  bootstrapper/MSIX minimum runtime requirements aligned when upgrading `ort`.
 - TensorRT packages must not contain ONNX Runtime provider DLLs. They contain
   the matching TensorRT and CUDA runtime DLLs; non-runtime-only packages also
   contain the engine-builder helper and the selected GPU builder resources.

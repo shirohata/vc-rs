@@ -288,7 +288,7 @@ not covered by this package's MIT license — see download-models.ps1.
 
 Requirements for this ($Variant) build:
 $(switch ($Variant) {
-    'windowsml' { '  Windows App SDK Runtime 2.x installed (provides ONNX Runtime + DirectML).' }
+    'windowsml' { '  Windows App SDK Runtime 2.x, minimum 2.1, installed (provides ONNX Runtime + DirectML).' }
     'tensorrt'  { '  An up-to-date NVIDIA GPU driver. TensorRT runtime DLLs are bundled — no install needed.' }
 })
 $trtNote

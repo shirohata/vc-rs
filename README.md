@@ -62,7 +62,7 @@ ONNX 形式の RVC モデルで別の声に変換します。次の 3 つの使�
 
 ### windowsml 版
 
-- **Windows App SDK ランタイム（2.x 系）** をインストールしてください。ONNX
+- **Windows App SDK ランタイム（2.x 系、2.1 以上）** をインストールしてください。ONNX
   Runtime と DirectML を提供します。Microsoft の
   [Windows App SDK ダウンロードページ](https://learn.microsoft.com/windows/apps/windows-app-sdk/downloads)
   から、最新安定版の **Runtime（ランタイム）インストーラ** を入れてください。
@@ -222,7 +222,7 @@ tensorrt 版は GPU 実行を **同梱の TensorRT ランタイム** で行う�
 ## トラブルシューティング / FAQ
 
 **Q. windowsml 版が起動しない / モデル読み込みに失敗する**
-A. **Windows App SDK ランタイム（2.x 系）** がインストールされているか確認して
+A. **Windows App SDK ランタイム（2.x 系、2.1 以上）** がインストールされているか確認して
 ください（「必要なもの」参照）。同梱 CLI の `.\vc-rs.exe doctor` で実行に必要な
 依存を診断できます。
 

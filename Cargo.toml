@@ -34,4 +34,8 @@ libloading = "0.8"
 # Base ONNX Runtime: CPU core only. Provider features are opt-in in `vc-core`:
 # Windows ML loads the system Windows App SDK Runtime ORT dynamically, CUDA pulls
 # the large CUDA EP, and native TensorRT avoids ORT entirely.
-ort = { version = "2.0.0-rc.12", features = ["preload-dylibs"] }
+# rc.13 defaults to API 27, but the shared Windows ML runtime supports API 24.
+# Cargo features are additive: enabling api-24 cannot undo a default api-27.
+# Keep the API floor explicit for all front-ends, including vc-vst3's direct
+# dependency, while retaining the standalone CPU/CUDA binary download features.
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "ndarray", "tracing", "download-binaries", "tls-native", "copy-dylibs", "preload-dylibs", "api-24"] }

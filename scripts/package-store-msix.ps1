@@ -72,6 +72,8 @@
 .PARAMETER WindowsAppRuntimeDependencyMinVersion
     Minimum Windows App Runtime framework package version. vc-rs uses Windows ML
     APIs introduced in Windows App Runtime 2.1, so the default is 2.1.0.0.
+    Keep this aligned with WINDOWS_APP_RUNTIME_MIN_VERSION in
+    crates/vc-core/src/windows_ml.rs.
 
 .PARAMETER IncludeWindowsAppRuntimeBootstrap
     Also copy Microsoft.WindowsAppRuntime.Bootstrap.dll into the MSIX. Store

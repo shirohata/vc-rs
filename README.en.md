@@ -68,8 +68,8 @@ Windows (x64). There are four, depending on your front-end and hardware:
 
 ### windowsml packages
 
-- Install the **Windows App SDK Runtime (2.x)**, which provides ONNX Runtime and
-  DirectML. Get the latest stable **Runtime** installer from Microsoft's
+- Install the **Windows App SDK Runtime (2.x, minimum 2.1)**, which provides
+  ONNX Runtime and DirectML. Get the latest stable **Runtime** installer from Microsoft's
   [Windows App SDK downloads page](https://learn.microsoft.com/windows/apps/windows-app-sdk/downloads).
 
 ### tensorrt packages
@@ -233,7 +233,7 @@ detailed performance characteristics, see [`docs/cli.md`](docs/cli.md) and
 ## Troubleshooting / FAQ
 
 **Q. A windowsml package won't start / model loading fails.**
-A. Confirm the **Windows App SDK Runtime (2.x)** is installed (see
+A. Confirm the **Windows App SDK Runtime (2.x, minimum 2.1)** is installed (see
 *Requirements*). The bundled CLI's `.\vc-rs.exe doctor` diagnoses the runtime
 dependencies needed to run.
 

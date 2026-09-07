@@ -44,7 +44,13 @@ pub fn inspect_model(path: &Path) -> Result<()> {
             describe_value_type(output.dtype())
         );
     }
-    println!("Opset version: {}", session.opset_for_domain("")?);
+    if let Some(opset) = session.opset_for_domain("") {
+        println!("Opset version: {opset}");
+    } else {
+        // rc.13 represents a missing domain/opset as None. Metadata absence
+        // must not discard the useful I/O report for an otherwise valid model.
+        println!("Opset version: unavailable");
+    }
     if let Ok(metadata) = session.metadata() {
         println!("Metadata:");
         if let Some(name) = metadata.name() {

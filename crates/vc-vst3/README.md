@@ -115,8 +115,8 @@ providers are also accepted: `windowsml-nvtrtx`, `windowsml-qnn`,
 explicit providers do not fallback; they fail if the requested catalog EP is not
 present or ready.
 
-End users must have **Windows App SDK Runtime 2.x** installed. After bundling,
-copy the bootstrapper DLL into the bundle:
+End users must have **Windows App SDK Runtime 2.x (minimum 2.1)** installed.
+After bundling, copy the bootstrapper DLL into the bundle:
 
 ```powershell
 pwsh crates\vc-vst3\package-windowsml.ps1
@@ -213,8 +213,8 @@ into a standard VST3 search path for your OS:
 - Windows: `%CommonProgramFiles%\VST3\`; macOS:
   `~/Library/Audio/Plug-Ins/VST3/`; Linux: `~/.vst3/`
 
-For the default Windows ML package, install Windows App SDK Runtime 2.x and run
-`package-windowsml.ps1` so `Microsoft.WindowsAppRuntime.Bootstrap.dll` is beside
+For the default Windows ML package, install Windows App SDK Runtime 2.x
+(minimum 2.1) and run `package-windowsml.ps1` so `Microsoft.WindowsAppRuntime.Bootstrap.dll` is beside
 the plugin binary. No ONNX Runtime, DirectML, CUDA, or cuDNN DLLs should be
 copied into that bundle.
 

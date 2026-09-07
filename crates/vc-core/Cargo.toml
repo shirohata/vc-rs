@@ -31,8 +31,9 @@ tensorrt = ["dep:libloading"]
 # EP binaries. When disabled, selecting `Provider::Cuda` fails with a clear error.
 cuda = ["ort", "ort/cuda", "dep:libloading"]
 # Enables Windows ML providers. On Windows this bootstraps Windows App SDK
-# Runtime 2.x and dynamically loads its shared ONNX Runtime + DirectML binaries,
-# reducing redistributed DLL size. The Windows ML 2.x runtime exposes ORT API 24.
+# Runtime 2.1+ and dynamically loads its shared ONNX Runtime + DirectML binaries,
+# reducing redistributed DLL size. Keep ORT API 24 compatible with this floor;
+# the workspace dependency must not enable a newer API through default features.
 windowsml = ["ort", "ort/load-dynamic", "ort/api-24", "ort/directml"]
 # Pure-Rust RNNoise-compatible input denoising. Kept optional so package-scoped
 # VST3 builds do not compile or ship the standalone denoiser.

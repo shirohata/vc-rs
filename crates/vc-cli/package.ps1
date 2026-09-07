@@ -247,7 +247,7 @@ try {
     if (Test-Path $modelDl) { Copy-Item $modelDl (Join-Path $staging 'download-models.ps1') -Force }
 
     $reqLine = switch ($Variant) {
-        'windowsml' { '  Windows App SDK Runtime 2.x installed (provides ONNX Runtime + DirectML).' }
+        'windowsml' { '  Windows App SDK Runtime 2.x, minimum 2.1, installed (provides ONNX Runtime + DirectML).' }
         'tensorrt' { '  An up-to-date NVIDIA GPU driver. TensorRT runtime DLLs are bundled — no install needed.' }
     }
     $trtNote = if ($Variant -eq 'tensorrt' -and -not $RuntimeOnly) {

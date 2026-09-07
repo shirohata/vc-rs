@@ -34,7 +34,7 @@
 param(
     [string]$BundleDir,
     [string]$BundleName = 'vc-vst3.vst3',
-    [string]$FoundationVersion = '2.0.21',
+    [string]$FoundationVersion = '2.3.9',
     [string]$BootstrapDll,
     [string]$WindowsAppSdkLicense
 )

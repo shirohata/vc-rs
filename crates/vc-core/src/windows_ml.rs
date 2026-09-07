@@ -18,7 +18,12 @@ const RPC_E_CHANGED_MODE: i32 = 0x80010106u32 as i32;
 const ERROR_SUCCESS: i32 = 0;
 const ERROR_INSUFFICIENT_BUFFER: i32 = 122;
 const APPMODEL_ERROR_NO_PACKAGE: i32 = 15700;
-const WINDOWS_APP_SDK_2_1: u32 = 0x0002_0001;
+const WINDOWS_APP_SDK_MAJOR: u32 = 0x0002_0000;
+// Starting with SDK 2.x the bootstrapper ignores majorMinorVersion's minor
+// bits. Enforce the C catalog API's 2.1 floor through PACKAGE_VERSION instead;
+// keep this packed Major.Minor.Build.Revision in sync with the Store manifest
+// default in scripts/package-store-msix.ps1. Zero here accepts older runtimes.
+const WINDOWS_APP_RUNTIME_MIN_VERSION: u64 = (2u64 << 48) | (1u64 << 32);
 const WINDOWS_ML_BOOTSTRAP_ENV: &str = "VC_RS_WINDOWSML_BOOTSTRAP_DLL";
 
 type Hmodule = *mut c_void;
@@ -428,7 +433,14 @@ fn initialize_inner() -> Result<BootstrapState> {
         let initialize2: MddBootstrapInitialize2 =
             unsafe { load_symbol(module, b"MddBootstrapInitialize2\0")? };
         check_hr(
-            unsafe { initialize2(WINDOWS_APP_SDK_2_1, ptr::null(), 0, 0) },
+            unsafe {
+                initialize2(
+                    WINDOWS_APP_SDK_MAJOR,
+                    ptr::null(),
+                    WINDOWS_APP_RUNTIME_MIN_VERSION,
+                    0,
+                )
+            },
             "MddBootstrapInitialize2(Windows App SDK Runtime 2.1)",
         )
         .context(

@@ -4,7 +4,6 @@
 xtask = "run --package xtask --release --"
 
 [env]
-# Keep the downloaded ONNX Runtime CUDA package aligned with the bundled CUDA
-# runtime. The CUDA dev build ships CUDA 12.x DLLs, so do not let
-# ort-sys auto-detect a CUDA 13 install from the developer machine.
-ORT_CUDA_VERSION = "12"
+# ort rc.13 ships CUDA 13 binaries only. Match scripts/activate.ps1 and the
+# repository's CUDA 13 / TensorRT 11 line even without shell activation.
+ORT_CUDA_VERSION = "13"
