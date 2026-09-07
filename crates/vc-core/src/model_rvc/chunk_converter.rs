@@ -2,9 +2,10 @@ use std::time::Duration;
 
 use anyhow::Result;
 
+use crate::dsp::OutputResampler;
 use crate::sola::{self, ChunkSmoother, ChunkSmootherConfig, JoinDiagnostics, SmoothingKind};
 
-use super::{ModelOutput, VoiceModel};
+use super::{ContentDelay, ModelOutput, VoiceModel};
 
 #[derive(Clone, Copy, Debug)]
 pub struct ChunkOutputConfig {
@@ -36,6 +37,7 @@ pub struct ChunkConverter<M> {
     model: M,
     output: ChunkOutputConfig,
     smoother: Option<(u32, ChunkSmoother)>,
+    output_resampler: Option<OutputResampler>,
     // Reused per-chunk buffers for the model's converted audio and output
     // pitchf, so `process_chunk` does not allocate them every chunk.
     model_audio: Vec<f32>,
@@ -48,6 +50,7 @@ impl<M: VoiceModel> ChunkConverter<M> {
             model,
             output,
             smoother: None,
+            output_resampler: None,
             model_audio: Vec::new(),
             model_pitchf: Vec::new(),
         }
@@ -55,6 +58,35 @@ impl<M: VoiceModel> ChunkConverter<M> {
 
     pub fn model_mut(&mut self) -> &mut M {
         &mut self.model
+    }
+
+    pub fn output_chunk_samples(&self) -> usize {
+        self.output.output_chunk_samples
+    }
+
+    /// Output-side filter and incomplete-block buffering delay. This is known
+    /// after the first process/prime and is zero for identical sample rates.
+    pub fn output_resample_delay_samples(&self) -> Option<usize> {
+        self.output_resampler
+            .as_ref()
+            .map(OutputResampler::delay_samples)
+    }
+
+    /// Content delay after priming, in output samples. Finite conversion removes
+    /// this once and recovers the source tail by processing additional zero hops
+    /// through this same converter. SOLA's bounded search may advance content
+    /// within its window; the maximum nominal hold keeps that tail recoverable.
+    /// The smoother's first unprimed silent hop is separate startup behavior.
+    pub fn output_content_delay_samples(&self) -> usize {
+        let join_delay = self
+            .smoother
+            .as_ref()
+            .map_or(ContentDelay::ZERO, |(rate, smoother)| {
+                ContentDelay::from_samples(smoother.content_delay_samples(), *rate)
+            });
+        (self.model.input_content_delay() + join_delay)
+            .output_samples(self.output.output_sample_rate)
+            + self.output_resample_delay_samples().unwrap_or(0)
     }
 
     /// Diagnostics for the most recent [`Self::process_chunk`] / [`Self::prime`]
@@ -94,13 +126,15 @@ impl<M: VoiceModel> ChunkConverter<M> {
     /// against audio emitted before the pause.
     pub fn reset_streaming_state(&mut self) {
         self.smoother = None;
+        // Join history and the FFT/FIFO timeline are a single stream. Retaining
+        // either across pass-through would replay stale audio on resumption.
+        self.output_resampler = None;
     }
 
     pub fn process_chunk(
         &mut self,
         input: &[f32],
         input_sample_rate: u32,
-        final_tail: Option<&mut Vec<f32>>,
         out: &mut Vec<f32>,
     ) -> Result<ChunkStats> {
         let meta = self.model.process(
@@ -111,22 +145,16 @@ impl<M: VoiceModel> ChunkConverter<M> {
         )?;
         let stats = chunk_stats(&meta, self.model_audio.len());
         let model_sample_rate = meta.sample_rate;
-        let output_sample_rate = self.output.output_sample_rate;
         let output_chunk_samples = self.output.output_chunk_samples;
-        self.ensure_smoother(model_sample_rate);
+        self.ensure_smoother(model_sample_rate)?;
         // Disjoint field borrows: the smoother and the model output buffers are
         // separate fields, so this does not conflict.
         let smoother = &mut self.smoother.as_mut().expect("smoother set above").1;
-        sola::prepare_model_output(
-            &self.model_audio,
-            &self.model_pitchf,
-            model_sample_rate,
-            output_sample_rate,
-            output_chunk_samples,
-            smoother,
-            final_tail,
-            out,
-        )?;
+        smoother.process(&self.model_audio, &self.model_pitchf);
+        self.output_resampler
+            .as_mut()
+            .expect("resampler set above")
+            .process_fixed(smoother.output(), output_chunk_samples, out)?;
         Ok(stats)
     }
 
@@ -141,7 +169,7 @@ impl<M: VoiceModel> ChunkConverter<M> {
             &mut self.model_pitchf,
         )?;
         let stats = chunk_stats(&meta, self.model_audio.len());
-        self.ensure_smoother(meta.sample_rate);
+        self.ensure_smoother(meta.sample_rate)?;
         let smoother = &mut self.smoother.as_mut().expect("smoother set above").1;
         smoother.prime_model_output(&self.model_audio, &self.model_pitchf);
         Ok(stats)
@@ -150,21 +178,26 @@ impl<M: VoiceModel> ChunkConverter<M> {
     /// Ensures `self.smoother` matches `model_sample_rate`, rebuilding it on a
     /// rate change. Split out of the per-chunk path so callers can then take a
     /// disjoint borrow of the smoother alongside the model output buffers.
-    fn ensure_smoother(&mut self, model_sample_rate: u32) {
+    fn ensure_smoother(&mut self, model_sample_rate: u32) -> Result<()> {
         if self.smoother.as_ref().map(|(rate, _)| *rate) != Some(model_sample_rate) {
-            self.smoother = Some((
+            let smoother = sola::model_domain_chunk_smoother(ChunkSmootherConfig {
+                kind: self.output.kind,
+                output_chunk_samples: self.output.output_chunk_samples,
+                output_sample_rate: self.output.output_sample_rate,
                 model_sample_rate,
-                sola::model_domain_chunk_smoother(ChunkSmootherConfig {
-                    kind: self.output.kind,
-                    output_chunk_samples: self.output.output_chunk_samples,
-                    output_sample_rate: self.output.output_sample_rate,
-                    model_sample_rate,
-                    crossfade_ms: self.output.crossfade_ms,
-                    sola_search_ms: self.output.sola_search_ms,
-                    tail_discard_ms: self.output.tail_discard_ms,
-                }),
-            ));
+                crossfade_ms: self.output.crossfade_ms,
+                sola_search_ms: self.output.sola_search_ms,
+                tail_discard_ms: self.output.tail_discard_ms,
+            });
+            let resampler = OutputResampler::new(
+                model_sample_rate as usize,
+                self.output.output_sample_rate as usize,
+                smoother.chunk_samples(),
+            )?;
+            self.smoother = Some((model_sample_rate, smoother));
+            self.output_resampler = Some(resampler);
         }
+        Ok(())
     }
 }
 
@@ -193,6 +226,8 @@ mod tests {
         // metadata; `process` writes the audio into the caller's out buffer.
         outputs: VecDeque<Result<(Vec<f32>, ModelOutput)>>,
         calls: usize,
+        pitch_hz: Option<f32>,
+        input_delay: ContentDelay,
     }
 
     impl FakeModel {
@@ -200,11 +235,17 @@ mod tests {
             Self {
                 outputs: outputs.into_iter().collect(),
                 calls: 0,
+                pitch_hz: None,
+                input_delay: ContentDelay::ZERO,
             }
         }
     }
 
     impl VoiceModel for FakeModel {
+        fn input_content_delay(&self) -> ContentDelay {
+            self.input_delay
+        }
+
         fn process(
             &mut self,
             _audio: &[f32],
@@ -217,6 +258,9 @@ mod tests {
             out_audio.clear();
             out_audio.extend_from_slice(&audio);
             out_pitchf.clear();
+            if let Some(pitch_hz) = self.pitch_hz {
+                out_pitchf.resize(12, pitch_hz);
+            }
             Ok(meta)
         }
     }
@@ -261,9 +305,7 @@ mod tests {
             ChunkConverter::new(FakeModel::new([Ok(output(vec![1.0; 8], 1_000))]), config());
 
         let mut out = Vec::new();
-        let stats = converter
-            .process_chunk(&[0.0; 4], 1_000, None, &mut out)
-            .unwrap();
+        let stats = converter.process_chunk(&[0.0; 4], 1_000, &mut out).unwrap();
 
         assert_eq!(converter.model_mut().calls, 1);
         assert_eq!(out.len(), 4);
@@ -285,15 +327,15 @@ mod tests {
 
         let mut first = Vec::new();
         converter
-            .process_chunk(&[0.0; 4], 1_000, None, &mut first)
+            .process_chunk(&[0.0; 4], 1_000, &mut first)
             .unwrap();
         let mut second = Vec::new();
         converter
-            .process_chunk(&[0.0; 4], 1_000, None, &mut second)
+            .process_chunk(&[0.0; 4], 1_000, &mut second)
             .unwrap();
         let mut changed_rate = Vec::new();
         converter
-            .process_chunk(&[0.0; 4], 1_000, None, &mut changed_rate)
+            .process_chunk(&[0.0; 4], 1_000, &mut changed_rate)
             .unwrap();
 
         assert_eq!(first, vec![0.0; 4]);
@@ -312,18 +354,18 @@ mod tests {
 
         let mut scratch = Vec::new();
         converter
-            .process_chunk(&[0.0; 4], 1_000, None, &mut scratch)
+            .process_chunk(&[0.0; 4], 1_000, &mut scratch)
             .unwrap();
         let mut joined = Vec::new();
         converter
-            .process_chunk(&[0.0; 4], 1_000, None, &mut joined)
+            .process_chunk(&[0.0; 4], 1_000, &mut joined)
             .unwrap();
         assert_ne!(joined, vec![0.0; 4]);
 
         converter.reset_streaming_state();
         let mut reset = Vec::new();
         converter
-            .process_chunk(&[0.0; 4], 1_000, None, &mut reset)
+            .process_chunk(&[0.0; 4], 1_000, &mut reset)
             .unwrap();
         assert_eq!(reset, vec![0.0; 4]);
     }
@@ -345,11 +387,11 @@ mod tests {
         let stats = converter.prime(&[0.0; 4], 1_000).unwrap();
         let mut primed = Vec::new();
         converter
-            .process_chunk(&[0.0; 4], 1_000, None, &mut primed)
+            .process_chunk(&[0.0; 4], 1_000, &mut primed)
             .unwrap();
         let mut unprimed = Vec::new();
         without_prime
-            .process_chunk(&[0.0; 4], 1_000, None, &mut unprimed)
+            .process_chunk(&[0.0; 4], 1_000, &mut unprimed)
             .unwrap();
 
         assert_eq!(stats.model_output_samples, 8);
@@ -357,23 +399,151 @@ mod tests {
     }
 
     #[test]
-    fn final_tail_is_only_updated_when_requested() {
-        let outputs = [
-            Ok(output(vec![1.0; 8], 1_000)),
-            Ok(output(vec![2.0; 8], 1_000)),
-        ];
-        let mut converter = ChunkConverter::new(FakeModel::new(outputs), config());
-        let mut tail = vec![9.0];
-        let mut out = Vec::new();
+    fn content_delay_uses_capped_crossfade_and_disabled_join_geometry() {
+        let mut settings = config();
+        settings.crossfade_ms = 20;
+        settings.tail_discard_ms = 3;
+        let mut converter =
+            ChunkConverter::new(FakeModel::new([Ok(output(vec![0.0; 32], 1_000))]), settings);
+        converter.prime(&[0.0; 4], 1_000).unwrap();
+        assert_eq!(converter.output_content_delay_samples(), 3 + 2 + 3);
+        assert_eq!(converter.output_resample_delay_samples(), Some(0));
 
-        converter
-            .process_chunk(&[0.0; 4], 1_000, None, &mut out)
-            .unwrap();
-        assert_eq!(tail, vec![9.0]);
-        converter
-            .process_chunk(&[0.0; 4], 1_000, Some(&mut tail), &mut out)
-            .unwrap();
-        assert_ne!(tail, vec![9.0]);
+        settings.crossfade_ms = 0;
+        let mut converter =
+            ChunkConverter::new(FakeModel::new([Ok(output(vec![0.0; 32], 1_000))]), settings);
+        converter.prime(&[0.0; 4], 1_000).unwrap();
+        assert_eq!(converter.output_content_delay_samples(), 3);
+    }
+
+    #[test]
+    fn fractional_input_and_join_delays_round_only_after_summing() {
+        let settings = ChunkOutputConfig {
+            kind: SmoothingKind::Sola,
+            output_sample_rate: 44_100,
+            output_chunk_samples: 882,
+            crossfade_ms: 20,
+            sola_search_ms: 0,
+            tail_discard_ms: 0,
+        };
+        let mut model = FakeModel::new([Ok(output(vec![0.0; 1280], 32_000))]);
+        model.input_delay = ContentDelay::from_samples(3, 16_000);
+        let mut converter = ChunkConverter::new(model, settings);
+        converter.prime(&[], 32_000).unwrap();
+        // The capped 15 ms fade is 661.5 output samples, and 3/16k seconds
+        // contributes 8.26875. ceil(669.76875) is 670, not ceil(661.5)+ceil(8.26875)=671.
+        assert_eq!(
+            converter.output_content_delay_samples(),
+            670 + converter.output_resample_delay_samples().unwrap()
+        );
+    }
+
+    #[test]
+    fn persistent_output_resampling_removes_join_boundary_dc_distortion() {
+        for kind in [SmoothingKind::Sola, SmoothingKind::Psola] {
+            for (from, to) in [(32_000, 48_000), (48_000, 44_100)] {
+                let settings = ChunkOutputConfig {
+                    kind,
+                    output_sample_rate: to,
+                    output_chunk_samples: to as usize / 10,
+                    crossfade_ms: 10,
+                    sola_search_ms: 0,
+                    tail_discard_ms: 0,
+                };
+                let outputs =
+                    (0..20).map(|_| Ok(output(vec![0.25; from as usize * 11 / 100], from)));
+                let mut converter = ChunkConverter::new(FakeModel::new(outputs), settings);
+                let mut out = Vec::new();
+                for index in 0..20 {
+                    converter.process_chunk(&[], from, &mut out).unwrap();
+                    assert_eq!(out.len(), to as usize / 10);
+                    if index >= 3 {
+                        let error = out.iter().map(|v| (v - 0.25).abs()).fold(0.0, f32::max);
+                        assert!(error < 1e-4, "{kind:?} {from}->{to}: {error}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reset_discards_resampler_filter_fifo_and_delay_state_together() {
+        let settings = ChunkOutputConfig {
+            kind: SmoothingKind::Sola,
+            output_sample_rate: 44_100,
+            output_chunk_samples: 4410,
+            crossfade_ms: 10,
+            sola_search_ms: 0,
+            tail_discard_ms: 0,
+        };
+        let outputs = (0..6).map(|_| Ok(output(vec![0.25; 5280], 48_000)));
+        let mut converter = ChunkConverter::new(FakeModel::new(outputs), settings);
+        let mut initial = Vec::new();
+        converter.process_chunk(&[], 48_000, &mut initial).unwrap();
+        let mut out = Vec::new();
+        for _ in 0..4 {
+            converter.process_chunk(&[], 48_000, &mut out).unwrap();
+        }
+        assert!(out.iter().any(|sample| sample.abs() > 0.1));
+        converter.reset_streaming_state();
+        assert_eq!(converter.output_resample_delay_samples(), None);
+        converter.process_chunk(&[], 48_000, &mut out).unwrap();
+        assert_eq!(out, initial);
+    }
+
+    #[test]
+    fn joined_voiced_sines_match_continuous_output_filter_after_delay() {
+        for kind in [SmoothingKind::Sola, SmoothingKind::Psola] {
+            for (from, to) in [(32_000, 48_000), (48_000, 44_100)] {
+                let hop = from as usize / 10;
+                let fade = from as usize / 100;
+                let settings = ChunkOutputConfig {
+                    kind,
+                    output_sample_rate: to,
+                    output_chunk_samples: to as usize / 10,
+                    crossfade_ms: 10,
+                    sola_search_ms: 0,
+                    tail_discard_ms: 0,
+                };
+                let sample = |i: usize| {
+                    (0.25 * (2.0 * std::f64::consts::PI * 213.7 * i as f64 / from as f64).sin())
+                        as f32
+                };
+                let outputs = (0..20).map(|index| {
+                    Ok(output(
+                        (index * hop..(index + 1) * hop + fade)
+                            .map(sample)
+                            .collect(),
+                        from,
+                    ))
+                });
+                let mut model = FakeModel::new(outputs);
+                model.pitch_hz = Some(213.7);
+                let mut converter = ChunkConverter::new(model, settings);
+                let mut actual = Vec::new();
+                let mut chunk = Vec::new();
+                for _ in 0..20 {
+                    converter.process_chunk(&[], from, &mut chunk).unwrap();
+                    actual.extend_from_slice(&chunk);
+                }
+                if kind == SmoothingKind::Psola {
+                    let diagnostics = converter.last_join_diagnostics().unwrap();
+                    assert!(diagnostics.pitch_period.is_some());
+                    assert!(!diagnostics.psola_fallback);
+                }
+                let mut joined = vec![0.0; hop];
+                joined.extend((hop..20 * hop).map(sample));
+                let reference =
+                    crate::dsp::resample_mono(&joined, from as usize, to as usize).unwrap();
+                let delay = converter.output_resample_delay_samples().unwrap();
+                let max_error = actual[delay..]
+                    .iter()
+                    .zip(&reference)
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0.0, f32::max);
+                assert!(max_error < 1e-6, "{kind:?} {from}->{to}: {max_error}");
+            }
+        }
     }
 
     #[test]
@@ -382,13 +552,13 @@ mod tests {
         let mut model_error =
             ChunkConverter::new(FakeModel::new([Err(anyhow!("model failed"))]), config());
         assert!(model_error
-            .process_chunk(&[0.0; 4], 1_000, None, &mut out)
+            .process_chunk(&[0.0; 4], 1_000, &mut out)
             .is_err());
 
         let mut output_error =
             ChunkConverter::new(FakeModel::new([Ok(output(vec![1.0; 8], 0))]), config());
         assert!(output_error
-            .process_chunk(&[0.0; 4], 1_000, None, &mut out)
+            .process_chunk(&[0.0; 4], 1_000, &mut out)
             .is_err());
     }
 }

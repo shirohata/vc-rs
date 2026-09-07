@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use vc_core::model_rvc::GpuPriority;
 use vc_core::validation::{
-    validate_conversion_timing, validate_non_negative_f32, validate_unit_interval,
-    ConversionTiming, ConversionTimingLimits, CONVERSION_TIMING_LIMITS,
+    validate_conversion_timing, validate_non_negative_f32, validate_rvc_chunk_ms,
+    validate_unit_interval, ConversionTiming, ConversionTimingLimits, CONVERSION_TIMING_LIMITS,
 };
 use vc_core::Provider;
 
@@ -149,6 +149,7 @@ impl PluginConfig {
             },
             limits,
         )?;
+        validate_rvc_chunk_ms(self.chunk_ms)?;
         validate_non_negative_f32("F0 threshold", self.f0_threshold)?;
         validate_non_negative_f32("silence threshold", self.silence_threshold)?;
         validate_non_negative_f32("noise gate attack (ms)", self.noise_gate_attack_ms)?;
@@ -158,6 +159,14 @@ impl PluginConfig {
         validate_non_negative_f32("target output RMS", self.target_output_rms)?;
         validate_non_negative_f32("max output gain", self.max_output_gain)?;
         Ok(())
+    }
+
+    pub fn validated_chunk_samples(&self, sample_rate: u32) -> anyhow::Result<usize> {
+        self.validate()?;
+        Ok(
+            vc_core::validation::RvcChunkTiming::from_ms(self.chunk_ms, sample_rate)?
+                .input_chunk_samples,
+        )
     }
 
     /// Locate and parse the config file. Returns the default config when no file
@@ -175,7 +184,10 @@ impl PluginConfig {
                     }
                     Err(err) => {
                         nice_plug::nice_error!("vc-vst3: invalid config {}: {err}", path.display());
-                        Self::default()
+                        // Keep parseable settings visible so the worker can
+                        // surface the error and the editor can correct them.
+                        // Replacing 25 ms with defaults would hide the cause.
+                        config
                     }
                 },
                 Err(err) => {
@@ -301,5 +313,27 @@ mod tests {
         assert!(config.validate().is_err());
         let config: PluginConfig = toml::from_str("extra_convert_ms = 3001").unwrap();
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn persisted_chunk_settings_obey_rvc_frame_and_host_sample_grids() {
+        let config: PluginConfig = toml::from_str("chunk_ms = 25").unwrap();
+        assert_eq!(config.chunk_ms, 25);
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("multiple of 10"));
+        let config: PluginConfig = toml::from_str("chunk_ms = 30").unwrap();
+        assert_eq!(config.validated_chunk_samples(44_100).unwrap(), 1323);
+        assert!(config.validated_chunk_samples(22_050).is_err());
+        let config: PluginConfig = toml::from_str("chunk_ms = 20").unwrap();
+        assert_eq!(config.validated_chunk_samples(22_050).unwrap(), 441);
+        assert_eq!(
+            PluginConfig::default()
+                .validated_chunk_samples(48_000)
+                .unwrap(),
+            24_000
+        );
     }
 }

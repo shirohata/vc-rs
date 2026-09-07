@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 use vc_core::validation::{
     validate_conversion_timing, validate_finite_f32, validate_non_negative_f32,
-    validate_unit_interval, ConversionTiming, CONVERSION_TIMING_LIMITS,
+    validate_rvc_chunk_ms, validate_unit_interval, ConversionTiming, CONVERSION_TIMING_LIMITS,
 };
 pub use vc_core::Provider;
 
@@ -226,7 +226,7 @@ pub struct RunArgs {
         help = "WASAPI event buffer in milliseconds; 0 uses the device minimum period"
     )]
     pub wasapi_buffer_ms: u32,
-    #[arg(long, default_value_t = DEFAULT_RT_CHUNK_MS)]
+    #[arg(long, default_value_t = DEFAULT_RT_CHUNK_MS, help = "Chunk duration in ms; RVC requires multiples of 10 and integer samples at device/model rates")]
     pub chunk_ms: u32,
     #[arg(long, default_value_t = DEFAULT_CROSSFADE_MS)]
     pub crossfade_ms: u32,
@@ -320,7 +320,7 @@ pub struct WavArgs {
     pub input: PathBuf,
     #[arg(long)]
     pub output: PathBuf,
-    #[arg(long, default_value_t = DEFAULT_WAV_CHUNK_MS)]
+    #[arg(long, default_value_t = DEFAULT_WAV_CHUNK_MS, help = "Chunk duration in ms; requires multiples of 10 and integer samples at input/model rates")]
     pub chunk_ms: u32,
     #[arg(long, value_enum, default_value_t = Smoother::Sola)]
     pub smoother: Smoother,
@@ -511,6 +511,11 @@ impl RunArgs {
     }
 
     pub fn validate_conversion_options(&self) -> Result<(), String> {
+        if !self.passthrough
+            || (self.model.is_some() && self.embedder.is_some() && self.f0_model.is_some())
+        {
+            validate_rvc_chunk_ms(self.chunk_ms).map_err(|err| err.to_string())?;
+        }
         validate_common_conversion_options(
             ConversionTiming {
                 chunk_ms: self.chunk_ms,
@@ -551,6 +556,7 @@ impl WavArgs {
     }
 
     pub fn validate_conversion_options(&self) -> Result<(), String> {
+        validate_rvc_chunk_ms(self.chunk_ms).map_err(|err| err.to_string())?;
         validate_common_conversion_options(
             ConversionTiming {
                 chunk_ms: self.chunk_ms,
@@ -1252,6 +1258,49 @@ mod tests {
             panic!("expected wav command");
         };
         assert!(args.validate_conversion_options().is_err());
+    }
+
+    #[test]
+    fn rvc_chunk_validation_covers_run_wav_and_switchable_passthrough() {
+        for command in ["run", "wav"] {
+            let mut command_line = vec![
+                "vc-rs",
+                command,
+                "--model",
+                "model.onnx",
+                "--embedder",
+                "embedder.onnx",
+                "--f0-model",
+                "f0.onnx",
+                "--chunk-ms",
+                "25",
+            ];
+            if command == "wav" {
+                command_line.extend(["--input", "input.wav", "--output", "output.wav"]);
+            }
+            let cli = Cli::try_parse_from(command_line.clone()).unwrap();
+            let error = match cli.command {
+                Command::Run(args) => args.validate_conversion_options().unwrap_err(),
+                Command::Wav(args) => args.validate_conversion_options().unwrap_err(),
+                _ => panic!("unexpected command"),
+            };
+            assert!(error.contains("multiple of 10"));
+            if command == "run" {
+                command_line.push("--passthrough");
+                let Command::Run(args) = Cli::try_parse_from(command_line).unwrap().command else {
+                    panic!("expected run command");
+                };
+                assert!(args.validate_conversion_options().is_err());
+            }
+        }
+        let Command::Run(args) =
+            Cli::try_parse_from(["vc-rs", "run", "--passthrough", "--chunk-ms", "25"])
+                .unwrap()
+                .command
+        else {
+            panic!("expected run command");
+        };
+        args.validate_conversion_options().unwrap();
     }
 
     #[test]

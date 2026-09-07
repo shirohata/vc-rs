@@ -819,9 +819,14 @@ impl eframe::App for VcGui {
                         CONVERSION_TIMING_LIMITS.min_chunk_ms
                             ..=CONVERSION_TIMING_LIMITS.max_chunk_ms,
                     )
+                    // Preserve invalid saved values for validation; default
+                    // slider clamping would silently snap 25 ms on display.
+                    .clamping(egui::SliderClamping::Edits)
+                    .step_by(10.0)
                     .text("Chunk ms"),
                 )
                 .changed();
+            ui.small("RVC: 10 ms steps, with integer samples at both device rates.");
             changed |= ui
                 .add(
                     egui::Slider::new(
@@ -1437,6 +1442,25 @@ passthrough = true
         assert_eq!(settings.crossfade_ms, GUI_CROSSFADE_MS);
         assert_eq!(settings.sola_search_ms, GUI_SOLA_SEARCH_MS);
         assert_eq!(settings.extra_convert_ms, GUI_MIN_EXTRA_CONVERT_MS);
+    }
+
+    #[test]
+    fn persisted_chunk_is_preserved_and_rejected_when_off_rvc_frame_grid() {
+        let mut settings = GuiSettings {
+            model: "rvc.onnx".to_string(),
+            embedder: "embedder.onnx".to_string(),
+            f0_model: "f0.onnx".to_string(),
+            chunk_ms: 25,
+            ..Default::default()
+        };
+        settings.normalize_gui_managed_settings();
+        assert_eq!(settings.chunk_ms, 25);
+        let config = settings.realtime().unwrap();
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("multiple of 10"));
     }
 
     #[test]

@@ -94,7 +94,7 @@ pub struct PluginRuntime {
     mono_out: Vec<f32>,
     /// Initial plugin latency in host samples, reported at `initialize`.
     pub latency_samples: u32,
-    /// Current latency, updated by the worker when `chunk_ms` changes. The audio
+    /// Current latency, updated after model/output initialization or reload. The audio
     /// thread re-reports it to the host (see [`PluginRuntime::poll_latency_update`]).
     latency: Arc<AtomicU32>,
     last_reported_latency: u32,
@@ -130,18 +130,19 @@ impl PluginRuntime {
         reload.store(false, Ordering::SeqCst);
         loading.store(false, Ordering::SeqCst);
         let settings0 = params.settings.read().unwrap().clone();
-        let initial_timing_settings = if let Err(err) = settings0.validate() {
-            nice_plug::nice_error!("vc-vst3: invalid persisted settings: {err}");
-            if let Ok(mut current) = status.lock() {
-                *current = PluginStatus {
-                    summary: format!("invalid settings: {err}"),
-                    detail: Some(format!("{err:#}")),
-                };
-            }
-            PluginConfig::default()
-        } else {
-            settings0.clone()
-        };
+        let initial_timing_settings =
+            if let Err(err) = settings0.validated_chunk_samples(sample_rate) {
+                nice_plug::nice_error!("vc-vst3: invalid persisted settings: {err}");
+                if let Ok(mut current) = status.lock() {
+                    *current = PluginStatus {
+                        summary: format!("invalid settings: {err}"),
+                        detail: Some(format!("{err:#}")),
+                    };
+                }
+                PluginConfig::default()
+            } else {
+                settings0.clone()
+            };
         let crossfade_ms = initial_timing_settings.crossfade_ms;
         let sola_search_ms = initial_timing_settings.sola_search_ms;
         let tail_discard_ms = initial_timing_settings.rvc_output_tail_discard_ms;
@@ -160,12 +161,10 @@ impl PluginRuntime {
 
         let running = Arc::new(AtomicBool::new(true));
 
-        // Initial latency: one (clamped) chunk of input buffering plus the
-        // smoothing/tail context, in host samples. Updated live when chunk_ms
-        // changes; RVC has additional inherent latency this estimate omits.
-        let chunk_ms = initial_timing_settings
-            .chunk_ms
-            .clamp(MIN_CHUNK_MS, MAX_CHUNK_MS);
+        // Before explicit model loading, only host chunk/context timing is
+        // known. The worker replaces this estimate with the shared converter's
+        // actual input/join/output buffering delay after its first model call.
+        let chunk_ms = initial_timing_settings.chunk_ms;
         let chunk_samples = chunk_samples_for_rate(sample_rate, chunk_ms);
         let extra_samples = chunk_samples_for_rate(sample_rate, output_extra_ms);
         let latency_samples = (chunk_samples + extra_samples) as u32;
@@ -324,7 +323,12 @@ impl WorkerCtx {
 
     fn run(mut self) {
         let initial_settings = self.params.settings.read().unwrap().clone();
-        let mut chunk_samples = self.chunk_samples(&initial_settings);
+        let initial_chunk = initial_settings.validated_chunk_samples(self.sample_rate);
+        // Invalid persisted settings never load a model. The fallback only
+        // sizes the idle/silent worker until the user submits valid settings.
+        let mut chunk_samples = initial_chunk.as_ref().copied().unwrap_or_else(|_| {
+            chunk_samples_for_rate(self.sample_rate, PluginConfig::default().chunk_ms).max(1)
+        });
         let mut input_acc = Vec::<f32>::with_capacity(chunk_samples * 2);
         // Reused output buffer for the converted chunk, filled by `process_chunk`.
         let mut chunk_out = Vec::<f32>::with_capacity(chunk_samples * 2);
@@ -335,7 +339,7 @@ impl WorkerCtx {
         // happens implicitly. The editor's Load / Reload button is the explicit
         // boundary for model (re)initialization.
         let mut converter = None;
-        if let Err(err) = initial_settings.validate() {
+        if let Err(err) = initial_chunk {
             self.set_error(format!("invalid settings: {err}"), format!("{err:#}"));
         } else {
             self.set_idle_status();
@@ -349,15 +353,24 @@ impl WorkerCtx {
                 // re-sets dirty and remains visibly staged for the next load.
                 self.dirty.store(false, Ordering::SeqCst);
                 let settings = self.params.settings.read().unwrap().clone();
-                if let Err(err) = settings.validate() {
-                    nice_plug::nice_error!("vc-vst3: invalid settings: {err}");
-                    self.set_error(format!("invalid settings: {err}"), format!("{err:#}"));
-                    self.dirty.store(true, Ordering::SeqCst);
-                    self.loading.store(false, Ordering::SeqCst);
-                    continue;
-                }
+                let new_chunk_samples = match settings.validated_chunk_samples(self.sample_rate) {
+                    Ok(samples) => samples,
+                    Err(err) => {
+                        nice_plug::nice_error!("vc-vst3: invalid settings: {err}");
+                        self.set_error(format!("invalid settings: {err}"), format!("{err:#}"));
+                        self.dirty.store(true, Ordering::SeqCst);
+                        self.loading.store(false, Ordering::SeqCst);
+                        continue;
+                    }
+                };
+                // All join geometry belongs to the validated reload snapshot.
+                // Keeping startup values here would disagree with settings
+                // recovered from an invalid persisted configuration.
+                self.crossfade_ms = settings.crossfade_ms;
+                self.sola_search_ms = settings.sola_search_ms;
+                self.tail_discard_ms = settings.rvc_output_tail_discard_ms;
                 // chunk_ms may have changed; recompute and re-report latency.
-                chunk_samples = self.chunk_samples(&settings);
+                chunk_samples = new_chunk_samples;
                 self.latency
                     .store(self.latency_samples(chunk_samples), Ordering::Relaxed);
                 // Drop the old pipeline (releasing its CUDA context) before
@@ -428,12 +441,20 @@ impl WorkerCtx {
                 noise_gate_threshold: util::db_to_gain(self.params.noise_gate_threshold_db.value()),
             });
 
-            if let Err(err) = converter.process_chunk(chunk, self.sample_rate, None, &mut chunk_out)
-            {
+            if let Err(err) = converter.process_chunk(chunk, self.sample_rate, &mut chunk_out) {
                 nice_plug::nice_error!("vc-vst3: chunk conversion failed: {err:#}");
                 self.running.store(false, Ordering::SeqCst);
                 break;
             }
+            // The shared converter now knows the model's native rate, actual
+            // capped overlap, and both rate-adapter delays. Report these once
+            // available; the callback only relays this precomputed atomic value.
+            // SOLA's bounded search can advance audio within that nominal hold.
+            let content_delay = converter.output_content_delay_samples();
+            self.latency.store(
+                u32::try_from(chunk_samples.saturating_add(content_delay)).unwrap_or(u32::MAX),
+                Ordering::Relaxed,
+            );
             input_acc.clear();
 
             // Push to the output ring; drop the tail if the consumer is behind.
@@ -489,12 +510,6 @@ impl WorkerCtx {
         } else {
             self.set_status("no models configured");
         }
-    }
-
-    /// Chunk size in samples from the settings snapshot used for this load.
-    fn chunk_samples(&self, settings: &PluginConfig) -> usize {
-        let chunk_ms = settings.chunk_ms.clamp(MIN_CHUNK_MS, MAX_CHUNK_MS);
-        chunk_samples_for_rate(self.sample_rate, chunk_ms)
     }
 
     fn output_extra_ms(&self) -> u32 {

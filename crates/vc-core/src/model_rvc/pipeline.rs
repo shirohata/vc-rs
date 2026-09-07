@@ -5,9 +5,10 @@ use anyhow::{bail, Context, Result};
 use tracing::{debug, info};
 
 use crate::dsp;
+use crate::validation::RvcChunkTiming;
 use crate::Provider;
 
-use super::api::{ModelOutput, VoiceModel};
+use super::api::{ContentDelay, ModelOutput, VoiceModel};
 use super::f0_postprocess::{F0PostprocessConfig, F0Postprocessor};
 use super::feature::FeatureTensor;
 use super::inspect::{inspect_contentvec_input_name, inspect_rvc_model};
@@ -47,6 +48,14 @@ enum InputDenoiser {
 }
 
 impl InputDenoiser {
+    fn content_delay_samples(&self) -> usize {
+        match self {
+            Self::Off | Self::Gate(_) => 0,
+            #[cfg(feature = "rnnoise")]
+            Self::Rnnoise(denoiser) => denoiser.latency_samples(),
+        }
+    }
+
     fn process_in_place(&mut self, buf: &mut [f32]) -> Result<()> {
         match self {
             InputDenoiser::Off => {}
@@ -125,6 +134,11 @@ pub struct RvcPipeline {
     target_output_rms: f32,
     max_output_gain: f32,
     stream_state: RvcStreamState,
+    // The input hop and rate are fixed with the loaded profiles and denoisers.
+    // A host changing either must reload; allowing a new duration here would
+    // advance audio, F0, latent noise and NSF phase on different timelines.
+    chunk_timing: RvcChunkTiming,
+    input_sample_rate: u32,
     // The model's `rnd` (latent-noise) channel count, retained so the rolling
     // noise state can be rebuilt with the same shape on `reset_streaming_state`.
     // `None` when the model samples its own noise.
@@ -380,6 +394,9 @@ impl RvcPipeline {
         config: RvcPipelineConfig<'_>,
         gtcrn: crate::denoise::GtcrnConfig<'_>,
     ) -> Result<Self> {
+        // This entry point loads the denoiser before Self::load; reject an
+        // unsupported hop before it can build a GPU engine or allocate caches.
+        RvcChunkTiming::from_samples(config.chunk_samples, config.sample_rate)?;
         if config.noise_gate_enabled {
             bail!("GTCRN and the input noise gate are mutually exclusive");
         }
@@ -411,6 +428,7 @@ impl RvcPipeline {
 
     pub fn load(config: RvcPipelineConfig<'_>) -> Result<Self> {
         report_progress(&config, LoadProgress::ValidatingConfig);
+        let chunk_timing = RvcChunkTiming::from_samples(config.chunk_samples, config.sample_rate)?;
         if provider_needs_fixed_shape_profile(config.provider) {
             return Self::load_fixed_shape(config);
         }
@@ -422,6 +440,7 @@ impl RvcPipeline {
         // all sizing math runs in the model's actual rate domain.
         let rvc_info = inspect_rvc_model(config.model)?;
         let rvc_sample_rate = rvc_info.rvc_sample_rate.unwrap_or(RVC_SAMPLE_RATE);
+        chunk_timing.samples_at_rate(rvc_sample_rate)?;
         // Capture the `rnd` channel count before `io_names` is moved into the
         // session, so the rolling-noise state can be sized (and rebuilt on reset).
         let rnd_channels = rvc_info
@@ -521,7 +540,14 @@ impl RvcPipeline {
             auto_output_gain: config.output_dynamics.auto_output_gain,
             target_output_rms: config.output_dynamics.target_output_rms,
             max_output_gain: config.output_dynamics.max_output_gain,
-            stream_state: RvcStreamState::new(rvc_sample_rate, rnd_channels, stream_params),
+            stream_state: RvcStreamState::new_configured(
+                rvc_sample_rate,
+                rnd_channels,
+                stream_params,
+                config.sample_rate,
+            )?,
+            chunk_timing,
+            input_sample_rate: config.sample_rate,
             rnd_channels,
             stream_params,
             rnd_scratch: Vec::new(),
@@ -540,6 +566,7 @@ impl RvcPipeline {
     }
 
     fn load_fixed_shape(config: RvcPipelineConfig<'_>) -> Result<Self> {
+        let chunk_timing = RvcChunkTiming::from_samples(config.chunk_samples, config.sample_rate)?;
         report_progress(&config, LoadProgress::PreparingProvider);
         // Windows ML catalog providers may also use fixed-shape profiles, but
         // their adapter selection is owned by Windows ML. Only explicit CUDA
@@ -591,6 +618,7 @@ impl RvcPipeline {
         let expected_feat_channels_usize = usize::try_from(expected_feat_channels)
             .context("RVC expected feature channel count does not fit in usize")?;
         let rvc_sample_rate = rvc_info.rvc_sample_rate.unwrap_or(RVC_SAMPLE_RATE);
+        chunk_timing.samples_at_rate(rvc_sample_rate)?;
         // Capture the `rnd` channel count before `io_names` is cloned/moved into
         // the sessions, so the rolling-noise state can be sized (and reset).
         let rnd_channels = rvc_info
@@ -1011,7 +1039,14 @@ impl RvcPipeline {
             auto_output_gain: config.output_dynamics.auto_output_gain,
             target_output_rms: config.output_dynamics.target_output_rms,
             max_output_gain: config.output_dynamics.max_output_gain,
-            stream_state: RvcStreamState::new(rvc_sample_rate, rnd_channels, stream_params),
+            stream_state: RvcStreamState::new_configured(
+                rvc_sample_rate,
+                rnd_channels,
+                stream_params,
+                config.sample_rate,
+            )?,
+            chunk_timing,
+            input_sample_rate: config.sample_rate,
             rnd_channels,
             stream_params,
             rnd_scratch: Vec::new(),
@@ -1123,8 +1158,12 @@ impl RvcPipeline {
         // Rebuilding the stream state re-seeds the rolling noise/phase state and
         // zeroes the NSF phase / absolute position, so a resumed stream is
         // reproducible from its start.
-        self.stream_state =
-            RvcStreamState::new(self.rvc_sample_rate, self.rnd_channels, self.stream_params);
+        self.stream_state = RvcStreamState::new_configured(
+            self.rvc_sample_rate,
+            self.rnd_channels,
+            self.stream_params,
+            self.input_sample_rate,
+        )?;
         #[cfg(feature = "gtcrn")]
         if let Some(mut gtcrn) = gtcrn {
             gtcrn.reset()?;
@@ -1143,9 +1182,35 @@ impl RvcPipeline {
         self.pitchf_postprocessed_scratch.clear();
         Ok(())
     }
+
+    /// Explicit input content delay, available before priming. Keep both rate
+    /// domains rational until the converter adds the joiner's delay, then round
+    /// once on its output grid; rounding stages separately can trim real audio.
+    pub fn input_content_delay(&self) -> ContentDelay {
+        ContentDelay::from_samples(
+            self.input_denoiser.content_delay_samples(),
+            self.input_sample_rate,
+        ) + ContentDelay::from_samples(
+            self.stream_state.input_content_delay_16k(),
+            super::shape::EMBEDDER_SAMPLE_RATE,
+        )
+    }
+
+    pub fn input_content_delay_samples(&self, output_sample_rate: u32) -> usize {
+        self.input_content_delay()
+            .output_samples(output_sample_rate)
+    }
 }
 
 impl VoiceModel for RvcPipeline {
+    fn input_content_delay(&self) -> ContentDelay {
+        RvcPipeline::input_content_delay(self)
+    }
+
+    fn input_content_delay_samples(&self, output_sample_rate: u32) -> usize {
+        RvcPipeline::input_content_delay_samples(self, output_sample_rate)
+    }
+
     fn process(
         &mut self,
         audio: &[f32],
@@ -1153,6 +1218,12 @@ impl VoiceModel for RvcPipeline {
         out_audio: &mut Vec<f32>,
         out_pitchf: &mut Vec<f32>,
     ) -> Result<ModelOutput> {
+        validate_process_timing(
+            self.chunk_timing,
+            self.input_sample_rate,
+            audio.len(),
+            sample_rate,
+        )?;
         let total_start = Instant::now();
         let input_gain = self.input_gain.max(0.0);
         let apply_gain = (input_gain - 1.0).abs() > f32::EPSILON;
@@ -1491,6 +1562,24 @@ impl VoiceModel for RvcPipeline {
     }
 }
 
+fn validate_process_timing(
+    timing: RvcChunkTiming,
+    configured_rate: u32,
+    samples: usize,
+    sample_rate: u32,
+) -> Result<()> {
+    if sample_rate != configured_rate || samples != timing.input_chunk_samples {
+        bail!(
+            "RVC pipeline expects {} samples at {} Hz, received {} samples at {} Hz; pad the final chunk or reload the pipeline when timing changes",
+            timing.input_chunk_samples,
+            configured_rate,
+            samples,
+            sample_rate,
+        );
+    }
+    Ok(())
+}
+
 /// Derive the streaming NSF time base from inspected metadata, validating the
 /// format version we implement. `None` for conventional (non-streaming) exports.
 fn stream_params_from_info(info: &super::inspect::RvcModelInfo) -> Result<Option<StreamParams>> {
@@ -1578,6 +1667,15 @@ impl std::fmt::Debug for RvcPipeline {
 #[cfg(test)]
 mod progress_tests {
     use super::*;
+
+    #[test]
+    fn process_timing_rejects_rate_and_chunk_changes_before_mutating_state() {
+        let timing = RvcChunkTiming::from_ms(20, 44_100).unwrap();
+        assert!(validate_process_timing(timing, 44_100, 882, 44_100).is_ok());
+        assert!(validate_process_timing(timing, 44_100, 881, 44_100).is_err());
+        assert!(validate_process_timing(timing, 44_100, 882, 48_000).is_err());
+        assert!(validate_process_timing(timing, 44_100, 0, 44_100).is_err());
+    }
 
     #[test]
     fn native_engine_build_progress_is_only_reported_for_cache_miss() {

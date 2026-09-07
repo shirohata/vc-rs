@@ -164,7 +164,7 @@ impl WorkerBench {
         let input = synthetic_signal(input_chunk, INPUT_RATE);
         let mut prepared = Vec::with_capacity(output_chunk * 2);
         converter
-            .process_chunk(&input, INPUT_RATE, None, &mut prepared)
+            .process_chunk(&input, INPUT_RATE, &mut prepared)
             .unwrap();
 
         let (mut input_producer, input_consumer) =
@@ -199,7 +199,6 @@ impl WorkerBench {
             .process_chunk(
                 &self.input_acc[..self.input_chunk],
                 INPUT_RATE,
-                None,
                 &mut self.prepared,
             )
             .unwrap();

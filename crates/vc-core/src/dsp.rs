@@ -6,16 +6,20 @@ use anyhow::{anyhow, Result};
 use rubato::audioadapter_buffers::direct::SequentialSlice;
 use rubato::{Fft, FixedSync, Resampler, WindowFunction};
 
+mod input_resample;
+mod output_resample;
+pub(crate) use input_resample::FixedInputResampler;
+pub(crate) use output_resample::OutputResampler;
+
 const STREAM_RESAMPLE_CHUNK: usize = 480;
 const STREAM_RESAMPLE_COMPACT_THRESHOLD: usize = STREAM_RESAMPLE_CHUNK * 8;
 
 /// Samples in a `chunk_ms` window at `sample_rate`, with a hard 128-sample
 /// floor.
 ///
-/// The floor keeps every front-end's chunk above the minimum the feature/F0
-/// extractors need at low sample rates or tiny chunk sizes; it is a shared
-/// invariant, so the three realtime drivers (CLI/GUI worker, VST3 worker) call
-/// this rather than each re-deriving the formula.
+/// Used for generic buffering, passthrough, and latency estimates. RVC model
+/// hops must instead use `validation::RvcChunkTiming`: flooring a sample count
+/// here cannot establish an exact duration on the model's 10 ms frame grid.
 pub fn chunk_samples_for_rate(sample_rate: u32, chunk_ms: u32) -> usize {
     ((sample_rate as u64 * chunk_ms as u64) / 1000).max(128) as usize
 }
@@ -327,6 +331,9 @@ pub fn apply_rms_mix_with_scratch(
 }
 
 pub fn resample_mono(input: &[f32], from_hz: usize, to_hz: usize) -> Result<Vec<f32>> {
+    if from_hz == 0 || to_hz == 0 {
+        return Err(anyhow!("resampler sample rates must be positive"));
+    }
     if from_hz == to_hz {
         return Ok(input.to_vec());
     }
@@ -334,30 +341,17 @@ pub fn resample_mono(input: &[f32], from_hz: usize, to_hz: usize) -> Result<Vec<
         return Ok(Vec::new());
     }
 
-    let requested_chunk = 1024;
-    // Preserve rubato 3's FFT partitioning and anti-aliasing filter. The newer
-    // `new` auto-selects sub-chunks, which can change delay and the passband.
-    let mut resampler = Fft::<f32>::new_custom(
-        from_hz,
-        to_hz,
-        requested_chunk,
-        1,
-        1,
-        WindowFunction::BlackmanHarris2,
-        FixedSync::Both,
-    )?;
-    let out_frames = resampler.process_all_needed_output_len(input.len()).max(1);
-    let input_adapter = SequentialSlice::new(input, 1, input.len())?;
-    let mut output = vec![0.0; out_frames];
-    let mut output_adapter = SequentialSlice::new_mut(&mut output, 1, out_frames)?;
-    let (_used_in, produced_out) = resampler.process_all_into_buffer(
-        &input_adapter,
-        &mut output_adapter,
-        input.len(),
-        None,
-    )?;
-
-    output.truncate(produced_out);
+    // Reuse the explicit block/drain implementation and its historical filter
+    // settings. rubato 5's process_all startup trim loses one sample for odd
+    // output blocks and can leave the filter delay on clips shorter than a
+    // block. Both alter the waveform/RMS reference, not merely vector length.
+    let mut resampler = OutputResampler::new(from_hz, to_hz, input.len())?;
+    resampler.append(input)?;
+    let mut output = Vec::new();
+    resampler.finish(&mut output)?;
+    let delay = resampler.delay_samples();
+    output.copy_within(delay.., 0);
+    output.truncate(output.len() - delay);
     Ok(output)
 }
 
@@ -373,6 +367,9 @@ pub struct StreamingResampleMono {
 
 impl StreamingResampleMono {
     pub fn new(from_hz: usize, to_hz: usize) -> Result<Self> {
+        if from_hz == 0 || to_hz == 0 {
+            return Err(anyhow!("resampler sample rates must be positive"));
+        }
         let resampler = if from_hz == to_hz {
             None
         } else {
@@ -407,6 +404,26 @@ impl StreamingResampleMono {
         let mut output = Vec::new();
         self.process_into(input, &mut output)?;
         Ok(output)
+    }
+
+    /// Output-domain priming that covers every phase of the input batch and
+    /// FFT block, including the filter startup samples removed by this wrapper.
+    /// A fixed-timeline caller must buffer this deficit; it must not discard
+    /// burst output or insert fresh silence whenever a call emits too little.
+    pub(crate) fn fixed_output_delay_samples(&self) -> usize {
+        let Some(resampler) = self.resampler.as_ref() else {
+            return 0;
+        };
+        // After N input samples, at most B-1 are outside rubato and F-1 are
+        // waiting inside its FFT accumulator. Everything else has been emitted
+        // at the exact rational rate, except D trimmed filter-delay samples.
+        // Thus deficit <= ceil((B+F-2)*to/from)+D. Query both sizes: rubato's
+        // fixed input chunk and its FFT block differ at rates such as 44.1 kHz.
+        let pending = resampler.input_frames_max() as u128 + resampler.fft_size_in() as u128 - 2;
+        let pending_output = (pending * self.to_hz as u128).div_ceil(self.from_hz as u128);
+        usize::try_from(pending_output)
+            .expect("resampler delay must fit in usize")
+            .saturating_add(resampler.output_delay())
     }
 
     pub fn process_into(&mut self, input: &[f32], output: &mut Vec<f32>) -> Result<()> {
@@ -1003,6 +1020,54 @@ mod tests {
         let input = vec![0.0; 10_496];
         let out = resample_mono(&input, 48_000, 16_000).unwrap();
         assert_eq!(out.len(), 3_499);
+    }
+
+    #[test]
+    fn finite_resampling_trims_short_clips_and_odd_blocks_like_raw_fft() {
+        // Independent raw FFT reference: never call OutputResampler or rubato's
+        // convenience process_all (whose startup trim caused this regression).
+        for (from, to) in [(48_000, 44_100), (44_100, 48_000), (48_000, 16_000)] {
+            for len in [1, 7, 127, 1023, 1024, 1025, 3337] {
+                let mut input = vec![0.0; len];
+                input[0] = 0.4;
+                input[len - 1] += 0.6;
+                let mut fft = Fft::<f32>::new_custom(
+                    from,
+                    to,
+                    1024,
+                    1,
+                    1,
+                    WindowFunction::BlackmanHarris2,
+                    FixedSync::Both,
+                )
+                .unwrap();
+                let block_in = fft.input_frames_next();
+                let block_out = fft.output_frames_next();
+                let delay = fft.output_delay();
+                let expected_len = (len * to).div_ceil(from);
+                let blocks = (delay + expected_len).div_ceil(block_out);
+                let mut padded = input.clone();
+                padded.resize(blocks * block_in, 0.0);
+                let mut untrimmed = vec![0.0; blocks * block_out];
+                for (source, destination) in
+                    padded.chunks(block_in).zip(untrimmed.chunks_mut(block_out))
+                {
+                    let source = SequentialSlice::new(source, 1, block_in).unwrap();
+                    let mut destination =
+                        SequentialSlice::new_mut(destination, 1, block_out).unwrap();
+                    fft.process_into_buffer(&source, &mut destination, None)
+                        .unwrap();
+                }
+                let actual = resample_mono(&input, from, to).unwrap();
+                assert_eq!(actual.len(), expected_len);
+                assert_eq!(
+                    actual,
+                    untrimmed[delay..delay + expected_len],
+                    "{from}->{to}, len {len}"
+                );
+                assert!(actual.iter().any(|sample| sample.abs() > 0.01));
+            }
+        }
     }
 
     #[test]

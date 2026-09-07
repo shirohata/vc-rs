@@ -97,7 +97,7 @@ pub(super) struct RvcStreamState {
     /// `RVC_SAMPLE_RATE`). Fixed per model — distinct from `sample_rate`, which is
     /// the device/input rate. Sizes `out_size` and the RVC-domain conversions.
     pub(super) rvc_sample_rate: u32,
-    pub(super) resampler_16k: Option<dsp::StreamingResampleMono>,
+    pub(super) resampler_16k: Option<dsp::FixedInputResampler>,
     // Backend-neutral CPU time state (latent `rnd` noise; Step 2 adds NSF
     // phase / nsf_noise). Rolled in lockstep with `pitchf_buffer` so per-frame
     // noise tracks the same absolute feature window. Inert when the model has no
@@ -136,6 +136,45 @@ impl RvcStreamState {
         }
     }
 
+    pub(super) fn new_configured(
+        rvc_sample_rate: u32,
+        rnd_channels: Option<usize>,
+        stream: Option<StreamParams>,
+        input_sample_rate: u32,
+    ) -> Result<Self> {
+        let mut state = Self::new(rvc_sample_rate, rnd_channels, stream);
+        state.configure_input_rate(input_sample_rate)?;
+        Ok(state)
+    }
+
+    pub(super) fn input_content_delay_16k(&self) -> usize {
+        let delay = self.resampler_16k.as_ref().map_or(0, |r| r.delay_samples());
+        #[cfg(feature = "gtcrn")]
+        let delay = delay + self.gtcrn.as_ref().map_or(0, |g| g.latency_samples());
+        delay
+    }
+
+    fn configure_input_rate(&mut self, sample_rate: u32) -> Result<()> {
+        let resampler =
+            dsp::FixedInputResampler::new(sample_rate as usize, EMBEDDER_SAMPLE_RATE as usize)?;
+        self.audio_buffer.clear();
+        self.audio_16k_buffer.clear();
+        self.pitchf_buffer.clear();
+        self.prev_vol = 0.0;
+        self.prev_silence = false;
+        self.sample_rate = sample_rate;
+        self.resampler_16k = Some(resampler);
+        // A new input timeline must reset waveform, F0, random/phase histories
+        // and denoiser caches together. Production changes rebuild the pipeline
+        // so fixed profiles and device-rate denoising also use the new rate.
+        self.time_state.reset();
+        #[cfg(feature = "gtcrn")]
+        if let Some(gtcrn) = self.gtcrn.as_mut() {
+            gtcrn.reset()?;
+        }
+        Ok(())
+    }
+
     pub(super) fn generate_input(
         &mut self,
         new_audio: &[f32],
@@ -145,27 +184,12 @@ impl RvcStreamState {
         extra_convert_samples: usize,
     ) -> Result<RvcStreamInput> {
         if self.sample_rate != sample_rate {
-            self.audio_buffer.clear();
-            self.audio_16k_buffer.clear();
-            self.pitchf_buffer.clear();
-            self.prev_vol = 0.0;
-            self.prev_silence = false;
-            self.sample_rate = sample_rate;
-            self.resampler_16k = Some(dsp::StreamingResampleMono::new(
-                sample_rate as usize,
-                EMBEDDER_SAMPLE_RATE as usize,
-            )?);
-            // A device sample-rate change restarts the stream; the audio timeline
-            // breaks, so drop the per-frame noise/phase history too.
-            self.time_state.reset();
-            // A device sample-rate change restarts the stream; reset GTCRN's
-            // fixed-delay/cache state so it does not emit pre-restart audio.
-            #[cfg(feature = "gtcrn")]
-            if let Some(gtcrn) = self.gtcrn.as_mut() {
-                gtcrn.reset()?;
-            }
+            self.configure_input_rate(sample_rate)?;
         }
 
+        // RvcPipeline validates a fixed whole-10-ms hop before reaching this
+        // worker-only helper. Consequently this division is exact and the
+        // waveform increment equals new_feature_len * 160 on every call.
         let new_audio_16k_samples = samples_between_rates(
             new_audio.len(),
             sample_rate,
@@ -178,7 +202,7 @@ impl RvcStreamState {
         self.resampler_16k
             .as_mut()
             .ok_or_else(|| anyhow!("16kHz stream resampler is not initialized"))?
-            .process_into(new_audio, &mut self.audio_16k_buffer)?;
+            .process_into(new_audio, new_audio_16k_samples, &mut self.audio_16k_buffer)?;
         // GTCRN denoises exactly the new 16 kHz increment, in place, BEFORE the
         // windowing below. Guardrail: process only the increment, never the
         // re-windowed `audio_16k_buffer`, so its length — and thus
@@ -190,7 +214,7 @@ impl RvcStreamState {
             gtcrn.process_in_place(&mut self.audio_16k_buffer[new_16k_start..])?;
         }
         // input_rms/silence run on the 16 kHz post-input-denoiser signal (the same
-        // one ContentVec/F0 see) for every mode. Measure the raw new increment
+        // one ContentVec/F0 see) for every mode. Measure the fixed new increment
         // here, before the windowing below left-pads the front — so this never
         // touches the zero pad.
         let input_rms = dsp::rms(&self.audio_16k_buffer[new_16k_start..]);
@@ -294,5 +318,121 @@ impl RvcStreamState {
         // fall off, matching the full-window WebUI assignment above while
         // preserving the absolute frame offset of a tail-only RMVPE window.
         self.pitchf_buffer[dst_start..dst_start + n].copy_from_slice(&f0[..n]);
+    }
+}
+
+#[cfg(test)]
+mod timeline_tests {
+    use super::*;
+
+    #[test]
+    fn waveform_pitch_and_generator_noise_advance_together_at_44100_hz() {
+        for chunk_ms in [20, 30, 100, 500] {
+            let chunk_samples = 44_100 * chunk_ms / 1000;
+            let hop = 16_000 * chunk_ms / 1000;
+            let advance_frames = hop / 160;
+            let mut state = RvcStreamState::new_configured(
+                48_000,
+                Some(1),
+                Some(StreamParams {
+                    frame_hop: 480,
+                    sample_rate: 48_000,
+                }),
+                44_100,
+            )
+            .unwrap();
+            let mut reference_resampler = dsp::StreamingResampleMono::new(44_100, 16_000).unwrap();
+            let mut reference = vec![0.0; state.input_content_delay_16k()];
+            let mut previous_audio = Vec::new();
+            let mut previous_pitch = Vec::new();
+            let mut previous_rnd = Vec::new();
+            let mut previous_nsf = Vec::new();
+            let mut input = vec![0.0; chunk_samples];
+            for call in 0..100 {
+                for (i, sample) in input.iter_mut().enumerate() {
+                    *sample = (((call * chunk_samples + i) as f64 * 0.037).sin() * 0.4) as f32;
+                }
+                reference_resampler
+                    .process_into(&input, &mut reference)
+                    .unwrap();
+                let result = state
+                    .generate_input(&input, 44_100, 960, 0, 24_000)
+                    .unwrap();
+                let samples_seen = (call + 1) * hop;
+                let window = state.audio_16k_buffer.len();
+                let frames = window / 160;
+                let mut expected = vec![0.0; window.saturating_sub(samples_seen)];
+                expected.extend_from_slice(
+                    &reference[samples_seen.saturating_sub(window)..samples_seen],
+                );
+                assert_eq!(
+                    state.audio_16k_buffer, expected,
+                    "{chunk_ms} ms call {call}"
+                );
+                assert_eq!(result.input_rms, dsp::rms(&expected[window - hop..]));
+                assert_eq!(
+                    state.time_state.absolute_position(),
+                    ((samples_seen / 160) as u64, (samples_seen * 3) as u64)
+                );
+                let mut rnd = Vec::new();
+                let mut nsf = Vec::new();
+                assert!(state.time_state.rnd_window_into(frames, frames, &mut rnd));
+                assert!(state
+                    .time_state
+                    .nsf_noise_window_into(frames, frames, &mut nsf));
+                if call > 0 {
+                    assert_eq!(
+                        &state.audio_16k_buffer[..window - hop],
+                        &previous_audio[hop..]
+                    );
+                    assert_eq!(
+                        &state.pitchf_buffer[..frames - advance_frames],
+                        &previous_pitch[advance_frames..]
+                    );
+                    assert_eq!(
+                        &rnd[..frames - advance_frames],
+                        &previous_rnd[advance_frames..]
+                    );
+                    assert_eq!(
+                        &nsf[..(frames - advance_frames) * 480],
+                        &previous_nsf[advance_frames * 480..]
+                    );
+                }
+                // Frame identifiers stand in for the RMVPE history update; the
+                // next call must retain the same absolute frames as waveform.
+                for (frame, pitch) in state.pitchf_buffer.iter_mut().enumerate() {
+                    *pitch = (call * advance_frames + frame + 1) as f32;
+                }
+                previous_audio.clone_from(&state.audio_16k_buffer);
+                previous_pitch.clone_from(&state.pitchf_buffer);
+                previous_rnd = rnd;
+                previous_nsf = nsf;
+            }
+        }
+    }
+
+    #[test]
+    fn input_rate_restart_resets_the_complete_timeline() {
+        let mut used = RvcStreamState::new(48_000, Some(1), None);
+        used.generate_input(&vec![0.7; 4410], 44_100, 480, 0, 4800)
+            .unwrap();
+        used.pitchf_buffer.fill(123.0);
+        let new_input = vec![0.2; 4800];
+        used.generate_input(&new_input, 48_000, 480, 0, 4800)
+            .unwrap();
+        let mut fresh = RvcStreamState::new(48_000, Some(1), None);
+        fresh
+            .generate_input(&new_input, 48_000, 480, 0, 4800)
+            .unwrap();
+        assert_eq!(used.audio_16k_buffer, fresh.audio_16k_buffer);
+        assert_eq!(used.pitchf_buffer, fresh.pitchf_buffer);
+        assert_eq!(
+            used.time_state.absolute_position(),
+            fresh.time_state.absolute_position()
+        );
+        assert_eq!(
+            used.input_content_delay_16k(),
+            fresh.input_content_delay_16k()
+        );
     }
 }

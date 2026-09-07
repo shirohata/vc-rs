@@ -312,10 +312,13 @@ fn file_row(ui: &mut egui::Ui, label: &str, current: &Path) -> bool {
 fn ms_slider(ui: &mut egui::Ui, label: &str, current: u32, min: u32, max: u32) -> Option<u32> {
     ui.horizontal(|ui| {
         ui.label(label);
-        let mut v = current.clamp(min, max);
+        let mut v = current;
         let changed = ui
             .add(
                 egui::Slider::new(&mut v, min..=max)
+                    // Merely showing an invalid saved value must not silently
+                    // snap it before the worker can report the validation error.
+                    .clamping(egui::SliderClamping::Edits)
                     .step_by(MS_STEP as f64)
                     .suffix(" ms"),
             )
@@ -480,6 +483,18 @@ fn mark_dirty(state: &EditorState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn displaying_chunk_slider_does_not_round_invalid_persisted_values() {
+        let context = egui::Context::default();
+        for chunk_ms in [19, 25, 2001] {
+            let mut edited = None;
+            let _ = context.run_ui(egui::RawInput::default(), |ui| {
+                edited = ms_slider(ui, "Chunk", chunk_ms, MIN_CHUNK_MS, MAX_CHUNK_MS);
+            });
+            assert_eq!(edited, None, "display silently changed {chunk_ms} ms");
+        }
+    }
 
     #[test]
     fn gpu_device_label_preserves_unknown_saved_id() {

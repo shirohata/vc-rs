@@ -50,9 +50,12 @@ impl FrameDenoiser for RnnoiseFrameProcessor {
     }
 
     fn output_delay_frames(&self) -> usize {
-        // RNNoise is sample-aligned: its output frame corresponds to the input
-        // frame, with no overlap-add reconstruction delay.
-        0
+        // nnnoiseless analyzes [previous frame, current frame], emits the first
+        // half in frame_synthesis(), and stores the second half for overlap-add.
+        // Silent warmup initializes that history but cannot remove the ongoing
+        // one-frame content delay. This is reported, not primed a second time;
+        // keep finite-tail trimming and the impulse regression aligned with it.
+        1
     }
 
     fn process_frame(&mut self, input: &[f32], output: &mut [f32]) -> Result<()> {
@@ -111,6 +114,42 @@ impl RnnoiseDenoiser {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reconstruction_impulse_confirms_one_frame_content_delay() {
+        let frame = DenoiseState::FRAME_SIZE;
+        let impulse_position = frame / 2;
+        let mut processor = RnnoiseFrameProcessor::new();
+        let mut input = vec![0.0; frame];
+        input[impulse_position] = 0.8;
+        let mut output = vec![0.0; frame * 4];
+        for (index, chunk) in output.chunks_mut(frame).enumerate() {
+            processor.process_frame(&input, chunk).unwrap();
+            if index == 0 {
+                input.fill(0.0);
+            }
+        }
+        let peak = output
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.abs().total_cmp(&b.abs()))
+            .unwrap()
+            .0;
+        assert_eq!(peak, impulse_position + frame);
+        assert_eq!(processor.output_delay_frames(), 1);
+
+        let mut adapter = RnnoiseDenoiser::new(48_000).unwrap();
+        let mut delayed = vec![0.0; frame * 8];
+        delayed[impulse_position] = 0.8;
+        adapter.process_in_place(&mut delayed).unwrap();
+        let peak = delayed
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.abs().total_cmp(&b.abs()))
+            .unwrap()
+            .0;
+        assert_eq!(peak, impulse_position + adapter.latency_samples());
+    }
 
     #[test]
     fn streaming_calls_preserve_length_at_common_rates() {

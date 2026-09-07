@@ -9,12 +9,13 @@ use tracing::{debug, info};
 use vc_app::{
     write_wav_mono, DenoiserMode, EngineController, EngineState, LiveParams, RealtimeConfig,
 };
-use vc_core::dsp;
 use vc_core::model_rvc::{
-    set_process_gpu_priority, set_process_power_throttling, ChunkConverter, ChunkOutputConfig,
-    F0Config, GpuPriority, NoiseGateShaping, OutputDynamicsConfig, RvcPipeline, RvcPipelineConfig,
+    convert_finite, set_process_gpu_priority, set_process_power_throttling, ChunkConverter,
+    ChunkOutputConfig, F0Config, GpuPriority, NoiseGateShaping, OutputDynamicsConfig, RvcPipeline,
+    RvcPipelineConfig,
 };
 use vc_core::sola::SmoothingKind;
+use vc_core::validation::RvcChunkTiming;
 
 use crate::cli::{Denoiser, RunArgs, Smoother, WavArgs};
 use crate::join_report::JoinReport;
@@ -132,6 +133,8 @@ pub fn run_wav(args: WavArgs) -> Result<()> {
     args.validate_conversion_options()
         .map_err(anyhow::Error::msg)?;
     let (mut samples, spec) = read_wav_mono(&args.input)?;
+    let chunk_samples =
+        RvcChunkTiming::from_ms(args.chunk_ms, spec.sample_rate)?.input_chunk_samples;
     let denoiser_mode = args.denoiser_mode();
     let pipeline_input_gain = if denoiser_mode == Denoiser::Rnnoise {
         for sample in &mut samples {
@@ -142,7 +145,6 @@ pub fn run_wav(args: WavArgs) -> Result<()> {
     } else {
         args.input_gain
     };
-    let chunk_samples = dsp::chunk_samples_for_rate(spec.sample_rate, args.chunk_ms);
     // Must cover the SOLA window the joiner actually uses, so the model emits
     // enough extra audio to feed `crossfade_ms` + `sola_search_ms` + tail.
     let output_extra_ms = args
@@ -195,11 +197,11 @@ pub fn run_wav(args: WavArgs) -> Result<()> {
         },
         progress: None,
     };
-    // GTCRN runs at the 16 kHz seam inside the pipeline (load_with_gtcrn), not as
-    // a device-rate pre-pass like RNNoise. Its ~48 ms fixed delay shifts content
-    // slightly at the clip boundaries; output length still matches the input.
+    // GTCRN stays on the shared 16 kHz seam. The finite core adapter drains and
+    // removes its declared content delay together with the other streaming
+    // buffers, rather than truncating that delayed speech at the clip end.
     let model = load_wav_pipeline(denoiser_mode, args.gtcrn_model.as_deref(), pipeline_config)?;
-    let mut converter = ChunkConverter::new(
+    let converter = ChunkConverter::new(
         model,
         ChunkOutputConfig {
             kind: smoothing_kind(args.smoother),
@@ -210,52 +212,35 @@ pub fn run_wav(args: WavArgs) -> Result<()> {
             tail_discard_ms: args.rvc_output_tail_discard_ms,
         },
     );
-    let mut output = Vec::with_capacity(samples.len());
-    let mut chunks = 0usize;
-    let mut final_tail = Vec::new();
-    let preroll = vec![0.0; chunk_samples];
-    converter.prime(&preroll, spec.sample_rate)?;
-
+    let converted = convert_finite(converter, &samples, spec.sample_rate, chunk_samples)?;
+    let output = converted.audio;
+    let chunks = converted
+        .chunks
+        .iter()
+        .filter(|chunk| !chunk.flushing)
+        .count();
     let mut join_report = args
         .join_report
         .as_ref()
         .map(|_| JoinReport::new(spec.sample_rate));
 
-    let mut fixed_chunk_pad = Vec::new();
-    let mut chunk_out = Vec::new();
-    for chunk in samples.chunks(chunk_samples) {
-        let model_input = wav_model_input_chunk(chunk, chunk_samples, &mut fixed_chunk_pad);
-        let stats = converter.process_chunk(
-            model_input,
-            spec.sample_rate,
-            Some(&mut final_tail),
-            &mut chunk_out,
-        )?;
+    for chunk in converted.chunks {
         debug!(
-            "wav chunk={} input_samples={} output_samples={}",
-            chunks,
-            chunk.len(),
-            stats.model_output_samples
+            "wav chunk={} flushing={} model_output_samples={}",
+            chunk.index, chunk.flushing, chunk.stats.model_output_samples
         );
-        output.extend_from_slice(&chunk_out);
-        if let Some(report) = join_report.as_mut() {
-            // Record after appending so the seam against the previous chunk is in
-            // `output`. Diagnostics are read back from the converter's smoother.
-            let diag = converter.last_join_diagnostics().unwrap_or_default();
-            // Pre-cap target so `crossfade_capped` reflects the 3/4-of-chunk cap
-            // (the low-latency case), not just the per-chunk runtime clamp.
-            let crossfade_target = converter.join_requested_crossfade_samples().unwrap_or(0);
-            report.record(chunks, &output, chunk_samples, diag, crossfade_target);
+        if let (Some(report), Some(seam)) = (join_report.as_mut(), chunk.seam_sample) {
+            // Measure the written, delay-compensated WAV, not the discarded
+            // startup or FFT FIFO boundary. Drain calls can contain real speech.
+            report.record_at(
+                chunk.index,
+                &output,
+                seam,
+                chunk.join,
+                chunk.requested_crossfade_samples,
+            );
         }
-        chunks += 1;
     }
-    if output.len() < samples.len() {
-        let missing = samples.len() - output.len();
-        output.extend_from_slice(&final_tail[..missing.min(final_tail.len())]);
-    }
-    // Pad a short tail with silence / trim any overshoot so the output length
-    // matches the input exactly.
-    output.resize(samples.len(), 0.0);
     write_wav_mono(&args.output, &output, spec.sample_rate)?;
     info!(
         "wrote {} samples at {} Hz to {} (chunks={})",
@@ -317,21 +302,6 @@ fn process_rnnoise_finite(_samples: &[f32], _sample_rate: u32) -> Result<Vec<f32
     anyhow::bail!("RNNoise support is not enabled in this build")
 }
 
-fn wav_model_input_chunk<'a>(
-    chunk: &'a [f32],
-    chunk_samples: usize,
-    scratch: &'a mut Vec<f32>,
-) -> &'a [f32] {
-    if chunk.len() < chunk_samples {
-        scratch.clear();
-        scratch.extend_from_slice(chunk);
-        scratch.resize(chunk_samples, 0.0);
-        scratch.as_slice()
-    } else {
-        chunk
-    }
-}
-
 fn read_wav_mono(path: &Path) -> Result<(Vec<f32>, hound::WavSpec)> {
     let mut reader = hound::WavReader::open(path)
         .with_context(|| format!("failed to open {}", path.display()))?;
@@ -352,18 +322,4 @@ fn read_wav_mono(path: &Path) -> Result<(Vec<f32>, hound::WavSpec)> {
             .collect(),
     };
     Ok((samples, spec))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::wav_model_input_chunk;
-
-    #[test]
-    fn pads_short_wav_chunk() {
-        let mut scratch = Vec::new();
-        assert_eq!(
-            wav_model_input_chunk(&[0.25, -0.5], 4, &mut scratch),
-            &[0.25, -0.5, 0.0, 0.0]
-        );
-    }
 }

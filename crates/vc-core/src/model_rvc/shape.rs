@@ -152,6 +152,10 @@ pub(super) fn tensor_rt_convert_size_16k(
     extra_convert_samples: usize,
     rvc_sample_rate: u32,
 ) -> usize {
+    // Pipeline construction validates the new-audio hop with RvcChunkTiming,
+    // so this rate conversion is exact for production chunks. Only the full
+    // context window is rounded to ContentVec's 20 ms stride below; never use
+    // that aligned window size to advance audio, F0, latent noise, or NSF phase.
     let new_audio_16k_samples = samples_between_rates(
         new_audio_samples,
         sample_rate,

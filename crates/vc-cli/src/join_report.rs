@@ -1,7 +1,8 @@
 //! Offline analysis of chunk-join quality for `vc-rs wav --join-report`.
 //!
-//! WAV conversion concatenates fixed-length output chunks, so every chunk seam
-//! sits at a known sample (`chunk_index * chunk_samples`) in the written audio.
+//! The finite core adapter maps each model chunk's join into the written WAV
+//! after output resampling and startup-delay removal. Those positions need not
+//! be multiples of the host chunk size.
 //! This module measures the discontinuity at each seam and pairs it with the
 //! smoother's own per-chunk decisions ([`vc_core::sola::JoinDiagnostics`]) so an
 //! audible artifact can be traced to *why* the join went wrong (low correlation,
@@ -102,7 +103,7 @@ pub struct ChunkRecord {
     pub diag: JoinDiagnostics,
     /// Configured crossfade window (model domain); lets readers see capping.
     pub crossfade_target: usize,
-    /// `None` for chunk 0 (no preceding chunk to join against).
+    /// `None` for a boundary at the very start of the written clip.
     pub seam: Option<SeamMetrics>,
 }
 
@@ -120,18 +121,17 @@ impl JoinReport {
         }
     }
 
-    /// Records one emitted chunk. `output` is the full audio assembled so far
-    /// (the current chunk already appended) so the seam against the previous
-    /// chunk can be measured. `chunk_samples` is the fixed output chunk length.
-    pub fn record(
+    /// Record a join at its actual position after finite-output delay removal.
+    /// Chunk indices include zero-input drain calls because these can recover
+    /// real speech that was held upstream; omitted startup joins leave gaps.
+    pub fn record_at(
         &mut self,
         chunk: usize,
         output: &[f32],
-        chunk_samples: usize,
+        seam_sample: usize,
         diag: JoinDiagnostics,
         crossfade_target: usize,
     ) {
-        let seam_sample = chunk * chunk_samples;
         // ~5 ms window each side; clamped to at least a few samples for tiny rates.
         let window = ((self.sample_rate as usize * 5) / 1000).max(4);
         let seam = seam_metrics(output, seam_sample, window);
@@ -204,7 +204,7 @@ impl JoinReport {
 
     /// Human-readable summary (worst seams, correlation/fallback/capping rates).
     pub fn summary(&self) -> String {
-        // Chunk 0 has no seam; aggregate over the rest.
+        // Only joins with two retained neighbours have measurable seams.
         let seams: Vec<&ChunkRecord> = self.records.iter().filter(|r| r.seam.is_some()).collect();
         if seams.is_empty() {
             return String::from("join report: no seams (single chunk)");
@@ -248,6 +248,16 @@ impl JoinReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn report_measures_delay_compensated_boundary_in_written_audio() {
+        let mut output = vec![0.0; 200];
+        output[73..].fill(0.5);
+        let mut report = JoinReport::new(16_000);
+        report.record_at(2, &output, 73, JoinDiagnostics::default(), 160);
+        assert_eq!(report.records[0].seam_sample, 73);
+        assert_eq!(report.records[0].seam.unwrap().sample_step, 0.5);
+    }
 
     #[test]
     fn seam_metrics_flags_injected_step() {

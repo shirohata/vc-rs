@@ -15,7 +15,7 @@ chunk-conversion, smoothing, or output-assembly implementations.
 ## Module Boundaries
 
 - `vc-core`: shared audio-I/O-agnostic conversion components, including
-  `RvcPipeline`, `ChunkConverter`, DSP, and SOLA/PSOLA smoothing.
+  `RvcPipeline`, `ChunkConverter`, `convert_finite`, DSP, and SOLA/PSOLA smoothing.
 - `vc-app`: shared standalone realtime runtime for CLI and GUI, including device
   I/O, bounded queues, worker orchestration, and metrics. The audio host is the
   `AudioHost` enum (cpal-`HostId`-aligned: `Wasapi`/`Asio`/`CoreAudio`/`Alsa`/`Jack`)
@@ -51,10 +51,10 @@ still adapt host audio to the shared conversion components and keep its distinct
 worker and buffering behavior narrowly scoped to host integration.
 
 WAV conversion is an offline adapter around the same `RvcPipeline` and
-`ChunkConverter` path used for realtime conversion. Offline processing may use
-different scheduling, prime the smoother, pad a partial input chunk, and collect
-the final tail explicitly. Those differences must not become a separate model,
-chunk-conversion, smoothing, or output-shaping path.
+`ChunkConverter` path used for realtime conversion. The shared core
+`convert_finite` owns priming, partial-chunk padding, zero-input drain, and
+content-delay removal. CLI code supplies file I/O and consumes the result;
+it does not implement a second model or output-assembly path.
 
 When a hosting constraint requires a front-end-specific behavior, document the
 constraint near the implementation and preserve the shared path for all
@@ -69,7 +69,8 @@ flowchart LR
     in_ring --> worker["Worker thread"]
     worker --> model["RVC pipeline"]
     model --> smooth["SOLA / PSOLA smoother"]
-    smooth --> out_ring["Output ring buffer"]
+    smooth --> resample["Persistent output resampler / FIFO"]
+    resample --> out_ring["Output ring buffer"]
     out_ring --> out_cb["Output audio callback"]
     out_cb --> speaker["Output device"]
 ```
@@ -107,8 +108,8 @@ routes available on the worker. The live passthrough flag is sampled once per
 input chunk. Passthrough stops invoking RVC inference and applies input gain,
 the configured input denoiser, device-rate resampling, and output gain. When
 conversion resumes, the worker clears stale RVC rolling context and smoother
-history before processing the next chunk. Model-free sessions expose only the
-passthrough route.
+history together with the input/output resamplers and denoiser state before
+processing the next chunk. Model-free sessions expose only the passthrough route.
 
 ## Chunk Lifecycle
 
@@ -116,16 +117,41 @@ Realtime audio arrives in device callback-sized blocks, but the model operates
 on larger logical chunks. The worker accumulates input samples until one model
 chunk is available, then sends that chunk through the RVC pipeline.
 
+RVC settings use whole 10 ms hops within the frontend's 20–2000 ms range.
+`validation::RvcChunkTiming` validates the duration without rounding: each hop
+must contain integer samples at the input, 16 kHz, model, and output rates.
+25 ms is rejected; 20 or 30 ms is valid at 16/44.1/48 kHz, while 22.05 kHz
+requires multiples of 20 ms. Validation first checks the configured duration,
+then the device/file rates, and finally the native model rate when it is known.
+Settings displayed in GUI/VST3 are not silently rounded to a different duration.
+Model-free passthrough retains its existing arbitrary-duration behavior; a
+complete model set still requires valid RVC timing when initially bypassed,
+because that session can switch to conversion live.
+
+`RvcPipeline` stores the validated input rate and hop at load time. Its public
+`process` rejects a different rate or sample count before changing denoiser,
+waveform, pitch, or generator state. A chunk/rate change therefore rebuilds the
+pipeline and converter, including their fixed inference profiles and FIFOs.
+Only a final offline partial chunk is padded to the loaded hop by `convert_finite`.
+
 The RVC pipeline does not treat each chunk as isolated audio. It keeps streaming
 state for recent input, 16 kHz resampled audio, content features, and F0 frames.
 Each inference window includes the current chunk plus enough recent context and
 extra output allowance for smoothing. The model output is then trimmed to the
 tail that corresponds to the current chunk and the smoother search window.
 
+ContentVec's 20 ms context alignment is separate from RVC's 10 ms hop. Aligning
+the full inference window must not increase the amount by which the audio, F0,
+`rnd`, or NSF timeline advances. For a validated hop,
+`chunk_samples_16k == advance_frames * 160`; both feature/pitch state and waveform
+history advance by that exact duration, including a 30 ms hop. This timing
+contract does not by itself guarantee identical ContentVec features in the
+overlap of windows shifted by an odd number of 10 ms frames.
+
 This lifecycle preserves three invariants:
 
-- The output smoother emits a fixed number of device-rate samples per input
-  chunk.
+- The smoother commits one fixed model-rate hop; `ChunkConverter` resamples it
+  into a fixed output-rate hop with exactly the same duration.
 - Feature frames, continuous F0, coarse pitch, and model output must refer to
   the same time window.
 - The realtime callback sees only queued samples, never model-domain state.
@@ -135,10 +161,10 @@ This lifecycle preserves three invariants:
 ```mermaid
 flowchart TD
     input["Device-rate mono chunk"] --> denoise["Off / Gate / RNNoise<br/>(device rate)"]
-    denoise --> state["Rolling stream state"]
-    state --> resample["Resample to 16 kHz<br/>(+ GTCRN denoise, if active)"]
-    resample --> embed["Content embedder"]
-    resample --> f0["F0 estimator"]
+    denoise --> resample["Persistent input resampler / FIFO<br/>(fixed 16 kHz increment)"]
+    resample --> state["GTCRN, if active<br/>then rolling 16 kHz context"]
+    state --> embed["Content embedder"]
+    state --> f0["F0 estimator"]
     embed --> feats["Content feature 2x upsampling"]
     f0 --> pitchf["Continuous F0 alignment"]
     pitchf --> coarse["Coarse pitch bins"]
@@ -148,7 +174,8 @@ flowchart TD
     rvc --> tail["Select stable output tail"]
     tail --> level["RMS/envelope/gain shaping"]
     level --> join["SOLA or PSOLA chunk join"]
-    join --> device["Device-rate output chunk"]
+    join --> output_resample["Persistent output resampler / FIFO"]
+    output_resample --> device["Fixed device-rate output chunk"]
 ```
 
 Standalone RNNoise (48 kHz) runs at the **device rate**, after input gain and
@@ -191,6 +218,31 @@ After generation, the output may be shaped by volume envelope, RMS mixing, and
 manual or automatic gain. These operations happen before chunk joining so the
 smoother compares and crossfades audio at the level that will actually be
 played.
+
+### Continuous resampling with fixed hops
+
+Rubato can emit samples in bursts whose sizes differ from the logical RVC hop.
+`dsp::FixedInputResampler` buffers that continuous output and supplies exactly the
+validated 16 kHz increment to `RvcStreamState` on every call. Its FIFO starts
+with one declared delay that covers filter startup and incomplete FFT/input
+blocks across every batch phase. It then retains all excess output for later
+hops; it never truncates a burst or inserts fresh silence to conceal an underrun.
+An underrun is an error in the timing contract. Equal rates bypass resampling
+and add no resampler delay.
+
+After SOLA/PSOLA joins in the native model rate, `ChunkConverter` sends only the
+committed, non-overlapping hop to its persistent `dsp::OutputResampler`.
+Candidate search/crossfade margins must not be resampled again as new audio.
+The output adapter retains filter and FIFO state across chunks, removes filter
+startup once, and declares its fixed output-domain buffering delay. It requires
+the model and output hops to have exactly equal rational durations. Resetting
+this adapter per chunk, or appending a separately resampled overlap tail, breaks
+the filter timeline and can create audible seams.
+
+`dsp::resample_mono` uses the same output adapter with finite draining and one
+startup-delay removal. It remains appropriate for isolated buffers such as the
+RMS reference; the committed converted output uses the persistent adapter owned
+by `ChunkConverter`.
 
 ### Generator time state (`rnd` noise, NSF phase, `nsf_noise`)
 
@@ -255,13 +307,18 @@ without touching callers.
     those engines rebuild each load but tear down cleanly. Non-streaming
     `windowsml-nvtrtx` keeps the cache.
 
-- **Reset.** All of the above reset together whenever the audio timeline breaks —
-  stream restart, sample-rate or chunk change, model reload, or passthrough↔RVC
-  toggle — via the single `RvcStreamState` rebuild in
-  `RvcPipeline::reset_streaming_state` (and the device-rate-change clear inside
-  `generate_input`). Reset re-seeds the generators and zeroes the NSF phase and
-  absolute position, so a resumed stream is reproducible from its start. Models
-  with none of these inputs are entirely unaffected.
+- **Reset.** Resuming conversion after passthrough invokes both
+  `RvcPipeline::reset_streaming_state` and
+  `ChunkConverter::reset_streaming_state`. The pipeline resets its denoisers and
+  rebuilds `RvcStreamState` at the loaded input rate, clearing waveform/F0
+  history and the fixed input FIFO, re-seeding noise, and zeroing NSF phase and
+  absolute position. The converter clears the smoother and output filter/FIFO
+  together. Sample-rate or chunk changes instead require a newly loaded
+  pipeline and converter; they cannot be applied by passing a new rate to the
+  public `process` method. The private `generate_input` rate-configuration path
+  is not a frontend reconfiguration mechanism. Model reload and stream restart
+  likewise begin fresh timelines. Models without noise/phase inputs still
+  require the waveform, denoiser, and output-state resets.
 
 ## SOLA
 
@@ -302,6 +359,26 @@ End-to-end latency is the sum of device buffering, input chunk accumulation,
 model inference time, smoothing/search allowance, output buffering, and any
 resampling delay. Reducing one term often increases pressure elsewhere.
 
+`ContentDelay` represents retained audio time as an exact rational duration.
+`RvcPipeline::input_content_delay` combines device-rate denoiser delay with the
+16 kHz input-adapter/GTCRN delay in their native sample domains.
+`ChunkConverter::output_content_delay_samples` adds the model-domain join hold
+before rounding up once on the output grid, then adds the already integral
+output-resampler delay. Rounding each component separately can remove an extra
+real sample at rates such as 44.1 kHz. Input context padding and inference wall
+time are not content delay; a denoiser delay already compensated by offline
+preprocessing must not be counted again.
+
+The join hold uses the actual capped crossfade, search allowance, and tail
+discard; with crossfade disabled only tail discard remains. SOLA/PSOLA can
+advance the selected content within the search window, so this hold is a
+nominal bound rather than an exact source-time mapping for every chunk.
+An unprimed smoother's first silent output hop is separate startup behavior.
+VST3 initially reports a buffering estimate and, after the converter's first
+successful chunk determines the model rate and resampler delays, reports one
+input hop plus the shared converter's content delay. The callback only relays
+the worker's precomputed atomic value to the host.
+
 Smaller chunks reduce chunking latency but increase scheduling overhead and make
 the model pipeline more sensitive to inference spikes. Larger chunks are easier
 for the model and smoother but add startup and interactive latency. Extra model
@@ -315,10 +392,31 @@ debug output.
 
 ## WAV Mode
 
-WAV conversion uses the shared `RvcPipeline`, `ChunkConverter`, and smoother so
-audio-quality changes can be tested deterministically without device scheduling
-noise. It can prime the smoother, pad the final partial input chunk, and handle
-the final output tail explicitly because it is not constrained by callback
-deadlines. A difference between WAV and realtime output should be explained by
-buffering, scheduling, padding, or final-tail handling rather than by a separate
-conversion path.
+WAV conversion passes a fresh `ChunkConverter` to the shared `convert_finite`.
+For nonempty input this helper primes the model/smoother with one zero hop,
+pads the final partial input hop, and continues normal `process_chunk` calls
+with zero input until the retained source interval has emerged. Fixed-length
+output from the last real-input call does not prove that the tail has drained.
+The loop bound comes from the declared content delay and target duration,
+not silence detection, because a voice model may generate sound for zero input.
+
+The helper then removes the declared startup content delay once and returns
+`ceil(input_samples * output_hop / input_hop)` samples. Thus padding and drain
+calls do not lengthen the written clip; CLI WAV input and output rates match,
+so the saved sample count equals the source count. Empty input returns empty
+without priming. The helper takes ownership of the converter, preventing callers
+from resuming that stream after its finite drain.
+
+WAV RNNoise preprocessing uses its own finite adapter to drain and remove its
+delay before RVC, and that compensated delay is excluded from the subsequent
+pipeline. GTCRN remains on the shared 16 kHz RVC seam, so `convert_finite`
+drains its delay together with the input/output resamplers and smoother.
+
+Finite join diagnostics map each join to the final cropped WAV, including the
+output-resampler delay; seam positions need not be chunk-size multiples.
+Startup joins outside the retained clip are omitted, while zero-input drain
+calls may contain real speech and contribute report entries. SOLA search can
+shift local waveform timing within its allowance; exact output duration and
+drain coverage do not imply sample-exact reconstruction through that search.
+Differences from realtime output should follow from priming, buffering,
+scheduling, or finalization, not a separate inference or smoothing path.

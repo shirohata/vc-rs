@@ -430,13 +430,11 @@ mod model_free_pipeline_bench {
 
         // Prime the smoother and reusable Vec capacities so divan reports the
         // steady-state worker cost instead of startup allocation.
-        converter
-            .process_chunk(&input, 48_000, None, &mut out)
-            .unwrap();
+        converter.process_chunk(&input, 48_000, &mut out).unwrap();
 
         bencher.bench_local(|| {
             let stats = converter
-                .process_chunk(black_box(&input), 48_000, None, black_box(&mut out))
+                .process_chunk(black_box(&input), 48_000, black_box(&mut out))
                 .unwrap();
             black_box((stats, converter.last_join_diagnostics(), out.len()));
         });

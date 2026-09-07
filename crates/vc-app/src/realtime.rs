@@ -16,8 +16,8 @@ use vc_core::model_rvc::{
 };
 use vc_core::sola::SmoothingKind;
 use vc_core::validation::{
-    validate_conversion_timing, validate_non_negative_f32, validate_unit_interval,
-    ConversionTiming, CONVERSION_TIMING_LIMITS,
+    validate_conversion_timing, validate_non_negative_f32, validate_rvc_chunk_ms,
+    validate_unit_interval, ConversionTiming, RvcChunkTiming, CONVERSION_TIMING_LIMITS,
 };
 use vc_core::Provider;
 
@@ -192,6 +192,11 @@ impl RealtimeConfig {
             },
             CONVERSION_TIMING_LIMITS,
         )?;
+        // A complete model set is loaded even if the session starts in
+        // passthrough, because live switching can activate RVC later.
+        if self.has_complete_model_set() || !self.passthrough {
+            validate_rvc_chunk_ms(self.chunk_ms)?;
+        }
         validate_unit_interval("RMS mix rate", self.output_dynamics.rms_mix_rate)?;
         validate_non_negative_f32("F0 threshold", self.f0.f0_threshold)?;
         validate_non_negative_f32("silence threshold", self.f0.silence_threshold)?;
@@ -212,6 +217,21 @@ impl RealtimeConfig {
             bail!("GTCRN denoiser requires a model directory (gtcrn_model_dir)");
         }
         Ok(())
+    }
+
+    fn chunk_samples(&self, input_rate: u32, output_rate: u32) -> Result<(usize, usize)> {
+        if self.has_complete_model_set() {
+            let timing = RvcChunkTiming::from_ms(self.chunk_ms, input_rate)?;
+            Ok((
+                timing.input_chunk_samples,
+                timing.samples_at_rate(output_rate)?,
+            ))
+        } else {
+            Ok((
+                dsp::chunk_samples_for_rate(input_rate, self.chunk_ms),
+                dsp::chunk_samples_for_rate(output_rate, self.chunk_ms),
+            ))
+        }
     }
 
     /// Builds the borrowed `RvcPipelineConfig` for the realtime worker, mapping
@@ -852,7 +872,7 @@ impl RuntimeModel {
                 // Write the converted chunk straight into the worker-owned
                 // `prepared` buffer (reused across chunks) instead of moving a
                 // freshly allocated Vec out of the converter.
-                rvc.process_chunk(audio, sample_rate, None, prepared)
+                rvc.process_chunk(audio, sample_rate, prepared)
             }
         }
     }
@@ -964,8 +984,7 @@ impl RealtimeSession {
         )?;
         let input_rate = audio.input_sample_rate();
         let output_rate = audio.output_sample_rate();
-        let input_chunk = dsp::chunk_samples_for_rate(input_rate, config.chunk_ms);
-        let output_chunk = dsp::chunk_samples_for_rate(output_rate, config.chunk_ms);
+        let (input_chunk, output_chunk) = config.chunk_samples(input_rate, output_rate)?;
         let current_live = live.load();
         #[cfg(feature = "gtcrn")]
         let gtcrn_backend = vc_core::denoise::GtcrnBackend::for_provider(
@@ -1377,6 +1396,41 @@ mod tests {
         }
         .validate()
         .is_ok());
+    }
+
+    #[test]
+    fn rvc_chunk_timing_is_validated_for_live_switching_and_device_rates() {
+        let mut config = RealtimeConfig {
+            model: Some(PathBuf::from("rvc.onnx")),
+            embedder: Some(PathBuf::from("embedder.onnx")),
+            f0_model: Some(PathBuf::from("f0.onnx")),
+            passthrough: true,
+            chunk_ms: 25,
+            ..Default::default()
+        };
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("multiple of 10"));
+        config.chunk_ms = 30;
+        config.validate().unwrap();
+        assert_eq!(config.chunk_samples(44_100, 48_000).unwrap(), (1323, 1440));
+        assert!(config.chunk_samples(22_050, 48_000).is_err());
+        assert!(config.chunk_samples(48_000, 22_050).is_err());
+        config.chunk_ms = 20;
+        assert_eq!(config.chunk_samples(22_050, 48_000).unwrap(), (441, 960));
+    }
+
+    #[test]
+    fn model_free_passthrough_keeps_arbitrary_chunk_duration() {
+        let config = RealtimeConfig {
+            passthrough: true,
+            chunk_ms: 25,
+            ..Default::default()
+        };
+        config.validate().unwrap();
+        assert_eq!(config.chunk_samples(16_000, 48_000).unwrap(), (400, 1200));
     }
 
     #[test]

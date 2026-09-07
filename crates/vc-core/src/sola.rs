@@ -84,6 +84,7 @@ impl SolaChunkJoiner {
         }
     }
 
+    #[cfg(test)]
     fn prime(&mut self, audio: &[f32]) {
         let audio = self.candidate_audio(audio);
         if self.crossfade_samples == 0 || audio.is_empty() {
@@ -123,7 +124,10 @@ impl SolaChunkJoiner {
         }
 
         if self.sola_buffer.is_empty() {
-            self.prime(audio);
+            // `audio` is already the candidate: calling `prime` here would
+            // apply tail_discard a second time and seed the wrong startup seam.
+            self.sola_buffer
+                .extend_from_slice(tail_slice(audio, self.crossfade_samples));
             self.output_buffer.clear();
             self.output_buffer.resize(target_len, 0.0);
             self.last_diagnostics = JoinDiagnostics::default();
@@ -335,7 +339,7 @@ impl ChunkSmoother {
         }
     }
 
-    fn process(&mut self, audio: &[f32], pitchf: &[f32]) -> usize {
+    pub(crate) fn process(&mut self, audio: &[f32], pitchf: &[f32]) -> usize {
         match self {
             Self::Sola(joiner) => joiner.process(audio),
             Self::Psola(joiner) => joiner.process(audio, pitchf),
@@ -343,7 +347,7 @@ impl ChunkSmoother {
     }
 
     /// The most recent joined chunk (model domain), valid after [`Self::process`].
-    fn output(&self) -> &[f32] {
+    pub(crate) fn output(&self) -> &[f32] {
         match self {
             Self::Sola(joiner) => joiner.output(),
             Self::Psola(joiner) => joiner.inner.output(),
@@ -377,7 +381,7 @@ impl ChunkSmoother {
         }
     }
 
-    fn chunk_samples(&self) -> usize {
+    pub(crate) fn chunk_samples(&self) -> usize {
         match self {
             Self::Sola(joiner) => joiner.chunk_samples,
             Self::Psola(joiner) => joiner.chunk_samples(),
@@ -396,6 +400,23 @@ impl ChunkSmoother {
             Self::Sola(joiner) => joiner.sola_search_samples,
             Self::Psola(joiner) => joiner.sola_search_samples(),
         }
+    }
+
+    /// Nominal content held behind the model candidate's end. SOLA can advance
+    /// the selected candidate by up to the search window, but finite cropping
+    /// must use this maximum hold so a later offset never drops the source tail.
+    /// With overlap disabled `last_or_pad_into` selects the final hop directly.
+    pub(crate) fn content_delay_samples(&self) -> usize {
+        let joiner = match self {
+            Self::Sola(joiner) => joiner,
+            Self::Psola(joiner) => &joiner.inner,
+        };
+        joiner.tail_discard_samples
+            + if joiner.crossfade_samples == 0 {
+                0
+            } else {
+                joiner.crossfade_samples + joiner.sola_search_samples
+            }
     }
 }
 
@@ -745,6 +766,11 @@ fn last_or_pad_into(input: &[f32], len: usize, output: &mut Vec<f32>) {
     }
 }
 
+/// Legacy finite-buffer helper. Stateful streams must use `ChunkConverter`,
+/// which retains one output resampler for the entire stream. Calling this
+/// helper repeatedly at different sample rates restarts the filter each time;
+/// its independent `final_tail` conversion must not be appended to such streams.
+///
 /// Runs the chunk smoother on a model-domain chunk and writes the fixed-length
 /// output-domain audio into `out` (cleared first), returning the chosen SOLA
 /// offset. `model_audio` / `model_pitchf` are the model's per-chunk output and
@@ -850,6 +876,15 @@ mod tests {
         let _ = joiner.process(&[1.0, 2.0, 3.0, 4.0, 100.0, 101.0]);
 
         assert_eq!(joiner.output(), vec![1.0, 2.0, 3.0, 4.0].as_slice());
+    }
+
+    #[test]
+    fn startup_applies_tail_discard_once_when_priming_overlap() {
+        let mut joiner = SolaChunkJoiner::new(4, 2, 0, 2);
+        joiner.process(&[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 90.0, 91.0]);
+        assert_eq!(joiner.sola_buffer, [4.0, 5.0]);
+        joiner.process(&[4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 90.0, 91.0]);
+        assert_eq!(joiner.output()[0], 4.0);
     }
 
     #[test]
