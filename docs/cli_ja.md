@@ -3,7 +3,7 @@
 > 日本語 | [English](cli.md)
 
 `vc-rs.exe` は GUI + CLI パッケージに同梱される CLI です。通常の声の変換は
-[`vc-gui.exe`](../README.md) で完結しますが、CLI は **GUI にない以下の用途**に
+[`vc-gui.exe`](../README.ja.md) で完結しますが、CLI は **GUI にない以下の用途**に
 使えます。
 
 - **WAV ファイルの一括変換**（`wav`） — GUI はリアルタイム変換専用。
@@ -31,7 +31,7 @@ pwsh .\download-models.ps1
 `.\assets\content_vec_500.onnx` と `.\assets\rmvpe.onnx` がダウンロードされます。
 
 > 必要なもの（Windows App SDK ランタイム / NVIDIA ドライバ）とパッケージの
-> 選び方は [`README.md`](../README.md) を参照してください。
+> 選び方は [`README.ja.md`](../README.ja.md) を参照してください。
 
 ## コマンド一覧
 

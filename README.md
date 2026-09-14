@@ -1,270 +1,275 @@
 # vc-rs
 
-> 日本語 | [English](README.en.md)
+> English | [日本語](README.ja.md)
 
-`vc-rs` は Rust 製の **RVC 音声変換アプリ** です。マイク入力や WAV ファイルを、
-ONNX 形式の RVC モデルで別の声に変換します。次の 3 つの使い方があります。
+`vc-rs` is a Rust **RVC voice conversion app**. It converts microphone input or
+WAV files into another voice using an ONNX-format RVC model. There are three ways
+to use it:
 
-- **GUI 版（`vc-gui.exe`）** — 単体で使うためのデスクトップアプリです。**ほとんどの
-  方はこれだけで使えます。**
-- **同梱 CLI（`vc-rs.exe`）** — GUI 版に同梱されるコマンドラインツール。WAV ファイル
-  の一括変換、診断、Windows ML EP の管理、自動化など、GUI にない応用用途に使えます。
-  詳細は [`docs/cli_ja.md`](docs/cli_ja.md)。
-- **VST3 プラグイン版（`vc-vst3.vst3`）** — お使いの DAW に読み込んで使う
-  プラグインです。
+- **GUI (`vc-gui.exe`)** — the desktop app for standalone use. **Most people only
+  need this.**
+- **Bundled CLI (`vc-rs.exe`)** — a command-line tool shipped with the GUI
+  package, for batch WAV conversion, diagnostics, Windows ML EP management,
+  automation, and other things the GUI doesn't do. See
+  [`docs/cli.md`](docs/cli.md).
+- **VST3 plugin (`vc-vst3.vst3`)** — a plugin you load into your DAW.
 
-ビルド済みの Windows 用パッケージを配布しています。**ソースからビルドする必要は
-ありません。** ダウンロードして展開し、モデルを用意すればすぐ使えます。
+Prebuilt Windows packages are distributed. **You do not need to build from
+source** — just download, extract, supply your models, and run.
 
-> ソースからビルドしたい開発者の方は [`docs/development_ja.md`](docs/development_ja.md)
-> を参照してください。内部設計は [`docs/architecture_ja.md`](docs/architecture_ja.md)
-> にあります。
+> Developers who want to build from source: see
+> [`docs/development_ja.md`](docs/development_ja.md). The internal design is in
+> [`docs/architecture.md`](docs/architecture.md).
 
-## 特長
+## Highlights
 
-- **ネイティブ Rust 実装** — Python / PyTorch ランタイムが不要です。GC ポーズや
-  インタプリタのオーバーヘッドがなく、リアルタイムでも処理時間の最悪値が安定します。
-  配布も軽量です（windowsml 版は数 MB）。
-- **音が途切れにくいリアルタイム設計** — オーディオコールバックはロックフリーで
-  サンプルを動かすだけにし、推論など重い処理は別スレッドへ隔離しています。負荷が
-  かかってもコールバックをブロックせず、破綻時は入力ドロップ／無音で受け流します。
-- **幅広い GPU 対応と最速モード** — Windows ML（DirectML）で NVIDIA 以外の GPU でも
-  動き、ネイティブ TensorRT で NVIDIA GPU の最速実行も選べます。
-- **WAV モードはリアルタイムと同一経路** — 音質チューニングを決定論的に検証できます。
+- **Native Rust implementation** — no Python / PyTorch runtime. With no GC pauses
+  or interpreter overhead, worst-case processing time stays stable even in
+  real time, and distribution is lightweight (the windowsml build is a few MB).
+- **Glitch-resistant real-time design** — audio callbacks only move samples
+  through lock-free ring buffers; heavy work like inference is isolated on a
+  separate thread. Under load the callback never blocks — it drops input or emits
+  silence instead.
+- **Broad GPU support and a fastest mode** — Windows ML (DirectML) runs on
+  non-NVIDIA GPUs too, while native TensorRT offers the fastest path on NVIDIA GPUs.
+- **WAV mode shares the real-time path** — so audio-quality tuning can be verified
+  deterministically.
 
-> 変換そのものの音質は、同じ RVC モデルを使う限り他ツールと本質的に同等です。
-> vc-rs の強みは、リアルタイム用途での**安定性（音切れにくさ・遅延の詰めやすさ）**と
-> **軽さ・手軽さ**にあります。
+> The conversion quality itself is essentially the same as other tools as long as
+> the same RVC model is used. vc-rs's strengths are **stability for real-time use**
+> (resistance to dropouts, room to tighten latency) and **being lightweight and
+> easy to use**.
 
-## ダウンロード
+## Download
 
-最新版は GitHub の **[Releases](https://github.com/shirohata/vc-rs/releases)**
-から入手できます。配布パッケージは Windows (x64) 向けで、用途と環境に合わせて
-次の 4 種類があります。
+Get the latest version from
+**[Releases](https://github.com/shirohata/vc-rs/releases)**. Packages target
+Windows (x64). There are four, depending on your front-end and hardware:
 
-| パッケージ | 形態 | バックエンド | 対象環境 | サイズ | 必要なもの |
+| Package | Form | Backend | Target | Size | Requirements |
 | --- | --- | --- | --- | --- | --- |
-| `vc-rs-windowsml-…zip` | GUI + CLI | Windows ML | 多くの GPU（NVIDIA 以外も可） | 小（数 MB） | Windows App SDK ランタイム |
-| `vc-rs-tensorrt-…zip` | GUI + CLI | TensorRT | NVIDIA GPU | 大（約 1.9 GB） | 最新の NVIDIA ドライバ |
-| `vc-vst3-windowsml-…zip` | VST3 プラグイン | Windows ML | 多くの GPU（NVIDIA 以外も可） | 小 | Windows App SDK ランタイム |
-| `vc-vst3-tensorrt-…zip` | VST3 プラグイン | TensorRT | NVIDIA GPU | 大（約 1.9 GB） | 最新の NVIDIA ドライバ |
+| `vc-rs-windowsml-…zip` | GUI + CLI | Windows ML | Most GPUs (incl. non-NVIDIA) | Small (a few MB) | Windows App SDK Runtime |
+| `vc-rs-tensorrt-…zip` | GUI + CLI | TensorRT | NVIDIA GPU | Large (~1.9 GB) | Up-to-date NVIDIA driver |
+| `vc-vst3-windowsml-…zip` | VST3 plugin | Windows ML | Most GPUs (incl. non-NVIDIA) | Small | Windows App SDK Runtime |
+| `vc-vst3-tensorrt-…zip` | VST3 plugin | TensorRT | NVIDIA GPU | Large (~1.9 GB) | Up-to-date NVIDIA driver |
 
-**どれを選べばよいか:**
+**Which one?**
 
-- まず試すなら **windowsml 版**。ダウンロードが軽く、NVIDIA 以外の GPU でも
-  DirectML 経由で動きます。
-- **NVIDIA GPU を持っていて最速を狙う**なら **tensorrt 版**。ダウンロードは
-  大きく、初回起動時にエンジン構築で時間がかかりますが、その後は高速です。
-- 単体で使うなら **GUI + CLI 版**、DAW で歌や配信に使うなら **VST3 版**。
-  自動化や WAV 一括変換には GUI と同梱される CLI を使えます。
+- To try it first, pick a **windowsml** package. It is a small download and runs
+  on non-NVIDIA GPUs too via DirectML.
+- If you **have an NVIDIA GPU and want maximum speed**, pick a **tensorrt**
+  package. It is a large download and the first launch is slow (engine build),
+  but subsequent runs are fast.
+- Use the **GUI + CLI** packages for standalone use and the **VST3** packages
+  for singing/streaming in a DAW. The bundled CLI handles automation and batch
+  WAV conversion.
 
-## 必要なもの
+## Requirements
 
-### windowsml 版
+### windowsml packages
 
-- **Windows App SDK ランタイム（2.x 系、2.1 以上）** をインストールしてください。ONNX
-  Runtime と DirectML を提供します。Microsoft の
-  [Windows App SDK ダウンロードページ](https://learn.microsoft.com/windows/apps/windows-app-sdk/downloads)
-  から、最新安定版の **Runtime（ランタイム）インストーラ** を入れてください。
+- Install the **Windows App SDK Runtime (2.x, minimum 2.1)**, which provides
+  ONNX Runtime and DirectML. Get the latest stable **Runtime** installer from Microsoft's
+  [Windows App SDK downloads page](https://learn.microsoft.com/windows/apps/windows-app-sdk/downloads).
 
-### tensorrt 版
+### tensorrt packages
 
-- **最新の NVIDIA GPU ドライバ**。TensorRT 本体の DLL はパッケージに同梱して
-  いるので、CUDA や TensorRT を別途インストールする必要はありません。
+- An **up-to-date NVIDIA GPU driver**. The TensorRT runtime DLLs are bundled in
+  the package, so you do not need to install CUDA or TensorRT separately.
 
-### 共通: モデルファイル
+### All packages: model files
 
-`vc-rs` はモデルを同梱しません。次の 3 つを使用します。声のモデルを選び、補助モデルはGUIから取得できます。
+`vc-rs` does not ship models. It uses three: choose your voice model and fetch the support models from the GUI.
 
-1. **RVC 音声変換モデル**（`.onnx`） — 変換したい声のモデル。**ONNX 形式のみ
-   対応**です。`.pth` は直接読み込めませんが、GUI のモデル選択で `.pth` を
-   選ぶと内蔵コンバータ（RVC v2 / F0 モデル対応）がその場で `.onnx` に変換
-   します。v1 モデル等は RVC 系ツールや VCClient で事前に変換してください。
-2. **埋め込み抽出モデル**（ContentVec, `content_vec_500.onnx`）
-3. **F0 推定モデル**（RMVPE, `rmvpe.onnx`）
+1. **RVC voice conversion model** (`.onnx`) — the target voice. **Only ONNX is
+   supported**; `.pth` cannot be loaded directly, but picking a `.pth` in the
+   GUI's model browser opens the built-in converter (RVC v2 / F0 models),
+   which writes the `.onnx` next to it. For anything else (e.g. v1), convert
+   first with RVC tools or VCClient.
+2. **Embedder model** (ContentVec, `content_vec_500.onnx`)
+3. **F0 model** (RMVPE, `rmvpe.onnx`)
 
-2 と 3 はGUIの **Download required models** でまとめて取得・設定できます。
+Items 2 and 3 are downloaded and configured together with **Download required models** in the GUI.
 
-## 使い方（GUI 版）
+## Usage (GUI)
 
-1. ダウンロードした zip を展開します（**DLL は `vc-gui.exe` と同じフォルダに
-   置いたまま**にしてください）。
-2. 初回は言語を選び、アプリと処理部品の利用条件を確認します。
-3. **マイクとヘッドホンの確認**で、入力メーターを見ながらマイク音量を調整します。**テスト音を鳴らす**で出力先を確認でき、ヘッドホン使用時は**自分の声を聞く**でパススルーを試せます。ノイズ低減は任意です。
-4. 声のRVCモデル（`.onnx` / `.pth`）を選択またはドロップします。対応する`.pth`はアプリ内で変換できます。
-5. 不足するContentVec・RMVPEや処理部品を、内容と利用条件を確認して準備します。取得済みの有効なファイルは再利用し、保存先は自動設定します。
-   準備ができたら**通常画面へ**で設定を保存してセットアップを完了します。音声変換は通常画面から開始します。
+1. Extract the downloaded zip (**keep the DLLs in the same folder as
+   `vc-gui.exe`**).
+2. Choose a language and review the applicable app and processing-component terms.
+3. Check the microphone meter and adjust **Microphone volume**. Use **Play test sound** to check the output independently, or **Hear my voice** with headphones. Noise reduction is optional.
+4. Choose or drop an RVC `.onnx` / `.pth` voice model. Supported checkpoints can be converted in the app.
+5. Review and prepare missing ContentVec/RMVPE files and processing components. Verified files are reused and locations are configured automatically.
+   When ready, choose **Open main screen** to save and finish setup. Start voice conversion from the normal screen.
 
-案内は音声テスト以降でスキップでき、通常画面の**セットアップ**から再開できます。スキップは利用条件への同意やセットアップ完了とは別に記録します。途中終了後は保存済みの手順から再開し、音声出力やダウンロードは自動再開しません。詳しくは[初回チュートリアルの設計](docs/onboarding.md)を参照してください。
-基本画面では声・入出力・音量・声の高さを選び、**Start voice conversion / Stop** で操作します。モデル・デバイス変更時は **Apply changes / Restart** で反映します。
-通常画面では声・入出力・音量・ピッチを一か所で操作します。開始後は再起動／停止を表示します。左下のLanguageで言語を切り替え、セットアップから案内を再開できます。詳細は[通常画面の構成](docs/normal-screen.md)を参照してください。
+The tutorial can be skipped from audio setup onward and reopened from **Setup**. Skipping is separate from consent and setup completion. Interrupted setup resumes its saved step without automatically restarting playback or downloads. See [the tutorial design](docs/onboarding.md).
+The normal screen provides voice, input/output, volume and pitch controls once. Start becomes Restart / Stop while running. Language is at the bottom left; Setup reopens the tutorial. See [normal screen behavior](docs/normal-screen.md).
 
-### モデルの準備
+### Prepare models
 
-通常はGUIから取得できます（合計約741 MB、配布元はGPL-3.0表記）。進捗表示・キャンセル・再試行に対応し、サイズとSHA-256の検証後に設定します。
-保存先は `%LOCALAPPDATA%\vc-rs\models`（未設定の場合は `%APPDATA%\vc-rs\models`）で、次回起動やアプリ更新後も再利用します。
-既に指定したモデルや、exeと同じフォルダ内の `assets` にある補助モデルも再利用できます。
-声のモデル自体は自分で用意してください。
+The GUI downloads about 741 MB directly from the upstream host (GPL-3.0), with progress, cancellation and retry. Files are checked against pinned sizes and SHA-256 hashes before use.
+Models are saved in `%LOCALAPPDATA%\vc-rs\models` (falling back to `%APPDATA%\vc-rs\models`) and reused across launches and app updates.
+Existing selections and support models in the `assets` folder beside the executable are also reused. You still supply your own voice model.
 
-スクリプトで取得したい場合は、展開したフォルダで実行します。
+Alternatively, use the bundled script from the extracted folder:
 
 ```powershell
 pwsh .\download-models.ps1
 ```
 
-`.\assets\content_vec_500.onnx` と `.\assets\rmvpe.onnx` がダウンロードされます。
-RVC 音声変換モデル（`.onnx`）は別途自分で用意してください。
+This downloads `.\assets\content_vec_500.onnx` and `.\assets\rmvpe.onnx`. You
+still supply your own RVC voice model (`.onnx`).
 
-> これらのモデルは第三者配布（配布元では GPL-3.0 表示）で、`vc-rs` 本体の
-> MIT License の対象外です。利用・改変・再配布の際は配布元のライセンスに
-> 従ってください。詳細は `download-models.ps1` 内の注記を参照してください。
+> These downloaded models are third-party (GPL-3.0 upstream) and are **not**
+> covered by `vc-rs`'s MIT license. Review and comply with the upstream license
+> before using, modifying, or redistributing them. See the notes inside
+> `download-models.ps1`.
 
-### 画面の操作
+### Working in the window
 
-- **モデル関連の設定**：特徴抽出・F0モデルはContentVec / RMVPEの取得かカスタムを選びます。カスタムの場合のみパスとBrowseを表示します。
-- **音声デバイス・ノイズ低減**：接続方式、デバイス更新、方式別のノイズ低減設定をまとめます。
-- **バックエンド詳細**：対応バックエンド、GPU選択、優先度、Chunk ms / Extra convert ms、メトリクス、エラー詳細をまとめます。
+- **Model settings**: downloaded ContentVec / RMVPE or custom paths; Browse appears for custom selections.
+- **Audio devices and noise reduction**: hosts, device refresh and denoiser-specific controls.
+- **Backend Details**: available backends, GPU selection/priority, Chunk ms / Extra convert ms, metrics and diagnostics.
 
-音量・ピッチなどは即時反映し、再起動が必要な変更は上部に案内します。
+Gain and pitch update live. Reload-scoped changes show a Restart reminder beside transport.
 
-設定は自動的に保存され（`%APPDATA%\vc-rs\gui.toml`）、次回起動時に復元されます。
-モデル 3 種がロード済みなら、実行中の **Passthrough** をチャンク境界でライブ切り替え
-できます。パススルー中は RVC 推論を停止し、RVC に戻す際は古いストリーム文脈を
-破棄して再開します。モデルなしの純パススルーも引き続き利用できますが、その
-セッションでは RVC へライブ切り替えできません。
+Settings are saved automatically (`%APPDATA%\vc-rs\gui.toml`) and restored on the
+next launch. When all three models are loaded, **Passthrough** switches live at
+the next worker chunk boundary. RVC inference stops while passthrough is active;
+switching back discards stale streaming context before conversion resumes.
+Model-free passthrough remains available, but that session cannot switch live
+back to RVC.
 
-入力ノイズ抑制は **Input denoiser** から `off` / `noise-gate` / `rnnoise` /
-`gtcrn` を選択できます。パススルーにも Input gain、選択中の入力ノイズ抑制、
-Output gain が適用されます。RNNoiseは組み込みモデルを使うため追加モデルは不要
-です。`off` と `noise-gate` の切り替え・しきい値はライブ反映され、RNNoise /
-GTCRN への切り替えは **Apply / Start** が必要です。VST3版にはこれらの入力ノイズ
-抑制は含まれません。
+Choose `off`, `noise-gate`, `rnnoise`, or `gtcrn` under **Input denoiser**.
+RNNoise uses an embedded model and needs no additional download. Passthrough
+applies Input gain, the selected input denoiser, and Output gain. Switching
+between `off` and `noise-gate`, including the gate threshold, is live; switching
+to RNNoise or GTCRN requires **Apply / Start**. These input denoisers are not
+included in VST3.
 
-入力ノイズ抑制の位置づけ:
+Where each denoiser sits:
 
-| モード | コスト | 品質 | 備考 |
+| Mode | Cost | Quality | Notes |
 | --- | --- | --- | --- |
-| Noise Gate | 極小 | しきい値ゲートのみ | 組み込み |
-| RNNoise | 低 | 控えめ | 組み込み・48 kHz |
-| **GTCRN** | **低** | **良好** | **standalone 版のみ・16 kHz・要モデル** |
+| Noise Gate | very low | threshold gate only | embedded |
+| RNNoise | low | modest | embedded, 48 kHz |
+| **GTCRN** | **low** | **good** | **standalone packages only, 16 kHz, needs a model** |
 
-GTCRN は超軽量（約 48K パラメータ）の音声強調モデルで、CPU でもリアルタイムに
-十分間に合います。**standalone（CLI/GUI）版**で利用でき、Windows ML 版では
-ONNX Runtime CPU、TensorRT 版では native TensorRT で実行します。VST3 版には
-含まれません。固定遅延は約 48 ms（16 kHz の STFT 再構成 + アダプタの FIFO）です。モデルは
-GUIでは **音声デバイス・ノイズ低減 → Input denoiser → gtcrn → Download GTCRN** で取得・設定できます。
-公式配布の約352 KBのモデル（MIT）を検証後、`%LOCALAPPDATA%\vc-rs\models\gtcrn` にライセンス文とともに保存します。
-**Apply / Start** で反映します。既存のモデルフォルダも **GTCRN model dir** で指定できます。
-スクリプトを使う場合は `download-models.ps1 -Gtcrn` で `assets\gtcrn\` に取得し、CLI の `--gtcrn-model <dir>` などで指定します。
+GTCRN is an ultra-light (~48K-parameter) speech-enhancement model that runs in
+real time with large margin. It ships in the **standalone CLI/GUI packages**:
+Windows ML runs the tiny graph on ORT CPU, while TensorRT runs it through native
+TensorRT. VST3 does not include it. Its fixed delay is ~48 ms (the 16 kHz STFT
+reconstruction plus the adapter FIFO). In the GUI, select **Audio devices and noise reduction → Input denoiser → gtcrn → Download GTCRN**.
+The official 352 KB model (MIT) is verified and saved alongside its license in `%LOCALAPPDATA%\vc-rs\models\gtcrn`; its directory is configured automatically. Press **Apply / Start** to activate it.
+You can also choose an existing **GTCRN model dir**, or use `download-models.ps1 -Gtcrn` to fetch it into `assets\gtcrn\` for the CLI's `--gtcrn-model <dir>`.
 
-## リアルタイム設定の調整
+## Tuning real-time settings
 
-音切れ・遅延・CPU/GPU 負荷のバランスは **Chunk ms** と **Extra convert ms** で
-調整します。
+Balance dropouts, latency, and CPU/GPU load with **Chunk ms** and **Extra convert
+ms**.
 
-- **Chunk ms**: 1 回の処理でまとめる音声の長さ。音切れや負荷の張り付きが出る
-  場合は大きくします（`500` → `750` → `1000`）。大きいほど安定しますが、入力から
-  出力までの体感遅延も増えます。GPU 実行ではより小さい値を使えることがあります。
-- **Extra convert ms**: 変換に渡す前後文脈の長さ。大きくすると安定することが
-  ありますが負荷も増えます。まず `100` ms 付近から試してください。
+- **Chunk ms**: how much audio is processed per pass. Increase it if you hear
+  dropouts or see sustained load (`500` → `750` → `1000`). Larger is more stable
+  but adds input-to-output latency. GPU execution can often use smaller values.
+- **Extra convert ms**: amount of surrounding context fed to conversion. Larger
+  can be more stable but costs more. Start around `100` ms.
 
-設定を詰めるときは、**先に音切れしない値を見つけ、その後に Chunk ms を小さくして
-遅延を下げる**のが安全です。Pitch / Speaker / Input・Output ゲインは Live
-parameters でいつでも調整できます。
+When tuning, **first find a value with no dropouts, then lower Chunk ms** to
+reduce latency. Pitch / Speaker / Input·Output gain can be adjusted anytime under
+Live parameters.
 
-## 同梱の CLI（応用）
+## The bundled CLI (advanced)
 
-GUI + CLI 版には CLI `vc-rs.exe` が同梱されます。通常の変換は GUI で完結しますが、
-CLI は **GUI にない用途**に使えます。
+The GUI + CLI packages bundle the `vc-rs.exe` CLI. Everyday conversion is fully
+covered by the GUI, but the CLI adds things the **GUI doesn't do**:
 
-- **WAV ファイルの一括変換**（GUI はリアルタイム変換専用）。
-- **診断・モデル調査**（`doctor` / `devices` / `inspect`）。
-- **Windows ML 実行プロバイダ（EP）の確認・インストール**、**エンジンキャッシュ
-  の管理**。
-- **自動化・スクリプト化**、および GUI が固定している細かい DSP/オーディオ
-  パラメータの調整。
+- **Batch WAV-file conversion** (the GUI is real-time only).
+- **Diagnostics and model inspection** (`doctor` / `devices` / `inspect`).
+- **Listing/installing Windows ML execution providers (EPs)** and **engine-cache
+  management**.
+- **Automation/scripting** and the finer DSP/audio parameters the GUI keeps
+  pinned.
 
-使い方とコマンド一覧は [`docs/cli_ja.md`](docs/cli_ja.md) を参照してください。
+For usage and the command list, see [`docs/cli.md`](docs/cli.md).
 
-## 使い方（VST3 プラグイン版）
+## Usage (VST3 plugin)
 
-1. zip を展開し、`vc-vst3-windowsml.vst3` または
-   `vc-vst3-tensorrt.vst3` を VST3 の標準フォルダにコピーします。
-   - Windows: `%CommonProgramFiles%\VST3\`（例: `C:\Program Files\Common Files\VST3`）
-2. 展開したフォルダで `pwsh .\download-models.ps1` を実行し、埋め込み・F0
-   モデルを `.\assets\` に取得します（**インストール先ではなく、展開した
-   フォルダで実行**してください）。
-3. DAW でプラグインを読み込み、エディタ画面を開きます。
-   - **Browse** から RVC モデル・埋め込み（ContentVec）・F0（RMVPE）の各 `.onnx`
-     を指定します。
-   - **バックエンド**を選びます（windowsml 版: `windowsml` / `windowsml-directml`
-     / `cpu`、tensorrt 版: `tensorrt`）。
-   - **chunk size**（ms）を設定します（大きいほど安定しますが遅延が増えます）。
-   - **Load / Reload** を押して反映します。モデル・バックエンド・chunk の変更は
-     このボタンを押すまで適用されません。
-   - Pitch / Speaker / Input・Output ゲインはリアルタイムに反映され、DAW の
-     パラメータとして自動化・保存できます。
+1. Extract the zip and copy `vc-vst3-windowsml.vst3` or
+   `vc-vst3-tensorrt.vst3` into the standard VST3 folder:
+   - Windows: `%CommonProgramFiles%\VST3\` (e.g.
+     `C:\Program Files\Common Files\VST3`)
+2. In the extracted folder, run `pwsh .\download-models.ps1` to fetch the
+   embedder and F0 models into `.\assets\` (**run it from the extracted folder,
+   not from the installed plugin location**).
+3. Load the plugin in your DAW and open its editor:
+   - **Browse** for the RVC model, embedder (ContentVec), and F0 (RMVPE) `.onnx`
+     files.
+   - Choose the **backend** (windowsml package: `windowsml` /
+     `windowsml-directml` / `cpu`; tensorrt package: `tensorrt`).
+   - Set the **chunk size** (ms) — larger is more stable but adds latency.
+   - Press **Load / Reload** to apply. Model / backend / chunk edits do not take
+     effect until you press it.
+   - Pitch / Speaker / Input·Output gain apply live and are DAW parameters
+     (automatable and host-saved).
 
-モデルパスや設定はプロジェクト/プリセットごとに保存されます。詳細は
-[`crates/vc-vst3/README.md`](crates/vc-vst3/README.md) を参照してください。
+Model paths and settings are saved per project/preset. For details see
+[`crates/vc-vst3/README.md`](crates/vc-vst3/README.md).
 
-## TensorRT について（tensorrt 版）
+## TensorRT notes (tensorrt packages)
 
-tensorrt 版は GPU 実行を **同梱の TensorRT ランタイム** で行うため、NVIDIA
-ドライバ以外の追加インストールは不要です。
+The tensorrt packages run on the **bundled TensorRT runtime**, so no extra
+install beyond the NVIDIA driver is needed.
 
-> ⚠️ TensorRT は **初回起動時やモデル・入力形状が変わったとき**にエンジンを
-> 生成するため、起動に非常に長い時間がかかることがあります。2 回目以降は
-> エンジンキャッシュが再利用され、起動が短くなります。
+> ⚠️ TensorRT builds an engine **on first run and whenever the model or input
+> shape changes**, which can make startup very slow. Later runs reuse the engine
+> cache and start faster.
 
-エンジンキャッシュの場所・サイズ確認や消去（CLI の `engine-cache`）、詳しい性能
-特性は [`docs/cli_ja.md`](docs/cli_ja.md) と
-[`docs/tensorrt_performance_ja.md`](docs/tensorrt_performance_ja.md) を参照して
-ください。
+For engine-cache location/size and clearing (the CLI `engine-cache` command) and
+detailed performance characteristics, see [`docs/cli.md`](docs/cli.md) and
+[`docs/tensorrt_performance_ja.md`](docs/tensorrt_performance_ja.md).
 
-## トラブルシューティング / FAQ
+## Troubleshooting / FAQ
 
-**Q. windowsml 版が起動しない / モデル読み込みに失敗する**
-A. **Windows App SDK ランタイム（2.x 系、2.1 以上）** がインストールされているか確認して
-ください（「必要なもの」参照）。同梱 CLI の `.\vc-rs.exe doctor` で実行に必要な
-依存を診断できます。
+**Q. A windowsml package won't start / model loading fails.**
+A. Confirm the **Windows App SDK Runtime (2.x, minimum 2.1)** is installed (see
+*Requirements*). The bundled CLI's `.\vc-rs.exe doctor` diagnoses the runtime
+dependencies needed to run.
 
-**Q. exe を実行すると SmartScreen の警告が出る**
-A. 配布バイナリはコード署名していないため、Windows が警告を出すことがあります。
-内容を確認のうえ「詳細情報」→「実行」で起動してください。
+**Q. Running the exe triggers a SmartScreen warning.**
+A. The distributed binaries are not code-signed, so Windows may warn. Review,
+then choose "More info" → "Run anyway".
 
-**Q. VST3 版が DAW でクラッシュする**
-A. プラグインのフォルダに古い `onnxruntime_providers_cuda.dll` などの余分な
-ONNX Runtime プロバイダ DLL が紛れ込んでいないか確認してください。windowsml 版の
-バンドルには ONNX Runtime / DirectML / CUDA の DLL は含めません（システムの
-Windows App SDK ランタイムが提供します）。配布 zip をそのまま展開した状態であれば
-混入しませんが、過去のビルドからコピーした場合は削除してください。
+**Q. The VST3 plugin crashes in my DAW.**
+A. Check that no stray ONNX Runtime provider DLLs (e.g. an old
+`onnxruntime_providers_cuda.dll`) ended up in the plugin folder. The windowsml
+bundle must not contain ONNX Runtime / DirectML / CUDA DLLs — those come from the
+system Windows App SDK Runtime. A freshly extracted zip is fine; delete any DLLs
+you copied in from an older build.
 
-**Q. `.pth` モデルが読み込めない**
-A. RVC 音声変換モデルは **`.onnx` のみ対応**です。GUI なら「RVC model」の
-Browse で `.pth` を選ぶと内蔵コンバータで変換できます（RVC v2 / F0 モデルのみ）。
-それ以外（v1 など）は RVC 系ツールや VCClient で事前に ONNX へ変換してください。
+**Q. A `.pth` model won't load.**
+A. RVC voice models must be **`.onnx`**. In the GUI, Browse for the `.pth`
+under "RVC model" to run the built-in converter (RVC v2 / F0 models only);
+otherwise convert with RVC tools or VCClient first.
 
-**Q. リアルタイムで音が途切れる・遅延が大きい**
-A. 「リアルタイム設定の調整」を参照してください。まず Chunk ms を大きくして
-音切れを止め、その後で遅延を詰めます。
+**Q. Real-time audio drops out or latency is high.**
+A. See *Tuning real-time settings*. Raise Chunk ms until dropouts stop, then
+reduce latency.
 
-## 補助スクリプト
+## Helper script
 
-`download-models.ps1` は任意の補助スクリプトです。第三者の参照用 ONNX モデル
-（ContentVec / RMVPE）を [`wok000/weights_gpl`](https://huggingface.co/wok000/weights_gpl)
-からダウンロードします。取得されるモデルは `vc-rs` 本体に含まれず、この
-リポジトリの MIT License の対象でもありません（配布元は GPL-3.0 表示）。
+`download-models.ps1` is an optional helper. It downloads third-party reference
+ONNX models (ContentVec / RMVPE) from
+[`wok000/weights_gpl`](https://huggingface.co/wok000/weights_gpl). The downloaded
+models are not part of `vc-rs` and are not covered by this repository's MIT
+license (upstream is marked GPL-3.0).
 
 ## Acknowledgements
 
-- 本実装は RVC 系 OSS 実装の知見を参考にしています。とくに Applio、VCClient、
-  RVC WebUI の設計や実装上の工夫から多くを学んでいます。
-- 関連する third-party notice は [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)
-  にまとめています。
+- This implementation draws on knowledge from RVC-ecosystem OSS, especially the
+  design and implementation insights of Applio, VCClient, and RVC WebUI.
+- Related third-party notices are collected in
+  [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 
 ## License
 
-MIT License（[`LICENSE`](LICENSE) を参照）。外部プロジェクトとモデルファイルに
-関する注意事項は [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) を参照して
-ください。
+MIT License (see [`LICENSE`](LICENSE)). For notes on external projects and model
+files, see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).

@@ -3,7 +3,7 @@
 > [日本語](cli_ja.md) | English
 
 `vc-rs.exe` is the CLI bundled with the GUI + CLI package. Everyday voice
-conversion is fully covered by [`vc-gui.exe`](../README.en.md); the CLI adds the
+conversion is fully covered by [`vc-gui.exe`](../README.md); the CLI adds the
 things the **GUI does not do**:
 
 - **Batch WAV-file conversion** (`wav`) — the GUI is real-time only.
@@ -32,7 +32,7 @@ pwsh .\download-models.ps1
 This downloads `.\assets\content_vec_500.onnx` and `.\assets\rmvpe.onnx`.
 
 > For requirements (Windows App SDK Runtime / NVIDIA driver) and how to pick a
-> package, see [`README.en.md`](../README.en.md).
+> package, see [`README.md`](../README.md).
 
 ## Commands
 
