@@ -4,6 +4,26 @@ A DAW plugin front-end for the same RVC pipeline the CLI (`vc-cli`) uses. It
 reuses `vc-core` and feeds the pipeline from the host's `process()` callback
 instead of driving an audio device directly.
 
+## Use voice conversion in your DAW
+
+Choose the Windows ML or native TensorRT VST3 package from
+[Releases](https://github.com/shirohata/vc-rs/releases). Follow the
+[installation steps](../../README.md#usage-vst3-plugin), load your three ONNX
+models in the editor, choose a backend, and press **Load / Reload**.
+
+Pitch, speaker, and input/output gain are automatable DAW parameters. Model paths
+and conversion settings are saved with the project or preset; the model files
+themselves are not embedded. Reopen the project with those files available.
+
+Native TensorRT runs the shared RVC pipeline on NVIDIA GPUs. The Windows ML
+package offers DirectML and catalog-dependent options including experimental
+MIGraphX / OpenVINO. See the [backend guide](../../docs/backends.md) for hardware
+requirements, initial engine builds, and validation limits.
+
+The plugin reports latency so the host can compensate playback timing. This does
+not remove the delay you hear while monitoring a live microphone. Choose a chunk
+size that balances monitoring delay, processing headroom, and audio quality.
+
 ## Architecture
 
 ```
@@ -32,7 +52,8 @@ there you can:
 - **Browse** for the RVC model, embedder, and F0 (RMVPE) `.onnx` files
 - choose the **backend** — the GUI lists only the providers this package was
   built with: the Windows ML package offers `windowsml` (auto), `windowsml-directml`,
-  and `cpu`; the TensorRT package offers `tensorrt`
+  CPU options, and EP choices from this PC's Windows ML catalog; the TensorRT
+  package offers `tensorrt`. Catalog presence does not establish model compatibility
 - set the **chunk size** (ms) — larger means more latency but more context
 - hit **Load / Reload** to apply model / backend / chunk edits
 - watch the **status** line (`no models configured` / `models configured; click

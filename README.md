@@ -2,9 +2,38 @@
 
 > English | [日本語](README.ja.md)
 
-`vc-rs` is a Rust **RVC voice conversion app**. It converts microphone input or
-WAV files into another voice using an ONNX-format RVC model. There are three ways
-to use it:
+`vc-rs` is a **Windows RVC voice changer with native TensorRT support**.
+Use NVIDIA GPU inference in a standalone app or a VST3 plugin inside your DAW.
+The Windows ML package also offers DirectML and experimental MIGraphX / OpenVINO
+paths. Written in Rust, it needs no Python / PyTorch environment. Convert microphone
+input or WAV files into another voice using an ONNX-format RVC model.
+
+## Highlights
+
+- **Choose an inference backend for your hardware** — native TensorRT runs
+  ContentVec, RMVPE, and the RVC generator on NVIDIA GPUs. Windows ML also offers
+  DirectML, MIGraphX for AMD, and OpenVINO for Intel. MIGraphX and OpenVINO are
+  experimental: MIGraphX remains unverified on target hardware; OpenVINO has
+  measurements and listening checks on a limited Intel configuration.
+  See the support table below for conditions.
+- **Standalone or inside your DAW** — convert your microphone with the GUI, or
+  use VST3 with pitch/gain automation and settings saved in your DAW project.
+- **No Python setup; bring your existing models** — prebuilt apps are available.
+  The GUI converts supported RVC v2 / F0 PTH models to ONNX and downloads support models.
+- **Audio callbacks do not wait for inference** — workers perform inference;
+  callbacks move audio through lock-free ring buffers. Overload can still cause
+  drops or silence, so tune the chunk size for your environment.
+- **WAV conversion and automation** — the bundled CLI handles WAV files,
+  diagnostics, and scripting. Shared conversion components make comparisons with
+  fixed input and settings practical.
+
+Audio quality depends on the voice model, F0 estimation, chunk settings, and
+pre/post-processing. See the [inference backend guide](docs/backends.md) for
+selection and tuning.
+
+## Choose how to use it
+
+There are three ways to use it:
 
 - **GUI (`vc-gui.exe`)** — the desktop app for standalone use. **Most people only
   need this.**
@@ -21,25 +50,6 @@ source** — just download, extract, supply your models, and run.
 > [`docs/development_ja.md`](docs/development_ja.md). The internal design is in
 > [`docs/architecture.md`](docs/architecture.md).
 
-## Highlights
-
-- **Native Rust implementation** — no Python / PyTorch runtime. With no GC pauses
-  or interpreter overhead, worst-case processing time stays stable even in
-  real time, and distribution is lightweight (the windowsml build is a few MB).
-- **Glitch-resistant real-time design** — audio callbacks only move samples
-  through lock-free ring buffers; heavy work like inference is isolated on a
-  separate thread. Under load the callback never blocks — it drops input or emits
-  silence instead.
-- **Broad GPU support and a fastest mode** — Windows ML (DirectML) runs on
-  non-NVIDIA GPUs too, while native TensorRT offers the fastest path on NVIDIA GPUs.
-- **WAV mode shares the real-time path** — so audio-quality tuning can be verified
-  deterministically.
-
-> The conversion quality itself is essentially the same as other tools as long as
-> the same RVC model is used. vc-rs's strengths are **stability for real-time use**
-> (resistance to dropouts, room to tighten latency) and **being lightweight and
-> easy to use**.
-
 ## Download
 
 Get the latest version from
@@ -48,21 +58,39 @@ Windows (x64). There are four, depending on your front-end and hardware:
 
 | Package | Form | Backend | Target | Size | Requirements |
 | --- | --- | --- | --- | --- | --- |
-| `vc-rs-windowsml-…zip` | GUI + CLI | Windows ML | Most GPUs (incl. non-NVIDIA) | Small (a few MB) | Windows App SDK Runtime |
-| `vc-rs-tensorrt-…zip` | GUI + CLI | TensorRT | NVIDIA GPU | Large (~1.9 GB) | Up-to-date NVIDIA driver |
+| `vc-rs-windowsml-…zip` | GUI + CLI | Windows ML | Most GPUs (incl. non-NVIDIA) | Small | Windows App SDK Runtime |
+| `vc-rs-tensorrt-…zip` | GUI + CLI | TensorRT | NVIDIA GPU | Large (runtime bundled) | Up-to-date NVIDIA driver |
 | `vc-vst3-windowsml-…zip` | VST3 plugin | Windows ML | Most GPUs (incl. non-NVIDIA) | Small | Windows App SDK Runtime |
-| `vc-vst3-tensorrt-…zip` | VST3 plugin | TensorRT | NVIDIA GPU | Large (~1.9 GB) | Up-to-date NVIDIA driver |
+| `vc-vst3-tensorrt-…zip` | VST3 plugin | TensorRT | NVIDIA GPU | Large (runtime bundled) | Up-to-date NVIDIA driver |
 
 **Which one?**
 
 - To try it first, pick a **windowsml** package. It is a small download and runs
   on non-NVIDIA GPUs too via DirectML.
-- If you **have an NVIDIA GPU and want maximum speed**, pick a **tensorrt**
+- If you **want native TensorRT on your NVIDIA GPU**, pick a **tensorrt**
   package. It is a large download and the first launch is slow (engine build),
   but subsequent runs are fast.
 - Use the **GUI + CLI** packages for standalone use and the **VST3** packages
   for singing/streaming in a DAW. The bundled CLI handles automation and batch
   WAV conversion.
+
+### Inference backend support
+
+This table describes the current source. Check each release's notes for the
+features included in that download. Both packages have GUI + CLI and VST3 variants.
+
+| Backend | Target | Package | Conditions and validation status |
+| --- | --- | --- | --- |
+| Native TensorRT | NVIDIA GPU | tensorrt | Distributed backend. Runtime bundled; engines build on first use. [Model-only measurements](docs/tensorrt_performance_ja.md) available |
+| Windows ML / DirectML | Supported NVIDIA, AMD, Intel and other GPUs | windowsml | Distributed backend. Requires Windows App SDK Runtime. Performance depends on GPU, model and settings |
+| MIGraphX through Windows ML | Supported AMD GPUs | windowsml | **Experimental**. Requires a catalog EP and compatible device. Model compatibility, audio quality and performance on AMD hardware remain unverified |
+| OpenVINO through Windows ML | Supported Intel CPUs / GPUs / NPUs | windowsml | **Experimental**. Requires a catalog EP. Device-type selection available; model measurements and GUI listening checks on a limited Intel configuration. GPU selection still runs RMVPE on OpenVINO CPU. NPU unverified. [Validation record](docs/openvino-model-routing_ja.md) |
+
+MIGraphX and OpenVINO are additional EPs in the Windows ML package, not separate
+ZIPs. Picker entries depend on this PC's catalog. An available EP does not prove
+that the entire model runs on GPU/NPU. See the [backend guide](docs/backends.md).
+ZIP sizes exclude separately acquired runtimes, support models, and generated caches.
+Check the release assets for exact download sizes.
 
 ## Requirements
 
@@ -204,7 +232,8 @@ For usage and the command list, see [`docs/cli.md`](docs/cli.md).
    - **Browse** for the RVC model, embedder (ContentVec), and F0 (RMVPE) `.onnx`
      files.
    - Choose the **backend** (windowsml package: `windowsml` /
-     `windowsml-directml` / `cpu`; tensorrt package: `tensorrt`).
+     `windowsml-directml` / CPU options and catalog EPs; tensorrt package: `tensorrt`).
+     See the [backend guide](docs/backends.md) for experimental options.
    - Set the **chunk size** (ms) — larger is more stable but adds latency.
    - Press **Load / Reload** to apply. Model / backend / chunk edits do not take
      effect until you press it.

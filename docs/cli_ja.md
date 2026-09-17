@@ -167,8 +167,15 @@ GTCRN は Windows ML 版では ORT CPU、TensorRT 版では native TensorRT で�
 windowsml 版で `--provider windowsml` を指定すると、Windows ML の catalog EP を
 優先し、使える EP がなければ DirectML、最後に CPU へ寄せます。特定の EP を
 強制したい場合は `windowsml-nvtrtx` / `windowsml-qnn` / `windowsml-openvino` /
-`windowsml-migraphx` / `windowsml-vitisai` を指定します（fallback せず、EP が
-未導入・未準備ならエラー）。
+`windowsml-migraphx` / `windowsml-vitisai` を指定します（別EPへ自動再試行せず、EPが
+未導入・未準備ならエラー）。非対応演算のORT CPU fallbackとは別の仕組みです。
+Autoの再試行はモデル読み込み時のもので、初回推論以降の失敗をすべて回復するわけではありません。
+
+OpenVINOは `windowsml-openvino-cpu` / `windowsml-openvino-gpu` /
+`windowsml-openvino-npu` でデバイス種類を指定できます。指定した種類がない場合はエラーになります。
+MIGraphXは実機未検証です。OpenVINOは一部Intel環境で検証済みで、GPU選択時も
+RMVPEはOpenVINO CPUで実行します。NPUは未検証です。
+対応範囲と選び方は[バックエンドガイド](backends_ja.md)を参照してください。
 
 catalog EP の状態確認とインストールは CLI から行えます。
 
@@ -187,15 +194,18 @@ tensorrt 版は GPU 実行を **同梱の TensorRT ランタイム** で行う�
 > 生成するため、起動に非常に長い時間がかかることがあります。2 回目以降は
 > エンジンキャッシュが再利用され、起動が短くなります。
 
+利用条件・初回構築は[バックエンドガイド](backends_ja.md)を参照してください。
 TensorRT の詳しい性能特性は
 [`tensorrt_performance_ja.md`](tensorrt_performance_ja.md) を参照してください。
 
 ## エンジンキャッシュの管理
 
 TensorRT（tensorrt 版）と Windows ML の TensorRT-RTX（`windowsml-nvtrtx`）が
-生成したエンジンは `%LOCALAPPDATA%\vc-rs\tensorrt-cache` に保存され、両バック
-エンドで共有されます（`VC_RS_TENSORRT_CACHE_DIR` で場所を変更可）。場所・サイズ
-の確認とキャッシュ消去は CLI から行えます。
+生成したエンジンは `%LOCALAPPDATA%\vc-rs\tensorrt-cache` を共通のルートとして保存されます
+（`VC_RS_TENSORRT_CACHE_DIR` で場所を変更可）。エンジン自体を相互利用するわけではありません。
+ネイティブTensorRTは `native-trt-<major.minor.patch.build>` サブディレクトリを使い、
+SDK更新時は非互換なキャッシュを再利用せず再構築します。旧SDKのキャッシュは残ります。
+TensorRT-RTXは別のキャッシュ構成を維持します。場所・サイズの確認と消去はCLIから行えます。
 
 ```powershell
 .\vc-rs.exe engine-cache info          # 場所・合計サイズ・モデル別の内訳を表示

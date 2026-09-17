@@ -182,7 +182,16 @@ packages.
 With `--provider windowsml`, the windowsml package prefers a Windows ML catalog
 EP, falling back to DirectML and finally CPU. To force a specific EP use
 `windowsml-nvtrtx` / `windowsml-qnn` / `windowsml-openvino` / `windowsml-migraphx`
-/ `windowsml-vitisai` (no fallback — it errors if the EP is not installed/ready).
+/ `windowsml-vitisai` (no automatic retry with another EP; it errors if the EP is
+not installed/ready). This is separate from ORT CPU fallback for unsupported operators.
+Auto retries during model loading; it does not recover from every failure during
+first or subsequent inference.
+
+For OpenVINO, `windowsml-openvino-cpu` / `windowsml-openvino-gpu` /
+`windowsml-openvino-npu` restrict the device type and error if that type is unavailable.
+MIGraphX remains unverified on target hardware. OpenVINO has limited Intel hardware
+validation; GPU selection runs RMVPE on OpenVINO CPU. NPU remains unverified.
+See the [backend guide](backends.md) for selection and support boundaries.
 
 Check and install catalog EPs from the CLI:
 
@@ -201,6 +210,7 @@ the NVIDIA driver needs installing.
 > shape changes**, which can make startup very slow. Subsequent runs reuse the
 > cached engine and start faster.
 
+See the [backend guide](backends.md) for requirements and initial builds.
 For detailed performance characteristics see
 [`tensorrt_performance_ja.md`](tensorrt_performance_ja.md).
 
@@ -208,7 +218,8 @@ For detailed performance characteristics see
 
 Engines built by TensorRT (tensorrt package) and by Windows ML TensorRT-RTX
 (`windowsml-nvtrtx`) are stored under `%LOCALAPPDATA%\vc-rs\tensorrt-cache` and
-share that root (override the location with `VC_RS_TENSORRT_CACHE_DIR`). Native
+share that root, not interchangeable engines (override the location with
+`VC_RS_TENSORRT_CACHE_DIR`). Native
 TensorRT uses a `native-trt-<major.minor.patch.build>` subdirectory so SDK upgrades
 rebuild engines and timings once without reusing incompatible caches. Old SDK
 caches remain available for rollback. Windows ML TensorRT-RTX keeps its existing

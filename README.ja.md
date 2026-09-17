@@ -2,8 +2,34 @@
 
 > [English](README.md) | 日本語
 
-`vc-rs` は Rust 製の **RVC 音声変換アプリ** です。マイク入力や WAV ファイルを、
-ONNX 形式の RVC モデルで別の声に変換します。次の 3 つの使い方があります。
+`vc-rs` は **ネイティブTensorRTに対応した、Windows向けRVCボイスチェンジャー** です。
+NVIDIA GPUを使った音声変換を、単体アプリでもDAWのVST3プラグインでも利用できます。
+Windows ML版ではDirectMLに加え、MIGraphX・OpenVINOの実験的な推論経路も選べます。
+Rust製でPython / PyTorch環境の準備は不要。マイク入力やWAVファイルを、ONNX形式の
+RVCモデルで別の声に変換します。
+
+## 特長
+
+- **GPUに合わせて選べる推論バックエンド** — NVIDIA向けのネイティブTensorRTで、
+  ContentVec・RMVPE・RVCの3段を実行。Windows ML経由のDirectML、AMD向けMIGraphX、
+  Intel向けOpenVINOも選択肢です。両者は実験的な対応で、MIGraphXは実機未検証、
+  OpenVINOは一部Intel環境で検証・試聴済みです。下の対応表で利用条件を確認できます。
+- **単体でも、DAWでも** — GUIでマイクの声を変換。VST3ではDAW内で変換し、ピッチや
+  ゲインのオートメーション、プロジェクトごとの設定保存ができます。
+- **Python環境不要で、既存モデルから始められる** — ビルド済みアプリを配布。
+  RVC v2 / F0の対応PTHモデルはGUIでONNXに変換でき、補助モデルもGUIから取得できます。
+- **音声コールバックを推論待ちにしない設計** — 重い推論はワーカーで実行し、
+  コールバックはロックフリーのリングバッファで音声を受け渡します。
+  過負荷時にはドロップや無音が発生するため、環境に応じたチャンク設定が必要です。
+- **WAV変換と自動化にも** — 同梱CLIでWAV変換・診断・スクリプト実行。
+  リアルタイム変換と共有する処理を、同じ入力・設定で比較検証できます。
+
+音質は声モデルに加え、F0推定、チャンク設定、前後処理にも依存します。
+バックエンドの選択や調整は[推論バックエンドガイド](docs/backends_ja.md)を参照してください。
+
+## 使い方を選ぶ
+
+次の3つの使い方があります。
 
 - **GUI 版（`vc-gui.exe`）** — 単体で使うためのデスクトップアプリです。**ほとんどの
   方はこれだけで使えます。**
@@ -20,22 +46,6 @@ ONNX 形式の RVC モデルで別の声に変換します。次の 3 つの使�
 > を参照してください。内部設計は [`docs/architecture_ja.md`](docs/architecture_ja.md)
 > にあります。
 
-## 特長
-
-- **ネイティブ Rust 実装** — Python / PyTorch ランタイムが不要です。GC ポーズや
-  インタプリタのオーバーヘッドがなく、リアルタイムでも処理時間の最悪値が安定します。
-  配布も軽量です（windowsml 版は数 MB）。
-- **音が途切れにくいリアルタイム設計** — オーディオコールバックはロックフリーで
-  サンプルを動かすだけにし、推論など重い処理は別スレッドへ隔離しています。負荷が
-  かかってもコールバックをブロックせず、破綻時は入力ドロップ／無音で受け流します。
-- **幅広い GPU 対応と最速モード** — Windows ML（DirectML）で NVIDIA 以外の GPU でも
-  動き、ネイティブ TensorRT で NVIDIA GPU の最速実行も選べます。
-- **WAV モードはリアルタイムと同一経路** — 音質チューニングを決定論的に検証できます。
-
-> 変換そのものの音質は、同じ RVC モデルを使う限り他ツールと本質的に同等です。
-> vc-rs の強みは、リアルタイム用途での**安定性（音切れにくさ・遅延の詰めやすさ）**と
-> **軽さ・手軽さ**にあります。
-
 ## ダウンロード
 
 最新版は GitHub の **[Releases](https://github.com/shirohata/vc-rs/releases)**
@@ -44,19 +54,37 @@ ONNX 形式の RVC モデルで別の声に変換します。次の 3 つの使�
 
 | パッケージ | 形態 | バックエンド | 対象環境 | サイズ | 必要なもの |
 | --- | --- | --- | --- | --- | --- |
-| `vc-rs-windowsml-…zip` | GUI + CLI | Windows ML | 多くの GPU（NVIDIA 以外も可） | 小（数 MB） | Windows App SDK ランタイム |
-| `vc-rs-tensorrt-…zip` | GUI + CLI | TensorRT | NVIDIA GPU | 大（約 1.9 GB） | 最新の NVIDIA ドライバ |
+| `vc-rs-windowsml-…zip` | GUI + CLI | Windows ML | 多くの GPU（NVIDIA 以外も可） | 小 | Windows App SDK ランタイム |
+| `vc-rs-tensorrt-…zip` | GUI + CLI | TensorRT | NVIDIA GPU | 大（ランタイム同梱） | 最新の NVIDIA ドライバ |
 | `vc-vst3-windowsml-…zip` | VST3 プラグイン | Windows ML | 多くの GPU（NVIDIA 以外も可） | 小 | Windows App SDK ランタイム |
-| `vc-vst3-tensorrt-…zip` | VST3 プラグイン | TensorRT | NVIDIA GPU | 大（約 1.9 GB） | 最新の NVIDIA ドライバ |
+| `vc-vst3-tensorrt-…zip` | VST3 プラグイン | TensorRT | NVIDIA GPU | 大（ランタイム同梱） | 最新の NVIDIA ドライバ |
 
 **どれを選べばよいか:**
 
 - まず試すなら **windowsml 版**。ダウンロードが軽く、NVIDIA 以外の GPU でも
   DirectML 経由で動きます。
-- **NVIDIA GPU を持っていて最速を狙う**なら **tensorrt 版**。ダウンロードは
+- **NVIDIA GPUでネイティブTensorRTを使う**なら **tensorrt 版**。ダウンロードは
   大きく、初回起動時にエンジン構築で時間がかかりますが、その後は高速です。
 - 単体で使うなら **GUI + CLI 版**、DAW で歌や配信に使うなら **VST3 版**。
   自動化や WAV 一括変換には GUI と同梱される CLI を使えます。
+
+### 推論バックエンドの対応範囲
+
+以下は現行ソースの対応範囲です。ダウンロード版の機能は各リリースの説明も確認してください。
+どちらのパッケージにもGUI + CLI版とVST3版があります。
+
+| バックエンド | 対象 | パッケージ | 利用条件・検証状況 |
+| --- | --- | --- | --- |
+| ネイティブTensorRT | NVIDIA GPU | tensorrt | 配布バックエンド。ランタイム同梱、初回エンジン構築が必要。モデル単体の[測定資料](docs/tensorrt_performance_ja.md)あり |
+| Windows ML / DirectML | NVIDIA・AMD・Intel等の対応GPU | windowsml | 配布バックエンド。Windows App SDK Runtimeが必要。性能はGPU・モデル・設定に依存 |
+| MIGraphX（Windows ML経由） | 対応AMD GPU | windowsml | **実験的**。カタログEPと対応デバイスが必要。AMD実機のモデル互換性・音質・性能は未検証 |
+| OpenVINO（Windows ML経由） | 対応Intel CPU / GPU / NPU | windowsml | **実験的**。カタログEPが必要。デバイス種類を選択可能。一部Intel環境でモデル別計測・GUI試聴済み。GPU選択時もRMVPEはOpenVINO CPUで実行。NPUは未検証。[検証記録](docs/openvino-model-routing_ja.md) |
+
+MIGraphX・OpenVINOは専用ZIPではなく、Windows ML版で利用する追加EPです。
+選択肢の表示はこのPCのカタログに依存します。EPが表示されることと、モデル全体が
+GPU/NPUで実行できることは別です。詳しくは[バックエンドガイド](docs/backends_ja.md)へ。
+ZIPのサイズには、別途取得するランタイム・補助モデルや、生成するキャッシュは含まれません。
+正確なダウンロード容量は各リリースの添付ファイルで確認してください。
 
 ## 必要なもの
 
@@ -198,7 +226,8 @@ CLI は **GUI にない用途**に使えます。
    - **Browse** から RVC モデル・埋め込み（ContentVec）・F0（RMVPE）の各 `.onnx`
      を指定します。
    - **バックエンド**を選びます（windowsml 版: `windowsml` / `windowsml-directml`
-     / `cpu`、tensorrt 版: `tensorrt`）。
+     / CPUの選択肢とカタログEP、tensorrt 版: `tensorrt`）。
+     実験的な選択肢の条件は[バックエンドガイド](docs/backends_ja.md)を参照してください。
    - **chunk size**（ms）を設定します（大きいほど安定しますが遅延が増えます）。
    - **Load / Reload** を押して反映します。モデル・バックエンド・chunk の変更は
      このボタンを押すまで適用されません。
