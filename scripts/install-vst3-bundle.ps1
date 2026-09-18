@@ -162,6 +162,16 @@ try {
                 Remove-Item -LiteralPath $destination -Recurse -Force
             }
             Copy-Item -LiteralPath $bundle -Destination $destination -Recurse -Force
+            # Windows hosts derive the module filename from the bundle name.
+            # Keep local installs consistent with crates/vc-vst3/package.ps1.
+            foreach ($archDir in (Get-ChildItem -LiteralPath (Join-Path $destination 'Contents') -Directory |
+                    Where-Object { $_.Name -like '*-win' })) {
+                $rawModule = Join-Path $archDir.FullName 'vc-vst3.vst3'
+                if (-not (Test-Path -LiteralPath $rawModule -PathType Leaf)) {
+                    throw "Missing VST3 module: $rawModule"
+                }
+                Rename-Item -LiteralPath $rawModule -NewName $destinationName
+            }
         }
     }
 

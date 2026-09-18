@@ -128,6 +128,86 @@ fn draw_contents(ui: &mut egui::Ui, setter: &ParamSetter, state: &mut EditorStat
     }
     ui.separator();
 
+    ui.heading("Live controls");
+    ui.small("Changes apply immediately and can be automated in your DAW.");
+    egui::Grid::new("params").num_columns(2).show(ui, |ui| {
+        ui.label("Pitch");
+        ui.add(widgets::ParamSlider::for_param(
+            &state.params.pitch_shift,
+            setter,
+        ));
+        ui.end_row();
+        ui.label("Speaker");
+        ui.add(widgets::ParamSlider::for_param(
+            &state.params.speaker_id,
+            setter,
+        ));
+        ui.end_row();
+        ui.label("Input gain");
+        ui.add(widgets::ParamSlider::for_param(
+            &state.params.input_gain_db,
+            setter,
+        ));
+        ui.end_row();
+        ui.label("Output gain");
+        ui.add(widgets::ParamSlider::for_param(
+            &state.params.output_gain_db,
+            setter,
+        ));
+        ui.end_row();
+        ui.label("Noise gate");
+        ui.add(widgets::ParamSlider::for_param(
+            &state.params.noise_gate,
+            setter,
+        ));
+        ui.end_row();
+        ui.label("Gate threshold");
+        ui.add(widgets::ParamSlider::for_param(
+            &state.params.noise_gate_threshold_db,
+            setter,
+        ));
+        ui.end_row();
+    });
+
+    ui.separator();
+    ui.heading("Setup");
+    ui.small("Models, backend, chunk, Extra convert, and gate timing apply on Load / Reload.");
+    ui.horizontal_wrapped(|ui| {
+        let loading = state.loading.load(Ordering::SeqCst);
+        if ui
+            .add_enabled(!loading, egui::Button::new("Load / Reload"))
+            .clicked()
+            && state
+                .loading
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+        {
+            state.reload.store(true, Ordering::SeqCst);
+            // Wake the worker so it picks up the request immediately, even if the
+            // host is idle and not driving process() (no input wakes arriving).
+            state.reload_waker.wake();
+        }
+        if state.dirty.load(Ordering::Relaxed) {
+            ui.colored_label(egui::Color32::from_rgb(220, 180, 60), "Unapplied changes");
+        }
+    });
+
+    // New instances expose setup; configured instances prioritize live controls.
+    // The apply action stays outside the fold so pending edits remain actionable.
+    let needs_models = {
+        let settings = state.params.settings.read().unwrap();
+        settings.model.as_os_str().is_empty()
+            || settings.embedder.as_os_str().is_empty()
+            || settings.f0_model.as_os_str().is_empty()
+    };
+    egui::CollapsingHeader::new("Models and conversion settings")
+        .default_open(needs_models)
+        .show(ui, |ui| {
+            draw_staged_settings(ui, state);
+        });
+}
+
+fn draw_staged_settings(ui: &mut egui::Ui, state: &mut EditorState) {
     // Snapshot current settings for display, releasing the lock immediately.
     let (model, embedder, f0_model, provider, gpu_device_id) = {
         let s = state.params.settings.read().unwrap();
@@ -267,26 +347,6 @@ fn draw_contents(ui: &mut egui::Ui, setter: &ParamSetter, state: &mut EditorStat
                 mark_dirty(state);
             }
         }
-        let loading = state.loading.load(Ordering::SeqCst);
-        if ui
-            .add_enabled(!loading, egui::Button::new("Load / Reload"))
-            .clicked()
-            && state
-                .loading
-                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                .is_ok()
-        {
-            state.reload.store(true, Ordering::SeqCst);
-            // Wake the worker so it picks up the request immediately, even if the
-            // host is idle and not driving process() (no input wakes arriving).
-            state.reload_waker.wake();
-        }
-        if state.dirty.load(Ordering::Relaxed) {
-            ui.colored_label(
-                egui::Color32::from_rgb(220, 180, 60),
-                "● unapplied — click Load / Reload",
-            );
-        }
     });
 
     // Latency / context sliders (10 ms steps). Applied on Load / Reload.
@@ -310,49 +370,10 @@ fn draw_contents(ui: &mut egui::Ui, setter: &ParamSetter, state: &mut EditorStat
     }
     ui.small("Chunk = latency vs. context. Extra convert = extra model context.");
 
+    // Keep these controls in the staged section: unlike the gate toggle and
+    // threshold, attack/release/floor require a worker reload.
     ui.separator();
-    ui.label("Live parameters");
-    egui::Grid::new("params").num_columns(2).show(ui, |ui| {
-        ui.label("Pitch");
-        ui.add(widgets::ParamSlider::for_param(
-            &state.params.pitch_shift,
-            setter,
-        ));
-        ui.end_row();
-        ui.label("Speaker");
-        ui.add(widgets::ParamSlider::for_param(
-            &state.params.speaker_id,
-            setter,
-        ));
-        ui.end_row();
-        ui.label("Input gain");
-        ui.add(widgets::ParamSlider::for_param(
-            &state.params.input_gain_db,
-            setter,
-        ));
-        ui.end_row();
-        ui.label("Output gain");
-        ui.add(widgets::ParamSlider::for_param(
-            &state.params.output_gain_db,
-            setter,
-        ));
-        ui.end_row();
-        ui.label("Noise gate");
-        ui.add(widgets::ParamSlider::for_param(
-            &state.params.noise_gate,
-            setter,
-        ));
-        ui.end_row();
-        ui.label("Gate threshold");
-        ui.add(widgets::ParamSlider::for_param(
-            &state.params.noise_gate_threshold_db,
-            setter,
-        ));
-        ui.end_row();
-    });
-
-    // Gate attack/release/floor are static (applied on Load / Reload), so they
-    // sit with the other staged settings rather than the live DAW parameters.
+    ui.label("Gate timing");
     let (gate_attack_ms, gate_release_ms, gate_floor) = {
         let s = state.params.settings.read().unwrap();
         (
@@ -374,8 +395,7 @@ fn draw_contents(ui: &mut egui::Ui, setter: &ParamSetter, state: &mut EditorStat
         mark_dirty(state);
     }
 
-    ui.separator();
-    ui.small("Model / backend / chunk edits apply when you click Load / Reload. Other latency settings (crossfade, SOLA, extra-convert) come from the config file and apply on reinstantiation.");
+    ui.small("Crossfade and SOLA settings are configured in the config file and apply on reinstantiation.");
 }
 
 /// A labelled control: the name + Browse button on one line, and the current

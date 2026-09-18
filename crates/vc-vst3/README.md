@@ -49,6 +49,12 @@ host process() ─┬─ downmix L/R → mono ─→ input ring ─┐
 Open the plugin's editor in your DAW ([`editor.rs`](src/editor.rs), egui). From
 there you can:
 
+**Live controls** at the top apply immediately: Pitch, Speaker, input/output
+gain, and the noise-gate toggle and threshold. **Setup** groups settings that
+require **Load / Reload**, with the unapplied indicator beside that button.
+The model and conversion settings fold is initially open when any model is
+unset, and initially closed for configured instances.
+
 - **Browse** for the RVC model, embedder, and F0 (RMVPE) `.onnx` files
 - choose the **backend** — the GUI lists only the providers this package was
   built with: the Windows ML package offers `windowsml` (auto), `windowsml-directml`,
@@ -60,7 +66,8 @@ there you can:
   Load / Reload` / `loading…` / `running (cuda)` / `load failed: …`)
 - adjust the live parameters (Pitch / Speaker / Input · Output gain)
 
-Model/backend/chunk edits are **staged**: they only take effect when you press
+Model/backend/chunk, Extra convert, and gate attack/release/floor edits are
+**staged**: they only take effect when you press
 **Load / Reload** (shown by an "unapplied" indicator). Live parameters apply
 immediately. Changing the chunk size also re-reports the plugin latency to the
 host.
@@ -83,8 +90,8 @@ values (handy for automation / first run). See
 
 The seed only applies when the instance has no models set yet; once a project
 has saved its settings, the state wins and the config file is ignored.
-Model / backend / `chunk_ms` apply on Load / Reload from the GUI. The remaining
-latency settings (`crossfade_ms`, `sola_search_ms`, `extra_convert_ms`, …) come
+Model / backend / `chunk_ms` / `extra_convert_ms` apply on Load / Reload from the GUI.
+The remaining latency settings (`crossfade_ms`, `sola_search_ms`, …) come
 from the config and apply on (re)instantiation.
 
 ## Build
