@@ -62,7 +62,8 @@ impl Default for VcRvcParams {
                     max: 36.0,
                 },
             )
-            .with_unit(" dB"),
+            .with_unit(" dB")
+            .with_value_to_string(formatters::v2s_f32_rounded(2)),
             output_gain_db: FloatParam::new(
                 "Output Gain",
                 0.0,
@@ -71,7 +72,8 @@ impl Default for VcRvcParams {
                     max: 36.0,
                 },
             )
-            .with_unit(" dB"),
+            .with_unit(" dB")
+            .with_value_to_string(formatters::v2s_f32_rounded(2)),
             noise_gate: BoolParam::new("Noise Gate", false),
             noise_gate_threshold_db: FloatParam::new(
                 "Gate Threshold",
@@ -81,7 +83,8 @@ impl Default for VcRvcParams {
                     max: 0.0,
                 },
             )
-            .with_unit(" dB"),
+            .with_unit(" dB")
+            .with_value_to_string(formatters::v2s_f32_rounded(2)),
             settings: RwLock::new(PluginConfig::default()),
             editor_state: EguiState::from_size(480, 520),
         }
