@@ -46,10 +46,9 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      # rustup installs the toolchain/components from rust-toolchain.toml.
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install --no-self-update
       - uses: Swatinem/rust-cache@v2
       - name: rustfmt (check only)
         run: cargo fmt --all --check
@@ -62,8 +61,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install --no-self-update
       - uses: Swatinem/rust-cache@v2
       - name: TensorRT SDK selection (synthetic fixtures, no NVIDIA SDK)
         run: pwsh -File scripts/test-tensorrt-sdk.ps1
@@ -90,6 +89,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      # v2.1.1 ships cargo-deny 0.20.2; keep scripts/install-cargo-deny.ps1 aligned.
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25
         with:
           command: check
+          # The action defaults to --all-features, overriding deny.toml's
+          # intended default graph and pulling in optional snapshot renderers.
+          arguments: ""

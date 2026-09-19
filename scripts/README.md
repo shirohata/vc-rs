@@ -4,6 +4,25 @@ The recommended GPU baseline is **CUDA 13.3 Update 1 / TensorRT 11.2.1**.
 Automatic discovery stays on the CUDA 13 / TensorRT 11 line. Run scripts from
 the repo root with `pwsh`.
 
+Rust is pinned by [`../rust-toolchain.toml`](../rust-toolchain.toml), including
+Clippy and rustfmt. Local Cargo commands, CI, and packaging use that file;
+`rustup toolchain install` installs the pinned toolchain if needed. A global `rustup update`
+does not advance this repository's compiler. To upgrade, edit the toolchain file
+and validate the CI and release checks together. Avoid `cargo +stable` or
+`RUSTUP_TOOLCHAIN` overrides when validating a release.
+
+`just setup` also installs cargo-deny **0.20.2**, matching the commit-pinned CI
+Action. To update an existing installation without rerunning the full setup:
+
+```powershell
+pwsh -File scripts/install-cargo-deny.ps1
+cargo deny check
+```
+
+When upgrading cargo-deny, update that installer and the CI Action SHA together,
+checking the Action's Dockerfile for the bundled version. The advisory database
+continues to receive updates independently of the tool version.
+
 ## First-time setup
 
 1. **winget scope** — `pwsh -File scripts/bootstrap.ps1`

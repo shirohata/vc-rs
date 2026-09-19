@@ -92,12 +92,12 @@ pub fn downmix_to_mono_into(input: &[f32], channels: usize, output: &mut [f32]) 
     match channels {
         1 => output.copy_from_slice(input),
         2 => {
-            for (dst, frame) in output.iter_mut().zip(input.chunks_exact(2)) {
+            for (dst, frame) in output.iter_mut().zip(input.as_chunks::<2>().0) {
                 *dst = (frame[0] + frame[1]) * 0.5;
             }
         }
         4 => {
-            for (dst, frame) in output.iter_mut().zip(input.chunks_exact(4)) {
+            for (dst, frame) in output.iter_mut().zip(input.as_chunks::<4>().0) {
                 *dst = (frame[0] + frame[1] + frame[2] + frame[3]) * 0.25;
             }
         }
@@ -120,13 +120,13 @@ pub fn upmix_mono_into<T: Copy>(mono: &[T], channels: usize, output: &mut [T]) {
     match channels {
         1 => output.copy_from_slice(mono),
         2 => {
-            for (frame, &sample) in output.chunks_exact_mut(2).zip(mono) {
+            for (frame, &sample) in output.as_chunks_mut::<2>().0.iter_mut().zip(mono) {
                 frame[0] = sample;
                 frame[1] = sample;
             }
         }
         4 => {
-            for (frame, &sample) in output.chunks_exact_mut(4).zip(mono) {
+            for (frame, &sample) in output.as_chunks_mut::<4>().0.iter_mut().zip(mono) {
                 frame[0] = sample;
                 frame[1] = sample;
                 frame[2] = sample;
@@ -616,19 +616,14 @@ pub(crate) fn dot(a: &[f32], b: &[f32]) -> f32 {
     let a = &a[..n];
     let b = &b[..n];
     let mut acc = [0.0f32; LANES];
-    let mut a_chunks = a.chunks_exact(LANES);
-    let mut b_chunks = b.chunks_exact(LANES);
-    for (ca, cb) in a_chunks.by_ref().zip(b_chunks.by_ref()) {
+    let (a_chunks, a_tail) = a.as_chunks::<LANES>();
+    let (b_chunks, b_tail) = b.as_chunks::<LANES>();
+    for (ca, cb) in a_chunks.iter().zip(b_chunks) {
         for lane in 0..LANES {
             acc[lane] += ca[lane] * cb[lane];
         }
     }
-    let tail: f32 = a_chunks
-        .remainder()
-        .iter()
-        .zip(b_chunks.remainder())
-        .map(|(x, y)| x * y)
-        .sum();
+    let tail: f32 = a_tail.iter().zip(b_tail).map(|(x, y)| x * y).sum();
     acc.iter().sum::<f32>() + tail
 }
 

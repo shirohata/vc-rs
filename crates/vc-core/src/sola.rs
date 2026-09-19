@@ -592,14 +592,10 @@ fn weighted_window_terms(window: &[f32], reference: &[f32], weights: &[f32]) -> 
     let weights = &weights[..n];
     let mut nom = [0.0f32; LANES];
     let mut window_energy = [0.0f32; LANES];
-    let mut w_chunks = window.chunks_exact(LANES);
-    let mut r_chunks = reference.chunks_exact(LANES);
-    let mut wt_chunks = weights.chunks_exact(LANES);
-    for ((cw, cr), cwt) in w_chunks
-        .by_ref()
-        .zip(r_chunks.by_ref())
-        .zip(wt_chunks.by_ref())
-    {
+    let (w_chunks, w_tail) = window.as_chunks::<LANES>();
+    let (r_chunks, r_tail) = reference.as_chunks::<LANES>();
+    let (wt_chunks, wt_tail) = weights.as_chunks::<LANES>();
+    for ((cw, cr), cwt) in w_chunks.iter().zip(r_chunks).zip(wt_chunks) {
         for lane in 0..LANES {
             let xw = cw[lane] * cwt[lane];
             nom[lane] += xw * cr[lane];
@@ -608,12 +604,7 @@ fn weighted_window_terms(window: &[f32], reference: &[f32], weights: &[f32]) -> 
     }
     let mut nom_tail = 0.0;
     let mut energy_tail = 0.0;
-    for ((&x, &y), &weight) in w_chunks
-        .remainder()
-        .iter()
-        .zip(r_chunks.remainder())
-        .zip(wt_chunks.remainder())
-    {
+    for ((&x, &y), &weight) in w_tail.iter().zip(r_tail).zip(wt_tail) {
         let xw = x * weight;
         nom_tail += xw * y;
         energy_tail += xw * x;

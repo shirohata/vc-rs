@@ -1,11 +1,12 @@
 <#
 .SYNOPSIS
-    Install the winget-provisionable parts of the vc-rs build environment.
+    Install vc-rs build prerequisites and pinned Rust tools.
 
 .DESCRIPTION
     Idempotently installs the build prerequisites that have first-class winget
     packages: the Rust toolchain (rustup), the MSVC C++ build tools (needed by
     the `cc` crate to compile native_tensorrt_shim.cpp), CMake, and Git.
+    Also installs the repository-pinned Rust toolchain and cargo-deny version.
 
     This script deliberately does NOT install the NVIDIA SDKs (CUDA Toolkit,
     cuDNN, TensorRT). Those require an NVIDIA login and are vendored / placed
@@ -116,11 +117,18 @@ if (-not $rustup) {
     if (Test-Path $candidate) { $rustup = $candidate }
 }
 if ($rustup) {
-    Write-Host "[rustup] ensuring stable-x86_64-pc-windows-msvc + components" -ForegroundColor Yellow
-    & $rustup toolchain install stable-x86_64-pc-windows-msvc --component rustfmt --component clippy --no-self-update
-    & $rustup default stable-x86_64-pc-windows-msvc
+    Write-Host "[rustup] ensuring repository-pinned toolchain + components" -ForegroundColor Yellow
+    # Resolve rust-toolchain.toml even when setup was launched from elsewhere.
+    Push-Location (Split-Path -Parent $PSScriptRoot)
+    try {
+        & $rustup toolchain install --no-self-update
+        if ($LASTEXITCODE -ne 0) { throw "Installing the pinned Rust toolchain failed." }
+        & (Join-Path $PSScriptRoot 'install-cargo-deny.ps1') -CargoPath (Join-Path (Split-Path -Parent $rustup) 'cargo.exe')
+    } finally {
+        Pop-Location
+    }
 } else {
-    Write-Warning "rustup not found on PATH yet. Open a new terminal and run: rustup default stable-x86_64-pc-windows-msvc"
+    Write-Warning "rustup not found on PATH yet. Open a new terminal in the repository and run: rustup toolchain install"
 }
 
 # --- 4. Git hooks (shared, repo-local) --------------------------------------

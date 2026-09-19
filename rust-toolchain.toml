@@ -1,0 +1,6 @@
+# Shared by local builds, CI, and release packaging. Update deliberately and
+# validate the release gates before adopting a new compiler/Clippy version.
+[toolchain]
+channel = "1.98.1"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

@@ -90,6 +90,32 @@ in sessions such as OpenVINO. Auto also does not recover from every failure duri
 first or subsequent inference. Device-selection logs do not establish GPU/NPU
 placement of individual operators.
 
+## Why changing Chunk ms requires a reload
+
+Fixed shapes let inference optimize for known tensor dimensions. Native TensorRT
+derives each model's input dimensions from the chunk and surrounding context, then
+reuses engines built for those dimensions. The [fixed/dynamic shape comparison](tensorrt_performance_ja.md)
+also found a performance benefit from fixed shapes. The dimensions are fixed, not
+the contents of the audio.
+
+For example, changing Chunk ms from 100 to 200 changes how much audio advances
+per processing step. Models whose input dimensions change need matching TensorRT
+engines: compatible cached engines are reused, and missing ones are built. A reload
+does not necessarily mean a new engine build. The OpenVINO GPU path also fixes
+ContentVec input dimensions, while RVC remains dynamic; the scope of fixed-shape
+optimization depends on the backend and model.
+
+Chunk size also affects audio history, F0 frame alignment, resampler FIFOs, chunk
+joining, I/O buffering, and latency reporting. The current pipeline initializes
+these together for one chunk size. Even a dynamic-shape backend cannot switch by
+simply feeding a different chunk length into that running pipeline.
+
+After changing the setting, restart conversion in the GUI or press **Load / Reload**
+in VST3. Restart CLI real-time conversion with the new settings. This is a current
+implementation choice to preserve fixed-shape optimization and consistent streaming
+state, not a claim that TensorRT itself cannot handle dynamic shapes. See the
+[chunk lifecycle](architecture.md#chunk-lifecycle) for the internal contract.
+
 ## Comparing speed and audio quality
 
 Keep models, input audio, chunk size, extra context, and pre/post-processing the

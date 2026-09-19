@@ -1,6 +1,6 @@
 # cargo-deny policy — supply-chain gate for the dependency graph.
 #
-# Run locally with `cargo deny check` (install: `cargo install cargo-deny`); CI
+# Run locally with `cargo deny check` (install: `pwsh scripts/install-cargo-deny.ps1`); CI
 # runs it on every push/PR. Scope is the only shipped target (Windows x64), so
 # unix-only transitive deps don't generate noise.
 #

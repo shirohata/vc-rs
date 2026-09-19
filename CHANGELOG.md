@@ -11,6 +11,37 @@ Version numbers come from `[workspace.package].version` in the root
 release archives. See [`docs/distribution.md`](docs/distribution.md) for the full
 versioning and publishing procedure.
 
+## [0.5.2] - 2026-09-19
+
+### Added
+
+- Explicit OpenVINO CPU, GPU, and NPU selection in the CLI, GUI, and VST3,
+  with device discovery and guided first-time setup in the graphical interfaces.
+- Optional CLI inference performance reports and WAV benchmarking tooling.
+
+### Changed
+
+- Improved VST3 control layout and displayed decibel parameters to two decimal
+  places, preserving parameter IDs and saved settings.
+- Made English the default README and expanded English/Japanese backend and
+  hardware support documentation.
+- Optimized OpenVINO GPU ContentVec loading with fixed input dimensions while
+  keeping RVC input shapes dynamic.
+
+### Fixed
+
+- Corrected Windows ML automatic session fallback.
+- Routed RMVPE to OpenVINO CPU when using OpenVINO GPU or the unrestricted
+  OpenVINO provider to avoid incorrect pitch inference on the GPU.
+- Corrected local VST3 bundle naming for side-by-side backend variants.
+
+### Distribution notes
+
+- OpenVINO NPU selection is available but has not been validated on NPU hardware.
+  GPU selection does not guarantee that every operation runs on the GPU.
+- Windows binaries are not code-signed; Windows may display a security warning
+  when downloading or running them.
+
 ## [0.5.1] - 2026-09-13
 
 ### Added
@@ -209,6 +240,7 @@ Initial release.
 - One-shot distribution packaging scripts for all four Windows x64 variants.
 - Auto-generated bundled third-party license notices during packaging.
 
+[0.5.2]: https://github.com/shirohata/vc-rs/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/shirohata/vc-rs/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/shirohata/vc-rs/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/shirohata/vc-rs/compare/v0.3.0...v0.4.0

@@ -264,9 +264,7 @@ fn widen_storage(dtype: &str, raw: &[u8], numel: usize) -> Result<TensorData> {
                 raw.len()
             );
         }
-        Ok(raw[..needed]
-            .chunks_exact(N)
-            .map(|c| c.try_into().expect("chunk size")))
+        Ok(raw[..needed].as_chunks::<N>().0.iter().copied())
     }
 
     Ok(match dtype {

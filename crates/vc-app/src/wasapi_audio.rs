@@ -913,8 +913,10 @@ mod tests {
         encode_mono_to_interleaved(&[0.25, -0.5], 2, WasapiSampleFormat::F32, &mut output);
 
         let samples: Vec<f32> = output
-            .chunks_exact(4)
-            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|&chunk| f32::from_le_bytes(chunk))
             .collect();
         assert_eq!(samples, vec![0.25, 0.25, -0.5, -0.5]);
     }
@@ -925,8 +927,10 @@ mod tests {
         encode_mono_to_interleaved(&[-2.0, 0.0, 2.0], 1, WasapiSampleFormat::I16, &mut output);
 
         let samples: Vec<i16> = output
-            .chunks_exact(2)
-            .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&chunk| i16::from_le_bytes(chunk))
             .collect();
         assert_eq!(samples, vec![-32767, 0, 32767]);
     }
