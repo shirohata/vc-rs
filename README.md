@@ -171,7 +171,8 @@ Choose `off`, `noise-gate`, `rnnoise`, or `gtcrn` under **Input denoiser**.
 RNNoise uses an embedded model and needs no additional download. Passthrough
 applies Input gain, the selected input denoiser, and Output gain. Switching
 between `off` and `noise-gate`, including the gate threshold, is live; switching
-to RNNoise or GTCRN requires **Apply / Start**. These input denoisers are not
+to RNNoise or GTCRN requires **Restart** while running, or **Start** when
+stopped. These input denoisers are not
 included in VST3.
 
 Where each denoiser sits:
@@ -187,8 +188,8 @@ real time with large margin. It ships in the **standalone CLI/GUI packages**:
 Windows ML runs the tiny graph on ORT CPU, while TensorRT runs it through native
 TensorRT. VST3 does not include it. Its fixed delay is ~48 ms (the 16 kHz STFT
 reconstruction plus the adapter FIFO). In the GUI, select **Audio devices and noise reduction → Input denoiser → gtcrn → Download GTCRN**.
-The official 352 KB model (MIT) is verified and saved alongside its license in `%LOCALAPPDATA%\vc-rs\models\gtcrn`; its directory is configured automatically. Press **Apply / Start** to activate it.
-You can also choose an existing **GTCRN model dir**, or use `download-models.ps1 -Gtcrn` to fetch it into `assets\gtcrn\` for the CLI's `--gtcrn-model <dir>`.
+The official 352 KB model (MIT) is verified and saved alongside its license in `%LOCALAPPDATA%\vc-rs\models\gtcrn`; its directory is configured automatically. Press **Restart** while running, or **Start** when stopped, to activate it.
+For CLI use, `download-models.ps1 -Gtcrn` fetches it into `assets\gtcrn\`. Select that directory or an existing model directory with `--gtcrn-model <dir>`.
 
 ## Tuning real-time settings
 
@@ -202,8 +203,8 @@ ms**.
   can be more stable but costs more. Start around `100` ms.
 
 When tuning, **first find a value with no dropouts, then lower Chunk ms** to
-reduce latency. Pitch / Speaker / Input·Output gain can be adjusted anytime under
-Live parameters.
+reduce latency. Pitch and input/output gain can be adjusted live on the normal
+screen; **Speaker ID** is under **Model** below voice selection.
 
 ## The bundled CLI (advanced)
 
