@@ -357,20 +357,163 @@ fn read_wav_mono(path: &Path) -> Result<(Vec<f32>, hound::WavSpec)> {
     let mut reader = hound::WavReader::open(path)
         .with_context(|| format!("failed to open {}", path.display()))?;
     let spec = reader.spec();
-    let channels = spec.channels.max(1) as usize;
-    let samples = match spec.sample_format {
-        hound::SampleFormat::Int => reader
-            .samples::<i16>()
-            .collect::<Result<Vec<_>, _>>()?
-            .chunks(channels)
-            .map(|f| f.iter().map(|&x| x as f32 / 32768.0).sum::<f32>() / f.len() as f32)
-            .collect(),
-        hound::SampleFormat::Float => reader
-            .samples::<f32>()
-            .collect::<Result<Vec<_>, _>>()?
-            .chunks(channels)
-            .map(|f| f.iter().copied().sum::<f32>() / f.len() as f32)
-            .collect(),
+    let channels = usize::from(spec.channels);
+    let decoded = match spec.sample_format {
+        hound::SampleFormat::Int => {
+            anyhow::ensure!(
+                matches!(spec.bits_per_sample, 8 | 16 | 24 | 32),
+                "unsupported integer WAV bit depth: {}",
+                spec.bits_per_sample
+            );
+            // Hound centers unsigned PCM8 and sign-extends wider PCM into i32
+            // without scaling. Full scale depends on the source precision,
+            // not the Rust sample type: a fixed i16 scale attenuates PCM8 and
+            // an i16 decoder rejects PCM24/32.
+            let full_scale = (1_u64 << (spec.bits_per_sample - 1)) as f32;
+            reader
+                .samples::<i32>()
+                .map(|sample| sample.map(|value| value as f32 / full_scale))
+                .collect::<Result<Vec<_>, _>>()
+        }
+        hound::SampleFormat::Float => reader.samples::<f32>().collect::<Result<Vec<_>, _>>(),
     };
+    let decoded = decoded.with_context(|| format!("failed to decode {}", path.display()))?;
+    let frames = decoded.chunks_exact(channels);
+    anyhow::ensure!(
+        frames.remainder().is_empty(),
+        "WAV contains an incomplete channel frame"
+    );
+    let samples = frames
+        .map(|frame| frame.iter().copied().sum::<f32>() / channels as f32)
+        .collect();
     Ok((samples, spec))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::io::Cursor;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::read_wav_mono;
+
+    struct TestWav(PathBuf);
+
+    impl TestWav {
+        fn write<T: hound::Sample>(
+            spec: hound::WavSpec,
+            samples: impl IntoIterator<Item = T>,
+        ) -> Self {
+            static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "vc-rs-wav-test-{}-{}-{}.wav",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+                NEXT_ID.fetch_add(1, Ordering::Relaxed)
+            ));
+            let file = Self(path);
+            let mut writer = hound::WavWriter::create(&file.0, spec).unwrap();
+            for sample in samples {
+                writer.write_sample(sample).unwrap();
+            }
+            writer.finalize().unwrap();
+            file
+        }
+    }
+
+    impl Drop for TestWav {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+
+    fn spec(
+        bits_per_sample: u16,
+        sample_format: hound::SampleFormat,
+        channels: u16,
+    ) -> hound::WavSpec {
+        hound::WavSpec {
+            channels,
+            sample_rate: 48_000,
+            bits_per_sample,
+            sample_format,
+        }
+    }
+
+    #[test]
+    fn integer_wav_bit_depths_preserve_equal_full_scale_amplitudes() {
+        let expected: [f32; 8] = [-1.0, -0.5, -0.25, 0.0, 0.25, 0.5, 0.75, 0.0];
+        for bits in [8, 16, 24, 32] {
+            let full_scale = 1_i64 << (bits - 1);
+            let encoded = expected
+                .iter()
+                .map(|&sample| (f64::from(sample) * full_scale as f64) as i32);
+            let file = TestWav::write(spec(bits, hound::SampleFormat::Int, 1), encoded);
+            let (samples, decoded_spec) = read_wav_mono(&file.0).unwrap();
+            assert_eq!(samples.as_slice(), &expected, "PCM{bits} changed level");
+            assert_eq!(decoded_spec.bits_per_sample, bits);
+            assert_eq!(decoded_spec.sample_rate, 48_000);
+        }
+    }
+
+    #[test]
+    fn integer_and_float_stereo_wav_average_complete_channel_frames() {
+        let integer = TestWav::write(
+            spec(24, hound::SampleFormat::Int, 2),
+            [1_i32 << 22, 0, -(1_i32 << 22), 1_i32 << 21],
+        );
+        let (samples, _) = read_wav_mono(&integer.0).unwrap();
+        assert_eq!(samples, [0.25, -0.125]);
+
+        let float = TestWav::write(
+            spec(32, hound::SampleFormat::Float, 2),
+            [1.5_f32, 0.5, -0.5, 0.25],
+        );
+        let (samples, _) = read_wav_mono(&float.0).unwrap();
+        assert_eq!(samples, [1.0, -0.125]);
+    }
+
+    #[test]
+    fn float_mono_wav_preserves_sample_values_without_integer_scaling() {
+        let expected = [1.25_f32, -0.5, 0.0, 0.25];
+        let file = TestWav::write(spec(32, hound::SampleFormat::Float, 1), expected);
+        let (samples, _) = read_wav_mono(&file.0).unwrap();
+        assert_eq!(samples, expected);
+    }
+
+    #[test]
+    fn wav_with_incomplete_channel_frame_is_rejected() {
+        let file = TestWav::write(spec(16, hound::SampleFormat::Int, 2), [1_i32, 2, 3, 4]);
+        let mut bytes = fs::read(&file.0).unwrap();
+        let data_start = hound::WavReader::new(Cursor::new(&bytes))
+            .unwrap()
+            .into_inner()
+            .position() as usize;
+        // Declare three interleaved samples for a stereo stream. Averaging a
+        // short last frame would silently change the final sample's level.
+        bytes[data_start - 4..data_start].copy_from_slice(&6_u32.to_le_bytes());
+        fs::write(&file.0, bytes).unwrap();
+        assert!(read_wav_mono(&file.0).is_err());
+    }
+
+    #[test]
+    fn truncated_wav_sample_is_rejected() {
+        let file = TestWav::write(spec(16, hound::SampleFormat::Int, 1), [1_i32, 2]);
+        let mut bytes = fs::read(&file.0).unwrap();
+        bytes.pop();
+        fs::write(&file.0, bytes).unwrap();
+        assert!(read_wav_mono(&file.0).is_err());
+    }
+
+    #[test]
+    fn invalid_wav_header_is_rejected() {
+        let file = TestWav::write(spec(16, hound::SampleFormat::Int, 1), [0_i32]);
+        fs::write(&file.0, b"invalid WAV header").unwrap();
+        assert!(read_wav_mono(&file.0).is_err());
+    }
 }
