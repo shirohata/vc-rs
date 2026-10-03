@@ -65,6 +65,9 @@ pub struct VcRvcPlugin {
     /// Editor → worker: wakes the parked worker when a reload is submitted, so a
     /// Load / Reload applies immediately even while the host is idle.
     reload_waker: Arc<ReloadWaker>,
+    /// Successful explicit Load survives host deactivate/reinitialize, but is
+    /// never persisted or inferred merely from a restored project's model paths.
+    applied_settings: Option<PluginConfig>,
 }
 
 impl Default for VcRvcPlugin {
@@ -77,6 +80,7 @@ impl Default for VcRvcPlugin {
             dirty: Arc::new(AtomicBool::new(false)),
             status: Arc::new(Mutex::new(PluginStatus::new("idle"))),
             reload_waker: Arc::new(ReloadWaker::default()),
+            applied_settings: None,
         }
     }
 }
@@ -140,19 +144,32 @@ impl Plugin for VcRvcPlugin {
         // Bootstrap: if the persisted settings have no models yet (fresh
         // instance), seed them from the headless TOML config when present. A
         // restored project already has its own settings and is left untouched.
-        if !self.params.settings.read().unwrap().has_models() {
+        if self.runtime.is_none()
+            && self.applied_settings.is_none()
+            && !self.params.settings.read().unwrap().has_models()
+        {
             let seed = PluginConfig::discover();
             if seed.has_models() {
                 *self.params.settings.write().unwrap() = seed;
             }
         }
 
-        // Tear down any previous worker before starting a new one (sample rate
-        // or block size may have changed).
-        self.runtime = None;
-
         let sample_rate = buffer_config.sample_rate.round() as u32;
         let max_block = buffer_config.max_buffer_size as usize;
+        if let Some(runtime) = self.runtime.as_mut() {
+            if runtime.reconfigure(sample_rate, max_block, buffer_config.process_mode) {
+                context.set_latency_samples(runtime.current_latency());
+                return true;
+            }
+        }
+        // Fixed inference profiles require a new pipeline after rate changes.
+        // Reuse only the last successfully applied snapshot, preserving staged
+        // editor changes and the explicit Load boundary for fresh/restored hosts.
+        let applied_settings = match self.runtime.as_ref() {
+            Some(runtime) => runtime.applied_settings(),
+            None => self.applied_settings.take(),
+        };
+        self.runtime = None;
         let runtime = PluginRuntime::start(
             self.params.clone(),
             self.reload.clone(),
@@ -162,6 +179,8 @@ impl Plugin for VcRvcPlugin {
             &self.reload_waker,
             sample_rate,
             max_block,
+            buffer_config.process_mode,
+            applied_settings,
         );
         context.set_latency_samples(runtime.latency_samples);
         self.runtime = Some(runtime);
@@ -189,10 +208,23 @@ impl Plugin for VcRvcPlugin {
                 }
             }
         }
-        ProcessStatus::Normal
+        self.runtime
+            .as_ref()
+            .and_then(PluginRuntime::tail_samples)
+            .map_or(ProcessStatus::Normal, ProcessStatus::Tail)
+    }
+
+    fn reset(&mut self) {
+        if let Some(runtime) = self.runtime.as_mut() {
+            runtime.reset();
+        }
     }
 
     fn deactivate(&mut self) {
+        self.applied_settings = self
+            .runtime
+            .as_ref()
+            .and_then(PluginRuntime::applied_settings);
         self.runtime = None;
         self.reload.store(false, Ordering::SeqCst);
         self.loading.store(false, Ordering::SeqCst);
@@ -205,3 +237,144 @@ impl Vst3Plugin for VcRvcPlugin {
 }
 
 nice_export_vst3!(VcRvcPlugin);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    struct TestInitContext;
+    impl InitContext<VcRvcPlugin> for TestInitContext {
+        fn plugin_api(&self) -> PluginApi {
+            PluginApi::Vst3
+        }
+        fn execute(&self, _: ()) {}
+        fn set_latency_samples(&self, _: u32) {}
+        fn set_current_voice_capacity(&self, _: u32) {}
+    }
+
+    fn configured_plugin(fade: u32) -> VcRvcPlugin {
+        let plugin = VcRvcPlugin::default();
+        *plugin.params.settings.write().unwrap() = PluginConfig {
+            model: "test-rvc.onnx".into(),
+            embedder: "test-embedder.onnx".into(),
+            f0_model: "test-f0.onnx".into(),
+            chunk_ms: 20,
+            crossfade_ms: fade,
+            sola_search_ms: 0,
+            rvc_output_tail_discard_ms: 0,
+            ..PluginConfig::default()
+        };
+        plugin
+    }
+
+    fn initialize(plugin: &mut VcRvcPlugin, rate: f32, max_block: u32, mode: ProcessMode) {
+        assert!(plugin.initialize(
+            &VcRvcPlugin::AUDIO_IO_LAYOUTS[1],
+            &BufferConfig {
+                sample_rate: rate,
+                min_buffer_size: Some(1),
+                max_buffer_size: max_block,
+                process_mode: mode,
+            },
+            &mut TestInitContext
+        ));
+    }
+
+    #[test]
+    fn mode_and_block_reinitialization_preserves_loaded_models_and_staged_edits() {
+        let mut plugin = configured_plugin(0);
+        plugin.runtime = Some(runtime::test_loaded_runtime(
+            plugin.params.clone(),
+            ProcessMode::Realtime,
+            64,
+        ));
+        let worker = plugin.runtime.as_ref().unwrap().test_worker_id();
+        plugin.params.settings.write().unwrap().chunk_ms = 30;
+        initialize(&mut plugin, 16_000.0, 2048, ProcessMode::Offline);
+        let runtime = plugin.runtime.as_mut().unwrap();
+        assert_eq!(runtime.test_worker_id(), worker);
+        assert_eq!(runtime.applied_settings().unwrap().chunk_ms, 20);
+        assert_eq!(plugin.params.settings.read().unwrap().chunk_ms, 30);
+        let mut input = [0.25; 640];
+        runtime.process_block(&mut [&mut input]);
+        assert_eq!(&input[..320], &[0.0; 320]);
+        assert_eq!(&input[320..], &[0.25; 320]);
+    }
+
+    #[test]
+    fn public_host_reset_discards_previously_queued_output() {
+        let mut plugin = configured_plugin(0);
+        plugin.runtime = Some(runtime::test_loaded_runtime(
+            plugin.params.clone(),
+            ProcessMode::Realtime,
+            320,
+        ));
+        plugin
+            .runtime
+            .as_mut()
+            .unwrap()
+            .process_block(&mut [&mut [0.75; 320]]);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while plugin.runtime.as_mut().unwrap().test_output_samples() < 320 {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        Plugin::reset(&mut plugin);
+        let mut new_input = [0.0; 320];
+        plugin
+            .runtime
+            .as_mut()
+            .unwrap()
+            .process_block(&mut [&mut new_input]);
+        assert_eq!(new_input, [0.0; 320]);
+    }
+
+    #[test]
+    fn rate_reinitialization_uses_successful_snapshot_instead_of_staged_settings() {
+        let mut plugin = configured_plugin(0);
+        plugin.runtime = Some(runtime::test_loaded_runtime(
+            plugin.params.clone(),
+            ProcessMode::Realtime,
+            64,
+        ));
+        plugin.params.settings.write().unwrap().chunk_ms = 30;
+        initialize(&mut plugin, 44_100.0, 64, ProcessMode::Offline);
+        assert_eq!(plugin.runtime.as_ref().unwrap().test_input_hop(), 882);
+        assert_eq!(plugin.params.settings.read().unwrap().chunk_ms, 30);
+        // Fixture model files do not exist: reloading may fail, but it must use
+        // the last successful 20 ms shape and never apply the staged 30 ms edit.
+    }
+
+    #[test]
+    fn deactivate_retains_explicit_load_but_configured_fresh_instance_stays_idle() {
+        let mut plugin = configured_plugin(0);
+        plugin.runtime = Some(runtime::test_loaded_runtime(
+            plugin.params.clone(),
+            ProcessMode::Realtime,
+            64,
+        ));
+        plugin.deactivate();
+        assert_eq!(plugin.applied_settings.as_ref().unwrap().chunk_ms, 20);
+
+        let mut fresh = configured_plugin(0);
+        initialize(&mut fresh, 16_000.0, 64, ProcessMode::Offline);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while fresh.status.lock().unwrap().summary == "idle" {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(
+            fresh.status.lock().unwrap().summary,
+            "models configured; click Load / Reload"
+        );
+        assert!(fresh.runtime.as_ref().unwrap().applied_settings().is_none());
+        let mut input = [0.25; 64];
+        fresh
+            .runtime
+            .as_mut()
+            .unwrap()
+            .process_block(&mut [&mut input]);
+        assert_eq!(input, [0.0; 64]);
+    }
+}

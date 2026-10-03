@@ -24,6 +24,14 @@ The plugin reports latency so the host can compensate playback timing. This does
 not remove the delay you hear while monitoring a live microphone. Choose a chunk
 size that balances monitoring delay, processing headroom, and audio quality.
 
+After **Load / Reload** succeeds, changing the host's processing mode or block
+size keeps the models available. Offline export/freeze waits for conversion and
+preserves the first input samples and the final partial chunk through the host's
+latency compensation and tail processing. Changing the sample rate rebuilds the
+models from the last applied settings; staged editor changes still require
+**Load / Reload**. Fresh instances and restored projects retain the explicit
+load step.
+
 ## Architecture
 
 ```
@@ -36,13 +44,18 @@ host process() ─┬─ downmix L/R → mono ─→ input ring ─┐
                 └─ mono → L/R  ◀── output ring ◀──────┘
 ```
 
-- The audio thread never allocates, locks, or runs inference — it only pushes /
-  pops lock-free `rtrb` ring buffers ([`runtime.rs`](src/runtime.rs)).
-- A worker thread owns the `RvcPipeline`, mirroring the CLI's `engine.rs` worker.
+- The realtime audio thread never allocates, locks, or runs inference — it only
+  pushes / pops lock-free `rtrb` ring buffers ([`runtime.rs`](src/runtime.rs)).
+- A worker thread owns the shared `RvcPipeline` and `ChunkConverter`. Offline
+  callbacks wait for this same worker rather than dropping faster-than-realtime
+  input or inserting scheduling underruns. Their startup uses a zero-input
+  preroll through the shared converter; realtime keeps its existing startup.
 - RVC is inherently high-latency; the plugin reports its latency via
   `set_latency_samples` so the host can apply delay compensation.
-- The model loads on the worker thread; until it is ready the plugin emits
-  silence (the GUI shows the current status).
+- The model loads on the worker thread. Unloaded realtime instances emit silence;
+  offline rendering of an already loaded instance waits for required resets or
+  sample-rate rebuilds. Host reset invalidates queued and in-flight old audio
+  together with model/smoothing context before output can resume.
 
 ## GUI / settings
 
