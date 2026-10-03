@@ -552,20 +552,21 @@ pub fn sola_offset(candidate: &[f32], reference: &[f32], search: usize) -> usize
     // term, and sliding the frame by one sample just drops the leaving sample's
     // square and adds the entering sample's. Maintaining it incrementally keeps
     // the denominator O(1) per offset, so each step costs one cross-correlation
-    // `dot` instead of two. Numerically equivalent to the full recompute (f32
-    // accumulation drifts negligibly over the bounded search range).
-    let mut window_energy = dot(&candidate[..frame], &candidate[..frame]);
+    // `dot` instead of two. Keep the initial sum and both squared samples in
+    // f64: subtracting a loud prefix in f32 can erase a quiet matching window's
+    // energy and make its score NaN. PSOLA's plain energy uses the same rule.
+    let mut window_energy = energy_f64(&candidate[..frame]);
     let mut best_offset = 0;
     let mut best_score = f32::MIN;
     for offset in 0..=max_offset {
         if offset > 0 {
-            let leaving = candidate[offset - 1];
-            let entering = candidate[offset + frame - 1];
+            let leaving = f64::from(candidate[offset - 1]);
+            let entering = f64::from(candidate[offset + frame - 1]);
             window_energy += entering * entering - leaving * leaving;
         }
         let window = &candidate[offset..offset + frame];
         let nom = dot(window, reference);
-        let den = (window_energy * reference_energy + 1e-9).sqrt();
+        let den = (window_energy * f64::from(reference_energy) + 1e-9).sqrt() as f32;
         let score = nom / den;
         if score > best_score {
             best_score = score;
@@ -576,8 +577,9 @@ pub fn sola_offset(candidate: &[f32], reference: &[f32], search: usize) -> usize
 }
 
 /// Normalized cross-correlation of two equal-length windows (the shorter length
-/// is used if they differ). This is the exact score [`sola_offset`] maximizes at
-/// a single offset: `dot(a, b) / sqrt(dot(a, a) * dot(b, b))`. Returns a value in
+/// is used if they differ). Evaluates the correlation [`sola_offset`] maximizes
+/// from freshly summed energies: `dot(a, b) / sqrt(dot(a, a) * dot(b, b) + 1e-9)`.
+/// The search retains its sliding window energy in f64. Returns a value in
 /// roughly `[-1, 1]`, and `0.0` for empty / zero-energy inputs. Diagnostics-only;
 /// the SOLA search keeps its own incremental energy bookkeeping.
 pub fn normalized_correlation(a: &[f32], b: &[f32]) -> f32 {
@@ -625,6 +627,29 @@ pub(crate) fn dot(a: &[f32], b: &[f32]) -> f32 {
     }
     let tail: f32 = a_tail.iter().zip(b_tail).map(|(x, y)| x * y).sum();
     acc.iter().sum::<f32>() + tail
+}
+
+/// Initial energy for SOLA/PSOLA's sliding windows. Convert before multiplying
+/// and summing; widening an f32 dot result cannot restore the quiet energy lost
+/// beside a loud prefix. Independent lanes keep this worker-side sum vectorizable.
+pub(crate) fn energy_f64(input: &[f32]) -> f64 {
+    const LANES: usize = 4;
+    let mut acc = [0.0_f64; LANES];
+    let (chunks, tail) = input.as_chunks::<LANES>();
+    for chunk in chunks {
+        for lane in 0..LANES {
+            let sample = f64::from(chunk[lane]);
+            acc[lane] += sample * sample;
+        }
+    }
+    let tail: f64 = tail
+        .iter()
+        .map(|&sample| {
+            let sample = f64::from(sample);
+            sample * sample
+        })
+        .sum();
+    acc.iter().sum::<f64>() + tail
 }
 
 /// One-pole smoothing coefficient for an exponential follower with the given
@@ -1104,6 +1129,30 @@ mod tests {
         let reference = [0.0, 1.0, 0.5, 0.0];
         let candidate = [0.2, 0.1, 0.0, 1.0, 0.5, 0.0, -0.1];
         assert_eq!(sola_offset(&candidate, &reference, 4), 2);
+    }
+
+    #[test]
+    fn sola_offset_finds_quiet_overlap_after_loud_prefix() {
+        // A 15 ms overlap and 12 ms search at 48 kHz, as used by a capped
+        // 20 ms chunk. The matching quiet window stays above the silence guard.
+        let frame = 720;
+        let search = 576;
+        let mut state = 8_u32;
+        let mut sample = || {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state as f32 / u32::MAX as f32 * 2.0 - 1.0
+        };
+        let reference: Vec<f32> = (0..frame).map(|_| sample() * 0.0004).collect();
+        let mut candidate: Vec<f32> = (0..search).map(|_| sample() * 0.8).collect();
+        candidate.extend_from_slice(&reference);
+        assert!(rms(&reference) > 1e-4);
+        assert_eq!(
+            sola_offset_with_threshold(&candidate, &reference, search, 1e-4),
+            search,
+            "the loud prefix must not mask the matching quiet overlap"
+        );
     }
 
     #[test]

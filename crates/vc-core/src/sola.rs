@@ -502,16 +502,17 @@ fn psola_offset_with_period_with_scratch(
         ref_energy_plain += y * y;
     }
 
-    // The unweighted window energy slides by one sample per offset (see
-    // `dsp::sola_offset`); only the cross-correlation numerators and the
-    // weighted window energy must be recomputed per offset.
-    let mut window_energy_plain = dsp::dot(&candidate[..frame], &candidate[..frame]);
+    // Match `dsp::sola_offset`'s f64 energy timeline: removing a loud search
+    // prefix in f32 can erase a quiet overlap's positive energy. A NaN plain
+    // score would then discard an otherwise valid pitch-weighted candidate.
+    // Only the numerators and weighted energy need recomputing per offset.
+    let mut window_energy_plain = dsp::energy_f64(&candidate[..frame]);
     let mut best_offset = 0;
     let mut best_score = f32::MIN;
     for offset in 0..=max_offset {
         if offset > 0 {
-            let leaving = candidate[offset - 1];
-            let entering = candidate[offset + frame - 1];
+            let leaving = f64::from(candidate[offset - 1]);
+            let entering = f64::from(candidate[offset + frame - 1]);
             window_energy_plain += entering * entering - leaving * leaving;
         }
         let window = &candidate[offset..offset + frame];
@@ -520,7 +521,8 @@ fn psola_offset_with_period_with_scratch(
         let pitch_score =
             nom_weighted / (window_energy_weighted * ref_energy_weighted + 1e-9).sqrt();
         let nom_plain = dsp::dot(window, reference);
-        let full_score = nom_plain / (window_energy_plain * ref_energy_plain + 1e-9).sqrt();
+        let full_den = (window_energy_plain * f64::from(ref_energy_plain) + 1e-9).sqrt() as f32;
+        let full_score = nom_plain / full_den;
         let score = pitch_score * 0.8 + full_score * 0.2;
         if score.is_finite() && score > best_score {
             best_score = score;
@@ -904,6 +906,45 @@ mod tests {
             psola_offset_with_period(&candidate, &reference, 4, 4),
             Some(4)
         );
+    }
+
+    #[test]
+    fn psola_join_preserves_quiet_overlap_after_loud_search_prefix() {
+        let hop = 4_800;
+        let fade = 3_600;
+        let search = 576;
+        let quiet_peak = 0.0004;
+        let mut seed = 2_073_824_166u32;
+        let mut random = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed as f32 / u32::MAX as f32 * 2.0 - 1.0
+        };
+        let reference: Vec<f32> = (0..fade).map(|_| random() * quiet_peak).collect();
+        let mut candidate: Vec<f32> = (0..search).map(|_| random() * 0.8).collect();
+        candidate.extend_from_slice(&reference);
+        candidate.extend((0..hop).map(|_| random() * quiet_peak));
+        let mut prime = vec![0.0; hop + fade + search];
+        prime[hop + search..].copy_from_slice(&reference);
+
+        // This synthetic overlap passes the low-RMS guard. Previously the
+        // f32 sliding energy rejected its matching offset and leaked the loud
+        // search prefix into the joined output, even with PSOLA still active.
+        let mut joiner = PsolaChunkJoiner::new(hop, fade, search, 0, 48_000);
+        joiner.process(&prime, &[200.0; 21]);
+        let offset = joiner.process(&candidate, &[200.0; 21]);
+        let diagnostics = joiner.inner.last_diagnostics;
+        assert_eq!(offset, search);
+        assert_eq!(diagnostics.pitch_period, Some(240));
+        assert!(!diagnostics.psola_fallback);
+        let peak = joiner
+            .inner
+            .output()
+            .iter()
+            .map(|sample| sample.abs())
+            .fold(0.0, f32::max);
+        assert!(peak <= quiet_peak + 1e-7, "loud prefix leaked: {peak}");
     }
 
     #[test]
