@@ -556,6 +556,36 @@ impl RvcTensorRtPinnedBinding {
             tensor_rt_pinned_allocator(session, MemoryType::CPUInput, gpu_device_id)?;
         let output_allocator =
             tensor_rt_pinned_allocator(session, MemoryType::CPUOutput, gpu_device_id)?;
+        Self::new_with_allocators(
+            session,
+            feats_shape,
+            pitch_shape,
+            output_shape,
+            frame_len,
+            speaker_id,
+            names,
+            stream_audio_len,
+            input_allocator,
+            output_allocator,
+        )
+    }
+
+    // The binding contract is identical for CPU test allocators and CUDA-pinned
+    // production allocators. Keep one constructor so legacy output regression
+    // tests exercise the actual input/output bindings without requiring an EP.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new_with_allocators(
+        session: &Session,
+        feats_shape: &[usize],
+        pitch_shape: &[usize],
+        output_shape: &[usize],
+        frame_len: i64,
+        speaker_id: i64,
+        names: &RvcIoNames,
+        stream_audio_len: Option<usize>,
+        input_allocator: Allocator,
+        output_allocator: Allocator,
+    ) -> Result<Self> {
         let feats = Tensor::<f32>::new(&input_allocator, feats_shape.to_vec())
             .context("failed to allocate TensorRT RVC input 'feats'")?;
         let pitch = Tensor::<i64>::new(&input_allocator, pitch_shape.to_vec())
@@ -579,8 +609,9 @@ impl RvcTensorRtPinnedBinding {
         };
         // Streaming NSF I/O (allocated only for streaming exports). `nsf_noise`
         // and `phase_in` are inputs re-bound per run like `rnd`; `phase_out` is a
-        // per-sample output bound once like `audio`. Require all three names so a
-        // partially-exported model fails loudly rather than binding a subset.
+        // per-sample output bound once like `audio`. A legacy scalar/no output
+        // uses CPU phase accumulation; it must not disable either input or be
+        // bound to a per-sample buffer. onnx_meta validates the output contract.
         let (nsf_noise, phase_in, mut phase_out) = match stream_audio_len {
             Some(audio_len) => {
                 if names.nsf_noise.is_none() {
@@ -593,7 +624,7 @@ impl RvcTensorRtPinnedBinding {
                     .context("failed to allocate TensorRT RVC input 'nsf_noise'")?;
                 let phase_in = Tensor::<f32>::new(&input_allocator, vec![1usize, 1, 1])
                     .context("failed to allocate TensorRT RVC input 'phase_in'")?;
-                let phase_out = match names.phase_out.as_deref() {
+                let phase_out = match names.per_sample_phase_out() {
                     Some(_) => Some(
                         Tensor::<f32>::new(&output_allocator, vec![1, audio_len, 1]).context(
                             "failed to allocate TensorRT RVC output 'streaming_nsf_phase'",
@@ -619,7 +650,7 @@ impl RvcTensorRtPinnedBinding {
         // Bind the per-sample NSF phase output once; its address stays stable and
         // the pinned buffer is read back after each run.
         if let (Some(phase_out_name), Some(phase_out)) =
-            (names.phase_out.as_deref(), phase_out.as_mut())
+            (names.per_sample_phase_out(), phase_out.as_mut())
         {
             bind_output_tensor(&mut binding, phase_out_name, phase_out)
                 .context("failed to bind TensorRT RVC output 'streaming_nsf_phase'")?;

@@ -131,6 +131,26 @@ callback and requires plugin-specific state and latency reporting. VST3 should
 still adapt host audio to the shared conversion components and keep its distinct
 worker and buffering behavior narrowly scoped to host integration.
 
+VST3 retains its loaded worker across same-rate processing-mode and block-size
+changes. Rate changes or larger ring requirements rebuild from the last successful
+explicit Load snapshot, keeping staged editor settings unapplied. The snapshot
+also survives host deactivate/reinitialize within the same instance; it is not
+persisted and never authorizes model loading in a fresh scan/restored instance.
+Host reset advances an atomic audio generation. Input/output carry that generation,
+and the worker clears model context, smoothing, and rate adapters before publishing
+its ready acknowledgement. Old queued input and in-flight output cannot enter the
+new timeline; the realtime callback uses only preallocated storage, rings and atomics.
+
+Offline VST3 callbacks wait for that same worker and consume exactly the converted
+samples due after one input hop of host scheduling delay. This waiting is confined
+to offline mode; realtime callbacks retain bounded drop/silence behavior. The worker
+uses the shared converter's zero-hop prime after an offline load/reset so the first
+real hop is preserved, matching finite conversion's preroll. Realtime retains its
+first-real-chunk startup policy. The host sees the input hop plus shared content
+delay as latency and tail duration, so its zero-input tail calls drain final partial
+chunks through the existing converter. Worker exit, including a panic, wakes offline
+waiters instead of leaving the host blocked.
+
 WAV conversion is an offline adapter around the same `RvcPipeline` and
 `ChunkConverter` path used for realtime conversion. The shared core
 `convert_finite` owns priming, partial-chunk padding, zero-input drain, and
@@ -398,15 +418,43 @@ without touching callers.
     using this chunk's `pitchf` (`phase += Σ f0/sample_rate * frame_hop`, wrapped),
     which reproduces the model's per-frame step.
 
-  Streaming runs on the dynamic-shape ORT path (CPU/CUDA/DirectML), on
-  **native TensorRT**, and on the **Windows ML TensorRT-RTX** pinned-CPU
-  IoBinding (`windowsml-nvtrtx`). The fixed-shape profile adds `nsf_noise`
+  Streaming runs on the ORT session-run and pinned-CPU IoBinding paths, and on
+  **native TensorRT**. **Windows ML TensorRT-RTX** (`windowsml-nvtrtx`) requires
+  fixed-shape sessions but uses `session.run`; its provider does not enable
+  the GPU IoBinding path. The fixed-shape profile adds `nsf_noise`
   `[1, feature_len*frame_hop, 1]` (the `phone_lengths`/`sid` axes are dynamic in
   the streaming export, so they join the build profile too) and `phase_in`
   `[1,1,1]`; native TensorRT's shim and the ORT pinned IoBinding both bind those
-  inputs by name and copy the `streaming_nsf_phase` output back to the host
-  (`RvcTensorRtPinnedBinding` for the ORT path). The *CUDA-graph* IoBinding does
+  inputs by name, including legacy exports without a per-sample phase output.
+  They copy a per-sample `streaming_nsf_phase` output back to the host when
+  present; legacy scalar outputs are left unread and use the CPU phase carry
+  described above (`RvcTensorRtPinnedBinding` for the ORT path).
+  Invalid phase output shapes fail at load. The *CUDA-graph* IoBinding does
   not model the extra I/O and fails clearly at load — use one of the above.
+
+  Native TensorRT captures its CUDA graph on the first inference after every
+  input has been staged. Engine creation only allocates and binds buffers:
+  uninitialized staging memory, or dummy values that violate model constraints
+  such as RVC lengths and gather indices, must never be used for warmup.
+  Every inference verifies all inputs were supplied for that call. Graph setup
+  therefore adds a one-time cost to the first inference on the model worker;
+  later calls replay the graph or use direct enqueue if capture is unavailable.
+
+  Native engine builds hold an OS file lock per GPU device in the shared cache
+  root, including the builder helper and its timing-cache write. Workers and
+  processes waiting for the same profile recheck the completed plan under that
+  lock. Concurrent TensorRT builds reproduced plans that produced valid audio
+  but left `streaming_nsf_phase` unwritten, so native engine/timing caches now
+  use a `build-v2` child of the SDK-version namespace. Earlier caches remain
+  available for rollback. The model worker may wait for a build; inference and
+  the audio callback never acquire this lock.
+
+  The native shim also fills the per-sample phase output with NaNs before each
+  enqueue, including CUDA graph replay. Any unwritten or nonfinite trace is
+  cleared on the host, selecting the shared CPU phase carry above; a finite
+  trace retains the normal per-sample carry. A warning is emitted once per
+  loaded model on the worker. Audio output is retained when this auxiliary
+  phase output is invalid.
 
   - **NvTensorRtRtx runtime-cache caveat.** The TensorRT-RTX EP writes its
     runtime cache file when the session is destroyed, and for streaming engines
@@ -493,10 +541,11 @@ measurement. `content_delay_samples` is optional until the converter initializes
 and is unknown on standalone passthrough (whose variable-burst adapter does not
 declare a fixed content delay). CLI/GUI present this nominal content hold
 separately from processing time: neither is a measured device-to-device latency.
-VST3 initially reports a buffering estimate and, after the converter's first
-successful chunk determines the model rate and resampler delays, reports one
-input hop plus the shared converter's content delay. The callback only relays
-the worker's precomputed atomic value to the host.
+Realtime VST3 initially reports a buffering estimate and, after the converter's
+first successful chunk determines the model rate and resampler delays, reports
+one input hop plus the shared converter's content delay. Offline VST3 establishes
+that same value during zero-hop priming before accepting its first input samples.
+The callback only relays the worker's precomputed atomic value to the host.
 
 Smaller chunks reduce chunking latency but increase scheduling overhead and make
 the model pipeline more sensitive to inference spikes. Larger chunks are easier

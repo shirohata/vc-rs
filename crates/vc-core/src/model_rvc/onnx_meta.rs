@@ -158,6 +158,16 @@ const RVC_PHASE_IN_ALIASES: &[&str] = &["phase_in"];
 const RVC_PHASE_OUT_ALIASES: &[&str] = &["streaming_nsf_phase", "phase_out"];
 
 impl RvcIoNames {
+    /// Only the per-sample trace can carry phase between overlapping windows.
+    /// The legacy scalar is the window's final phase, so it must use the CPU
+    /// fallback just like an export without a phase output. Keep input binding
+    /// independent of this choice in both native and pinned TensorRT paths.
+    pub(super) fn per_sample_phase_out(&self) -> Option<&str> {
+        self.phase_out
+            .as_deref()
+            .filter(|name| *name == "streaming_nsf_phase")
+    }
+
     /// The canonical vcclient names, for tests/benchmarks that synthesize a
     /// profile without a real model to resolve against.
     #[cfg(test)]
@@ -236,8 +246,38 @@ impl ModelIo {
             // for non-streaming exports, leaving those paths untouched.
             nsf_noise: self.find_input_alias(RVC_NSF_NOISE_ALIASES),
             phase_in: self.find_input_alias(RVC_PHASE_IN_ALIASES),
-            phase_out: self.find_output_alias(RVC_PHASE_OUT_ALIASES),
+            phase_out: self.resolve_rvc_phase_out()?,
         })
+    }
+
+    fn resolve_rvc_phase_out(&self) -> Result<Option<String>> {
+        let Some(name) = self.find_output_alias(RVC_PHASE_OUT_ALIASES) else {
+            return Ok(None);
+        };
+        let tensor = self
+            .output(&name)
+            .ok_or_else(|| anyhow!("RVC phase output '{name}' not found"))?;
+        let per_sample = name == "streaming_nsf_phase";
+        let expected = if per_sample {
+            "float32 [1, audio_len, 1]"
+        } else {
+            "float32 [1, 1, 1]"
+        };
+        let shape_valid = tensor.dims.len() == 3
+            && tensor.dims[0] == 1
+            && tensor.dims[2] == 1
+            && if per_sample {
+                tensor.dims[1] >= 0
+            } else {
+                tensor.dims[1] == 1
+            };
+        if tensor.elem_type != 1 || !shape_valid {
+            bail!(
+                "RVC phase output '{name}' must be {expected}; got {}",
+                tensor.describe()
+            );
+        }
+        Ok(Some(name))
     }
 
     /// First matching input name among `aliases`, or `None` (optional inputs).
@@ -1022,6 +1062,70 @@ mod tests {
         assert!(names.phase_in.is_none());
         assert!(names.phase_out.is_none());
         assert!(io.stream_format().unwrap().is_none());
+    }
+
+    #[test]
+    fn legacy_phase_outputs_use_cpu_carry_without_disabling_stream_inputs() {
+        for phase_name in [None, Some("phase_out"), Some("streaming_nsf_phase")] {
+            let mut io = rvc_io(
+                &[
+                    "phone",
+                    "phone_lengths",
+                    "pitch",
+                    "nsff0",
+                    "sid",
+                    "nsf_noise",
+                    "phase_in",
+                ],
+                &["audio"],
+            );
+            if let Some(name) = phase_name {
+                io.outputs.push(TensorInfo {
+                    name: name.to_string(),
+                    elem_type: 1,
+                    dims: if name == "phase_out" {
+                        vec![1, 1, 1]
+                    } else {
+                        vec![1, 0, 1]
+                    },
+                });
+            }
+            let names = io.resolve_rvc_io_names().unwrap();
+            assert_eq!(names.nsf_noise.as_deref(), Some("nsf_noise"));
+            assert_eq!(names.phase_in.as_deref(), Some("phase_in"));
+            assert_eq!(names.phase_out.as_deref(), phase_name);
+            assert_eq!(
+                names.per_sample_phase_out(),
+                phase_name.filter(|name| *name == "streaming_nsf_phase")
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_phase_output_types_and_shapes() {
+        for (name, elem_type, dims) in [
+            ("streaming_nsf_phase", 7, vec![1, 0, 1]),
+            ("streaming_nsf_phase", 1, vec![1, 0]),
+            ("streaming_nsf_phase", 1, vec![2, 0, 1]),
+            ("streaming_nsf_phase", 1, vec![1, 0, 2]),
+            ("phase_out", 1, vec![1, 0, 1]),
+            ("phase_out", 1, vec![1, 3, 1]),
+        ] {
+            let mut io = rvc_io(
+                &["phone", "phone_lengths", "pitch", "nsff0", "sid"],
+                &["audio"],
+            );
+            io.outputs.push(TensorInfo {
+                name: name.to_string(),
+                elem_type,
+                dims,
+            });
+            let error = io.resolve_rvc_io_names().unwrap_err().to_string();
+            assert!(
+                error.contains(name) && error.contains("must be float32"),
+                "{error}"
+            );
+        }
     }
 
     #[test]

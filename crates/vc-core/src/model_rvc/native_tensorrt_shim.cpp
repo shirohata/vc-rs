@@ -59,6 +59,7 @@ struct DeviceBuffer {
     void* ptr{nullptr};   // device buffer bound to the TensorRT tensor
     void* host{nullptr};  // pinned (page-locked) host staging buffer
     std::size_t bytes{0};
+    bool input_staged{false};
 
     ~DeviceBuffer() {
         if (ptr != nullptr) {
@@ -103,6 +104,7 @@ struct NativeEngine {
     std::string output_name;
     std::size_t output_len{0};
     cudaGraphExec_t graph_exec{nullptr};
+    bool graph_capture_attempted{false};
 
     ~NativeEngine() {
         if (graph_exec != nullptr) {
@@ -272,10 +274,20 @@ int32_t tensor_index(NativeEngine& native, char const* name) {
     return iter == native.tensor_indices.end() ? -1 : iter->second;
 }
 
+void begin_inference(NativeEngine& native) {
+    for (auto& buffer : native.buffers) {
+        buffer.input_staged = false;
+    }
+}
+
 bool copy_to_device(NativeEngine& native, char const* name, void const* src, std::size_t bytes, Message& msg) {
     int32_t index = tensor_index(native, name);
     if (index < 0) {
         msg.append("engine is missing tensor %s\n", name);
+        return false;
+    }
+    if (native.engine->getTensorIOMode(name) != nvinfer1::TensorIOMode::kINPUT || src == nullptr) {
+        msg.append("invalid TensorRT input %s\n", name);
         return false;
     }
     auto& buffer = native.buffers[static_cast<std::size_t>(index)];
@@ -287,6 +299,7 @@ bool copy_to_device(NativeEngine& native, char const* name, void const* src, std
     // the captured CUDA graph (or the manual fallback) at inference time, always
     // from this fixed address so a captured graph stays valid across calls.
     std::memcpy(buffer.host, src, bytes);
+    buffer.input_staged = true;
     return true;
 }
 
@@ -327,6 +340,19 @@ bool record_io(NativeEngine& native, Message& msg) {
     }
     for (std::size_t i = 0; i < native.buffers.size(); ++i) {
         char const* name = native.engine->getIOTensorName(static_cast<int32_t>(i));
+        // Some serialized engines leave this auxiliary output unwritten while
+        // producing correct audio. Mark it on every enqueue (including graph
+        // replay) so Rust can reject a missing/partial trace and use CPU phase
+        // carry instead of advancing the stream with old device-memory values.
+        if (native.engine->getTensorIOMode(name) == nvinfer1::TensorIOMode::kOUTPUT
+            && std::strcmp(name, "streaming_nsf_phase") == 0
+            && native.engine->getTensorDataType(name) == nvinfer1::DataType::kFLOAT) {
+            auto& buffer = native.buffers[i];
+            // FP32 with all bits set is NaN; cudaMemsetAsync is graph-capturable.
+            if (!cuda_ok(cudaMemsetAsync(buffer.ptr, 0xff, buffer.bytes, native.stream), msg, "cudaMemsetAsync phase output")) {
+                return false;
+            }
+        }
         if (native.engine->getTensorIOMode(name) != nvinfer1::TensorIOMode::kINPUT) {
             continue;
         }
@@ -358,7 +384,26 @@ bool record_io(NativeEngine& native, Message& msg) {
     return true;
 }
 
+void try_capture_graph(NativeEngine& native, Message& msg);
+
 bool enqueue_and_copy(NativeEngine& native, float* output, std::size_t output_len, Message& msg) {
+    // Every inference must supply every input, including optional export inputs.
+    // Never execute using uninitialized staging memory or a previous call's data.
+    for (std::size_t i = 0; i < native.buffers.size(); ++i) {
+        char const* name = native.engine->getIOTensorName(static_cast<int32_t>(i));
+        if (native.engine->getTensorIOMode(name) == nvinfer1::TensorIOMode::kINPUT
+            && !native.buffers[i].input_staged) {
+            msg.append("TensorRT input %s was not supplied for this inference\n", name);
+            return false;
+        }
+    }
+    if (!native.graph_capture_attempted) {
+        // Capture needs model-valid data (e.g. RVC p_len and gather indices),
+        // which engine creation cannot invent. The first fully staged inference
+        // supplies it; this runs only on the model worker, never the audio callback.
+        native.graph_capture_attempted = true;
+        try_capture_graph(native, msg);
+    }
     // Replay the captured graph when available; otherwise issue the sequence
     // directly. Both leave the result in the output tensor's pinned host buffer.
     if (native.graph_exec != nullptr) {
@@ -387,7 +432,7 @@ bool cuda_graph_disabled() {
 // lazy initialization completes, then capture it once. On success, inferences
 // replay the graph, cutting per-call kernel/copy launch overhead. Any failure
 // leaves graph_exec null and the engine falls back to issuing the sequence
-// directly, so capture problems can never break inference.
+// directly. The caller must have staged valid values for every input first.
 void try_capture_graph(NativeEngine& native, Message& msg) {
     if (cuda_graph_disabled()) {
         msg.append("CUDA graph disabled via VC_RS_TENSORRT_DISABLE_CUDA_GRAPH\n");
@@ -562,9 +607,9 @@ extern "C" NativeEngine* vc_rs_trt_engine_create(
         }
     }
 
-    // Device buffers and tensor addresses are fixed for the engine's lifetime, so
-    // the inference sequence can be captured once into a CUDA graph and replayed.
-    try_capture_graph(*native, msg);
+    // Fixed tensor/staging addresses allow capture at the first inference.
+    // Capturing here would copy uninitialized host buffers into model inputs.
+    msg.append("CUDA graph capture deferred until first inference\n");
 
     msg.append("loaded native TensorRT engine=%s output=%s output_len=%zu profile=%s\n", engine_path, output_name, native->output_len, profile_shapes);
     return native.release();
@@ -596,6 +641,7 @@ extern "C" int vc_rs_trt_contentvec_infer(
         msg.append("null argument passed to TensorRT ContentVec infer\n");
         return 2;
     }
+    begin_inference(*native);
     if (!copy_to_device(*native, input_name, audio, audio_len * sizeof(float), msg)) {
         return 1;
     }
@@ -620,6 +666,7 @@ extern "C" int vc_rs_trt_rmvpe_infer(
         msg.append("null argument passed to TensorRT RMVPE infer\n");
         return 2;
     }
+    begin_inference(*native);
     if (!copy_to_device(*native, "waveform", waveform, waveform_len * sizeof(float), msg)) {
         return 1;
     }
@@ -681,6 +728,7 @@ extern "C" int vc_rs_trt_rvc_infer(
         msg.append("null input-name passed to TensorRT RVC infer\n");
         return 2;
     }
+    begin_inference(*native);
     // A latent-noise input must arrive as a matched (name, data) pair: a name
     // without data (or vice versa) means the caller and engine disagree on
     // whether this export takes `rnd`.
@@ -720,8 +768,8 @@ extern "C" int vc_rs_trt_rvc_infer(
         return 1;
     }
     // Streaming NSF source noise and window-start phase, when present. The phase
-    // tensor is a single float ([1, 1, 1]). `phase_out` is also an engine output
-    // but vc-rs carries phase on the CPU, so it is left unread.
+    // tensor is a single float ([1, 1, 1]). Legacy exports use CPU phase carry;
+    // current exports return a per-sample phase output copied back below.
     if (nsf != nullptr && !copy_to_device(*native, nsf_name, nsf, nsf_len * sizeof(float), msg)) {
         return 1;
     }
@@ -767,6 +815,7 @@ extern "C" int vc_rs_trt_gtcrn_infer(
         msg.append("null argument passed to TensorRT GTCRN infer\n");
         return 2;
     }
+    begin_inference(*native);
     // The cache tensors are both inputs and outputs at the Rust boundary. The
     // input side is staged before enqueue; after synchronization the same caller
     // buffers are overwritten with the *_out tensors for the next streaming hop.

@@ -1,4 +1,4 @@
-#[cfg(native_tensorrt)]
+#[cfg(any(native_tensorrt, test))]
 use std::ffi::CString;
 use std::num::NonZeroUsize;
 #[cfg(native_tensorrt)]
@@ -168,15 +168,15 @@ struct NativeRvcRnd {
 // Resolved streaming-export I/O for the native path. The per-sample NSF source
 // noise and the window-start NSF phase are produced backend-neutrally by the
 // rolling CPU state and bound by name here; `audio_len` (== frames * frame_hop)
-// is kept to validate the caller's `nsf_noise` length. `phase_out` is emitted by
-// the engine but unread (vc-rs carries phase on the CPU), so it needs no field.
-#[cfg(native_tensorrt)]
+// validates `nsf_noise`. Inputs remain required when legacy exports omit the
+// per-sample output; those exports use the shared CPU phase fallback.
+#[cfg(any(native_tensorrt, test))]
 struct NativeRvcStream {
     nsf_name: CString,
     phase_name: CString,
     // Per-sample NSF phase output (`streaming_nsf_phase`, `[1, audio_len, 1]`),
     // copied back so the host can pick the next window's `phase_in`.
-    phase_out_name: CString,
+    phase_out_name: Option<CString>,
     audio_len: NonZeroUsize,
 }
 
@@ -195,6 +195,8 @@ pub(super) struct NativeRvcEngine {
     // `Some` only for streaming exports (NSF noise + phase inputs).
     #[cfg(native_tensorrt)]
     stream: Option<NativeRvcStream>,
+    #[cfg(native_tensorrt)]
+    phase_fallback_warned: bool,
 }
 
 // Native TensorRT handles own CUDA streams, execution contexts, and fixed device
@@ -509,6 +511,8 @@ impl NativeRvcEngine {
             rnd: native_rvc_rnd(names)?,
             #[cfg(native_tensorrt)]
             stream: native_rvc_stream(names, profile)?,
+            #[cfg(native_tensorrt)]
+            phase_fallback_warned: false,
         })
     }
 
@@ -646,8 +650,13 @@ fn native_engine_path(profile: &TensorRtSessionProfile) -> Result<PathBuf> {
 // shape hierarchy: Windows ML's TensorRT RTX cache must retain its own layout.
 // The numeric build metadata avoids loading GPU DLLs merely to show cache status.
 // Old unversioned caches stay available for rollback and the cache-management UI.
+// Revision 2 excludes plans built before per-device serialization; concurrent
+// SDK builds reproduced plans that never wrote their declared phase output.
+const NATIVE_BUILD_REVISION: &str = "build-v2";
+
 fn native_cache_root_for_version(root: &Path, version: &str) -> PathBuf {
     root.join(format!("native-trt-{version}"))
+        .join(NATIVE_BUILD_REVISION)
 }
 
 fn native_cache_root() -> Result<PathBuf> {
@@ -670,23 +679,70 @@ fn ensure_native_engine(
     build_profile_shapes: &str,
 ) -> Result<PathBuf> {
     let engine_path = native_engine_path(profile)?;
+    let device_root = tensor_rt_cache_root()?.join(format!("device-{}", profile.gpu_device_id));
+    ensure_native_engine_with_builder(&engine_path, &device_root, |engine_path| {
+        build_engine(
+            model_path,
+            engine_path,
+            build_profile_shapes,
+            profile.gpu_device_id,
+        )
+    })?;
+    Ok(engine_path)
+}
+
+fn ensure_native_engine_with_builder(
+    engine_path: &Path,
+    device_root: &Path,
+    build: impl FnOnce(&Path) -> Result<()>,
+) -> Result<()> {
     if engine_path
         .metadata()
         .is_ok_and(|metadata| metadata.len() > 0)
     {
-        return Ok(engine_path);
+        return Ok(());
+    }
+    let _build_lock = lock_native_device_build(device_root)?;
+    // Another process/worker may have completed this exact profile while we
+    // waited. The lock also protects the device's shared timing cache.
+    if engine_path
+        .metadata()
+        .is_ok_and(|metadata| metadata.len() > 0)
+    {
+        return Ok(());
     }
     let parent = engine_path
         .parent()
         .ok_or_else(|| anyhow!("native TensorRT engine path has no parent"))?;
     std::fs::create_dir_all(parent)?;
-    build_engine(
-        model_path,
-        &engine_path,
-        build_profile_shapes,
-        profile.gpu_device_id,
-    )?;
-    Ok(engine_path)
+    build(engine_path)
+}
+
+// Called only while loading models on a background worker. OS-backed file locks
+// serialize GPU tactic profiling across workers/processes and release on crash;
+// inference and the audio callback never acquire this lock.
+fn lock_native_device_build(device_root: &Path) -> Result<std::fs::File> {
+    std::fs::create_dir_all(device_root)?;
+    let path = device_root.join("native-build.lock");
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .with_context(|| {
+            format!(
+                "failed to open native TensorRT build lock {}",
+                path.display()
+            )
+        })?;
+    file.lock().with_context(|| {
+        format!(
+            "failed to acquire native TensorRT build lock {}",
+            path.display()
+        )
+    })?;
+    Ok(file)
 }
 
 fn shape_volume(shape: &[usize], label: &str) -> Result<NonZeroUsize> {
@@ -1181,17 +1237,15 @@ fn native_rvc_rnd(names: &RvcIoNames) -> Result<Option<NativeRvcRnd>> {
     Ok(Some(NativeRvcRnd { name, channels }))
 }
 
-#[cfg(native_tensorrt)]
+#[cfg(any(native_tensorrt, test))]
 fn native_rvc_stream(
     names: &RvcIoNames,
     profile: &TensorRtSessionProfile,
 ) -> Result<Option<NativeRvcStream>> {
-    let (Some(nsf), Some(phase), Some(phase_out)) = (
-        names.nsf_noise.as_ref(),
-        names.phase_in.as_ref(),
-        names.phase_out.as_ref(),
-    ) else {
-        return Ok(None);
+    let (nsf, phase) = match (names.nsf_noise.as_ref(), names.phase_in.as_ref()) {
+        (Some(nsf), Some(phase)) => (nsf, phase),
+        (None, None) => return Ok(None),
+        _ => bail!("native TensorRT streaming RVC requires both nsf_noise and phase_in inputs"),
     };
     // `nsf_noise` is `[1, audio_len, 1]`; its middle axis is the validated length.
     // `streaming_nsf_phase` shares that length ([1, audio_len, 1]).
@@ -1209,9 +1263,14 @@ fn native_rvc_stream(
     let phase_name = CString::new(phase.as_str()).with_context(|| {
         format!("RVC phase_in input name '{phase}' contains an interior NUL byte")
     })?;
-    let phase_out_name = CString::new(phase_out.as_str()).with_context(|| {
-        format!("RVC phase output name '{phase_out}' contains an interior NUL byte")
-    })?;
+    let phase_out_name = names
+        .per_sample_phase_out()
+        .map(|name| {
+            CString::new(name).with_context(|| {
+                format!("RVC phase output name '{name}' contains an interior NUL byte")
+            })
+        })
+        .transpose()?;
     Ok(Some(NativeRvcStream {
         nsf_name,
         phase_name,
@@ -1231,7 +1290,7 @@ fn infer_rvc(
     rnd: Option<&[f32]>,
     nsf_noise: Option<&[f32]>,
     phase_in: Option<f32>,
-    phase_out: Option<&mut Vec<f32>>,
+    mut phase_out: Option<&mut Vec<f32>>,
 ) -> Result<Vec<f32>> {
     let mut output = vec![0.0f32; engine.output_len.get()];
     // Bind the caller-supplied latent noise (when this export takes it); pass null
@@ -1299,15 +1358,25 @@ fn infer_rvc(
     // caller's buffer to the engine's audio_len and let the shim copy it back. The
     // raw pointer stays valid through the FFI call (the buffer is not touched
     // again). Null when not streaming or the caller did not request it.
-    let (phase_out_name_ptr, phase_out_ptr, phase_out_len) =
-        match (engine.stream.as_ref(), phase_out) {
-            (Some(stream), Some(buf)) => {
-                buf.clear();
-                buf.resize(stream.audio_len.get(), 0.0);
-                (stream.phase_out_name.as_ptr(), buf.as_mut_ptr(), buf.len())
+    let (phase_out_name_ptr, phase_out_ptr, phase_out_len) = match phase_out.as_deref_mut() {
+        Some(buf) => {
+            // Clear even when the model has only a scalar/no phase output, so
+            // the caller cannot accidentally carry a stale per-sample trace.
+            buf.clear();
+            match engine
+                .stream
+                .as_ref()
+                .and_then(|stream| stream.phase_out_name.as_ref().map(|name| (stream, name)))
+            {
+                Some((stream, name)) => {
+                    buf.resize(stream.audio_len.get(), 0.0);
+                    (name.as_ptr(), buf.as_mut_ptr(), buf.len())
+                }
+                None => (std::ptr::null(), std::ptr::null_mut(), 0usize),
             }
-            _ => (std::ptr::null(), std::ptr::null_mut(), 0usize),
-        };
+        }
+        None => (std::ptr::null(), std::ptr::null_mut(), 0usize),
+    };
     let mut message = MessageBuffer::new();
     let status = unsafe {
         ffi::vc_rs_trt_rvc_infer(
@@ -1344,7 +1413,25 @@ fn infer_rvc(
     if status != 0 {
         bail!("native TensorRT RVC inference failed: {}", message.text());
     }
+    // Some TensorRT plans leave the declared phase output unwritten while their
+    // audio output is valid. The shim poisons that device output before every
+    // enqueue (also inside CUDA graphs); reject its sentinel/nonfinite trace so
+    // the shared time state uses CPU carry instead of corrupting the next input.
+    if phase_out.is_some_and(discard_nonfinite_phase_trace) && !engine.phase_fallback_warned {
+        // Native inference runs on the model worker, never the audio callback.
+        tracing::warn!("native TensorRT phase output is unwritten/nonfinite; using shared CPU phase carry for this model");
+        engine.phase_fallback_warned = true;
+    }
     Ok(output)
+}
+
+#[cfg(any(native_tensorrt, test))]
+fn discard_nonfinite_phase_trace(phase: &mut Vec<f32>) -> bool {
+    if phase.iter().all(|value| value.is_finite()) {
+        return false;
+    }
+    phase.clear();
+    true
 }
 
 #[cfg(not(native_tensorrt))]
@@ -1479,11 +1566,387 @@ mod tests {
             Some(&module_dir.join("vc-tensorrt-builder.exe"))
         );
     }
+
+    #[test]
+    #[ignore = "requires NVIDIA CUDA/TensorRT SDK and vc-tensorrt-builder"]
+    fn native_tensorrt_defers_capture_until_complete_inputs() {
+        use crate::model_rvc::tests::{legacy_streaming_tiny, with_temp_model, TinyPhaseOutput};
+
+        let bytes = legacy_streaming_tiny(TinyPhaseOutput::PerSample);
+        with_temp_model("native-staged-inputs", &bytes, |path| {
+            const FRAMES: usize = 4;
+            let names = super::super::inspect::inspect_rvc_model(path)
+                .unwrap()
+                .io_names;
+            let profile = TensorRtSessionProfile::rvc(FRAMES, 768, &names, Some(400))
+                .with_model_cache_key(tensor_rt_model_cache_key(path).unwrap());
+            let scalars = [
+                (names.p_len.as_str(), &[1usize][..]),
+                (names.sid.as_str(), &[1usize][..]),
+                (names.phase_in.as_deref().unwrap(), &[1usize, 1, 1][..]),
+            ];
+            let load_profile = profile_with_scalars(&profile, &scalars);
+            let engine_path = ensure_native_engine(path, &profile, &load_profile).unwrap();
+            let c_path = path_cstring(&engine_path, "test engine").unwrap();
+            let c_profile = CString::new(load_profile).unwrap();
+            let c_output = CString::new(names.audio.as_str()).unwrap();
+            let mut message = MessageBuffer::new();
+            let handle = unsafe {
+                ffi::vc_rs_trt_engine_create(
+                    c_path.as_ptr(),
+                    c_profile.as_ptr(),
+                    c_output.as_ptr(),
+                    1,
+                    0,
+                    message.as_mut_ptr(),
+                    message.len(),
+                )
+            };
+            let handle = std::ptr::NonNull::new(handle).expect("tiny engine loads");
+            assert!(message
+                .text()
+                .contains("CUDA graph capture deferred until first inference"));
+            assert!(
+                !message.text().contains("CUDA graph enabled"),
+                "creation must not enqueue: {}",
+                message.text()
+            );
+            let mut engine = NativeRvcEngine {
+                handle,
+                frames: NonZeroUsize::new(FRAMES).unwrap(),
+                channels: NonZeroUsize::new(768).unwrap(),
+                output_len: engine_output_len(handle).unwrap(),
+                input_names: native_rvc_input_names(&names).unwrap(),
+                rnd: native_rvc_rnd(&names).unwrap(),
+                stream: native_rvc_stream(&names, &profile).unwrap(),
+                phase_fallback_warned: false,
+            };
+            let phone = vec![0.25_f32; FRAMES * 768];
+            let pitch = vec![100_i64; FRAMES];
+            let pitchf = vec![113.0_f32; FRAMES];
+            let rnd = vec![0.25_f32; FRAMES * 8];
+            // Bypass Rust's required-input checks to exercise the FFI staging
+            // guard itself. A rejected call must neither capture nor poison the
+            // engine: the next complete inference must still work.
+            let reject_missing_stream_inputs = |engine: &NativeRvcEngine| {
+                let mut output = vec![0.0; engine.output_len.get()];
+                let mut message = MessageBuffer::new();
+                let status = unsafe {
+                    ffi::vc_rs_trt_rvc_infer(
+                        engine.handle.as_ptr(),
+                        engine.input_names.feats.as_ptr(),
+                        engine.input_names.p_len.as_ptr(),
+                        engine.input_names.pitch.as_ptr(),
+                        engine.input_names.pitchf.as_ptr(),
+                        engine.input_names.sid.as_ptr(),
+                        engine.rnd.as_ref().unwrap().name.as_ptr(),
+                        rnd.as_ptr(),
+                        rnd.len(),
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        0,
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        std::ptr::null_mut(),
+                        0,
+                        phone.as_ptr(),
+                        phone.len(),
+                        pitch.as_ptr(),
+                        pitch.len(),
+                        pitchf.as_ptr(),
+                        pitchf.len(),
+                        0,
+                        output.as_mut_ptr(),
+                        output.len(),
+                        message.as_mut_ptr(),
+                        message.len(),
+                    )
+                };
+                assert_ne!(status, 0);
+                assert!(
+                    message.text().contains("was not supplied"),
+                    "{}",
+                    message.text()
+                );
+                assert!(!message.text().contains("CUDA graph enabled"));
+            };
+            reject_missing_stream_inputs(&engine);
+            let mut previous = None;
+            for (call, phase_in) in [0.125, 0.375].into_iter().enumerate() {
+                let noise: Vec<f32> = (0..FRAMES * 400)
+                    .map(|i| ((i + call * 37) as f32 * 0.13).sin() * 0.7)
+                    .collect();
+                let mut phase = Vec::new();
+                let started = std::time::Instant::now();
+                let audio = engine
+                    .infer(
+                        &phone,
+                        &pitch,
+                        &pitchf,
+                        0,
+                        Some(&rnd),
+                        Some(&noise),
+                        Some(phase_in),
+                        Some(&mut phase),
+                    )
+                    .unwrap();
+                eprintln!(
+                    "native staged-input smoke call={call} elapsed_us={}",
+                    started.elapsed().as_micros()
+                );
+                assert!(audio.iter().chain(&phase).all(|value| value.is_finite()));
+                assert_eq!(phase.len(), FRAMES * 400);
+                for index in [0, 799, 1599] {
+                    let expected =
+                        (phase_in + 113.0 * (index + 1) as f32 / 40_000.0).rem_euclid(1.0);
+                    let delta = (phase[index] - expected).abs().rem_euclid(1.0);
+                    assert!(
+                        delta.min(1.0 - delta) < 1e-5,
+                        "native phase trace call={call} index={index}: {} vs {expected}",
+                        phase[index]
+                    );
+                }
+                if let Some(previous) = previous {
+                    assert_ne!(audio, previous, "later inputs must update");
+                }
+                previous = Some(audio);
+            }
+            // Every inference must stage every input again, including after a
+            // successful call/capture; stale device data cannot satisfy it.
+            reject_missing_stream_inputs(&engine);
+        });
+    }
+}
+
+#[cfg(test)]
+mod streaming_input_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_phase_outputs_keep_native_nsf_and_phase_inputs() {
+        for phase_name in [None, Some("phase_out"), Some("streaming_nsf_phase")] {
+            let mut names = RvcIoNames::canonical();
+            names.nsf_noise = Some("nsf_noise".into());
+            names.phase_in = Some("phase_in".into());
+            names.phase_out = phase_name.map(String::from);
+            let profile = TensorRtSessionProfile::rvc(4, 768, &names, Some(400));
+            let stream = native_rvc_stream(&names, &profile).unwrap().unwrap();
+            assert_eq!(stream.nsf_name.to_str().unwrap(), "nsf_noise");
+            assert_eq!(stream.phase_name.to_str().unwrap(), "phase_in");
+            assert_eq!(stream.audio_len.get(), 1600);
+            assert_eq!(
+                stream
+                    .phase_out_name
+                    .as_ref()
+                    .map(|name| name.to_str().unwrap()),
+                phase_name.filter(|name| *name == "streaming_nsf_phase")
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_partial_native_streaming_inputs() {
+        let mut names = RvcIoNames::canonical();
+        names.nsf_noise = Some("nsf_noise".into());
+        let profile = TensorRtSessionProfile::rvc(4, 768, &names, Some(400));
+        assert!(native_rvc_stream(&names, &profile).is_err());
+    }
+
+    #[test]
+    fn nonfinite_native_trace_uses_cpu_carry_without_reallocating() {
+        use crate::model_rvc::time_state::{RvcTimeState, StreamParams};
+        let mut state = RvcTimeState::new(
+            None,
+            Some(StreamParams {
+                frame_hop: 400,
+                sample_rate: 40_000,
+            }),
+        );
+        let mut trace = vec![f32::NAN; 1600];
+        let capacity = trace.capacity();
+        for (call, invalid) in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY]
+            .into_iter()
+            .enumerate()
+        {
+            state.roll(2, 4);
+            trace.resize(1600, 0.0);
+            trace[799] = invalid;
+            assert!(discard_nonfinite_phase_trace(&mut trace));
+            assert!(trace.is_empty());
+            assert_eq!(trace.capacity(), capacity);
+            assert!(!state.set_phase_from_output(&trace));
+            state.advance_phase(&[113.0; 4]);
+            assert!((state.phase_in().unwrap() - 0.26 * (call + 1) as f32).abs() < 1e-6);
+        }
+        trace.extend_from_slice(&[0.1, 0.2, 0.3]);
+        assert!(!discard_nonfinite_phase_trace(&mut trace));
+        assert_eq!(trace, [0.1, 0.2, 0.3]);
+    }
 }
 
 #[cfg(test)]
 mod cache_version_tests {
     use super::*;
+
+    fn scratch_dir(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "vc-rs-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    #[test]
+    fn build_revision_excludes_previous_plans_without_removing_them() {
+        let root = scratch_dir("native-revision");
+        let sdk = root.join("native-trt-11.2.1.2");
+        let profile = TensorRtSessionProfile::single_input(ModelRole::ContentVec, "audio", 320)
+            .with_model_cache_key("fixture");
+        let prior = profile
+            .cache_dir_from_root(&sdk)
+            .unwrap()
+            .join("native.engine");
+        let prior_revision = profile
+            .cache_dir_from_root(&sdk.join("build-v1"))
+            .unwrap()
+            .join("native.engine");
+        for path in [&prior, &prior_revision] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"old plan").unwrap();
+        }
+        let current = profile
+            .cache_dir_from_root(&native_cache_root_for_version(&root, "11.2.1.2"))
+            .unwrap()
+            .join("native.engine");
+        assert!(!current.exists());
+        ensure_native_engine_with_builder(&current, &root.join("device-0"), |path| {
+            std::fs::write(path, b"new serialized plan")?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(std::fs::read(current).unwrap(), b"new serialized plan");
+        for path in [&prior, &prior_revision] {
+            assert_eq!(std::fs::read(path).unwrap(), b"old plan");
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn concurrent_profile_requests_build_once_after_lock_recheck() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            mpsc, Arc,
+        };
+        let root = scratch_dir("native-build-once");
+        let device = root.join("device-0");
+        let path = root.join("profile/native.engine");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let first_path = path.clone();
+        let first_device = device.clone();
+        let first_calls = calls.clone();
+        let first = std::thread::spawn(move || {
+            ensure_native_engine_with_builder(&first_path, &first_device, |path| {
+                first_calls.fetch_add(1, Ordering::SeqCst);
+                started_tx.send(()).unwrap();
+                release_rx
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
+                std::fs::write(path, b"first plan")?;
+                Ok(())
+            })
+            .unwrap()
+        });
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let (attempt_tx, attempt_rx) = mpsc::channel();
+        let second_path = path.clone();
+        let second_device = device.clone();
+        let second_calls = calls.clone();
+        let second = std::thread::spawn(move || {
+            attempt_tx.send(()).unwrap();
+            ensure_native_engine_with_builder(&second_path, &second_device, |path| {
+                second_calls.fetch_add(1, Ordering::SeqCst);
+                std::fs::write(path, b"duplicate plan")?;
+                Ok(())
+            })
+            .unwrap()
+        });
+        attempt_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        release_tx.send(()).unwrap();
+        first.join().unwrap();
+        second.join().unwrap();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "waiter must recheck the completed profile"
+        );
+        assert_eq!(std::fs::read(path).unwrap(), b"first plan");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "subprocess helper for native_device_lock_blocks_processes"]
+    fn native_build_lock_child_process() {
+        let Some(root) = std::env::var_os("VC_RS_TEST_NATIVE_LOCK_ROOT") else {
+            return;
+        };
+        let root = PathBuf::from(root);
+        std::fs::write(root.join("child-started"), b"started").unwrap();
+        let _guard = lock_native_device_build(&root).unwrap();
+        std::fs::write(root.join("child-acquired"), b"acquired").unwrap();
+        // Bypass Rust destructors to verify process exit releases the OS lock.
+        std::process::exit(0);
+    }
+
+    #[test]
+    fn native_device_lock_blocks_processes_and_releases_on_exit() {
+        let root = scratch_dir("native-process-lock");
+        let guard = lock_native_device_build(&root).unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "model_rvc::native_tensorrt::cache_version_tests::native_build_lock_child_process",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .env("VC_RS_TEST_NATIVE_LOCK_ROOT", &root)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !root.join("child-started").exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "child failed to start"
+            );
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "child exited before acquiring lock"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            !root.join("child-acquired").exists(),
+            "other process must block while model build holds the lock"
+        );
+        drop(guard);
+        assert!(child.wait().unwrap().success());
+        assert!(root.join("child-acquired").exists());
+        let final_guard = lock_native_device_build(&root).unwrap();
+        drop(final_guard);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn sdk_upgrade_does_not_reuse_or_overwrite_previous_engines() {

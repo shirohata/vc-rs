@@ -71,10 +71,15 @@ root assigned to `$sdkRoot`:
 . scripts/activate.ps1 -TensorRtRoot $sdkRoot -CudaPath 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3'
 ```
 
-Native caches are stored under `native-trt-<major.minor.patch.build>` inside the
-existing cache root. An SDK upgrade rebuilds engines and timing caches on first
-use; later starts reuse them. Old caches are retained for rollback and remain
-visible to the existing cache inspection/clear commands. Windows ML TensorRT RTX
+Native caches are stored under `native-trt-<major.minor.patch.build>/build-v2`
+inside the existing cache root. An SDK or native build-revision change rebuilds
+engines and timing caches on first use; later starts reuse them. Revision 2
+excludes engines built before per-device, cross-process build serialization.
+vc-rs workers sharing this cache root serialize builds to avoid incomplete
+phase outputs from concurrent compilation.
+Builds and timing-cache writes hold a device lock on the model worker.
+Old caches are retained for rollback and remain visible to the existing cache
+inspection/clear commands. Windows ML TensorRT RTX
 cache paths are unchanged. Rebuild the app/plugin **and** builder helper for each
 SDK; copying only new runtime DLLs into an old build is not an upgrade workflow.
 

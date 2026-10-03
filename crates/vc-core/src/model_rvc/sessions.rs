@@ -1387,6 +1387,7 @@ impl RvcModelSession {
         // Streaming NSF inputs: resolve name + data here (validation), build the
         // tensor views after taking the session borrow below.
         let nsf = resolve_optional_input(names.nsf_noise.as_deref(), nsf_noise, "nsf_noise")?;
+        let stream_audio_len = nsf.as_ref().map(|(_, data)| data.len());
         let phase = match (names.phase_in.as_deref(), phase_in) {
             (Some(name), Some(_)) => Some(name),
             (Some(name), None) => {
@@ -1462,11 +1463,18 @@ impl RvcModelSession {
             // Streaming exports emit the per-sample `streaming_nsf_phase`; copy it
             // into the caller's buffer so it can select the next window's
             // `phase_in`. Absent/unrequested for conventional exports.
-            if let (Some(phase_out), Some(phase_out_name)) = (phase_out, names.phase_out.as_deref())
-            {
+            if let Some(phase_out) = phase_out {
                 phase_out.clear();
-                if let Some(value) = outputs.get(phase_out_name) {
-                    let (_, data) = value.try_extract_tensor::<f32>()?;
+                if let Some(phase_out_name) = names.per_sample_phase_out() {
+                    let value = outputs
+                        .get(phase_out_name)
+                        .ok_or_else(|| anyhow!("RVC phase output '{phase_out_name}' not found"))?;
+                    let (shape, data) = value.try_extract_tensor::<f32>()?;
+                    let audio_len =
+                        stream_audio_len.context("RVC phase output requires NSF noise")?;
+                    if shape.as_ref() != [1, audio_len as i64, 1] {
+                        bail!("RVC phase output '{phase_out_name}' must be [1, {audio_len}, 1], got {shape}");
+                    }
                     phase_out.extend_from_slice(data);
                 }
             }
@@ -1688,12 +1696,12 @@ impl RvcModelSession {
                 // Streaming: read back the per-sample `streaming_nsf_phase` so the
                 // caller can pick the next window's `phase_in`. The output buffer
                 // exists iff the export emits it.
-                if let (Some(phase_out), Some(phase_tensor)) =
-                    (phase_out, binding.phase_out.as_ref())
-                {
-                    let (_, data) = phase_tensor.try_extract_tensor::<f32>()?;
+                if let Some(phase_out) = phase_out {
                     phase_out.clear();
-                    phase_out.extend_from_slice(data);
+                    if let Some(phase_tensor) = binding.phase_out.as_ref() {
+                        let (_, data) = phase_tensor.try_extract_tensor::<f32>()?;
+                        phase_out.extend_from_slice(data);
+                    }
                 }
                 debug!(
                     "rvc session.run_binding backend={} cuda_graph=false device_io=false feats_shape={} pitch_shape={} output_shape={} elapsed_us={}",

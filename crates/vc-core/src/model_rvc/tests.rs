@@ -664,7 +664,7 @@ fn vc_convert_tiny(mode: vc_convert::ExportMode) -> Vec<u8> {
 }
 
 /// onnx_meta reads from a path, so round-trip through a temp file.
-fn with_temp_model<T>(name: &str, bytes: &[u8], f: impl FnOnce(&Path) -> T) -> T {
+pub(super) fn with_temp_model<T>(name: &str, bytes: &[u8], f: impl FnOnce(&Path) -> T) -> T {
     let dir = tensor_rt_temp_dir(name);
     fs::create_dir_all(&dir).unwrap();
     let path = dir.join("model.onnx");
@@ -723,6 +723,383 @@ fn vc_convert_webui_export_passes_onnx_meta_gatekeepers() {
         assert_eq!(io.rvc_sample_rate(), Some(40_000));
         assert!(io.stream_format().unwrap().is_none());
     });
+}
+
+// Keep legacy fixtures derived from the converter's real tiny graph. Only its
+// declared phase output changes: audio still consumes the same external NSF
+// noise/phase inputs, so a missing bind cannot hide behind an identity fixture.
+#[cfg(any(feature = "ort", native_tensorrt))]
+#[derive(Clone, Copy, Debug)]
+pub(super) enum TinyPhaseOutput {
+    PerSample,
+    Scalar,
+    None,
+}
+
+#[cfg(any(feature = "ort", native_tensorrt))]
+pub(super) fn legacy_streaming_tiny(phase: TinyPhaseOutput) -> Vec<u8> {
+    fn varint(mut value: u64, output: &mut Vec<u8>) {
+        loop {
+            let byte = (value & 0x7f) as u8;
+            value >>= 7;
+            output.push(byte | if value > 0 { 0x80 } else { 0 });
+            if value == 0 {
+                break;
+            }
+        }
+    }
+    fn bytes(field: u64, value: &[u8], output: &mut Vec<u8>) {
+        varint(field << 3 | 2, output);
+        varint(value.len() as u64, output);
+        output.extend_from_slice(value);
+    }
+    fn integer(field: u64, value: u64, output: &mut Vec<u8>) {
+        varint(field << 3, output);
+        varint(value, output);
+    }
+    fn read_varint(input: &[u8], position: &mut usize) -> u64 {
+        let mut value = 0;
+        let mut shift = 0;
+        loop {
+            let byte = input[*position];
+            *position += 1;
+            value |= u64::from(byte & 0x7f) << shift;
+            if byte & 0x80 == 0 {
+                return value;
+            }
+            shift += 7;
+        }
+    }
+    fn fields(input: &[u8], mut visit: impl FnMut(u64, u64, &[u8], &[u8])) {
+        let mut position = 0;
+        while position < input.len() {
+            let start = position;
+            let tag = read_varint(input, &mut position);
+            let field = tag >> 3;
+            let wire = tag & 7;
+            let payload_start;
+            match wire {
+                0 => {
+                    payload_start = position;
+                    read_varint(input, &mut position);
+                }
+                1 => {
+                    payload_start = position;
+                    position += 8;
+                }
+                2 => {
+                    let len = read_varint(input, &mut position) as usize;
+                    payload_start = position;
+                    position += len;
+                }
+                5 => {
+                    payload_start = position;
+                    position += 4;
+                }
+                _ => panic!("unexpected fixture protobuf wire {wire}"),
+            }
+            visit(
+                field,
+                wire,
+                &input[payload_start..position],
+                &input[start..position],
+            );
+        }
+    }
+    let source = vc_convert_tiny(vc_convert::ExportMode::Streaming);
+    if matches!(phase, TinyPhaseOutput::PerSample) {
+        return source;
+    }
+    let mut result = Vec::new();
+    fields(&source, |field, wire, payload, encoded| {
+        if (field, wire) != (7, 2) {
+            result.extend_from_slice(encoded);
+            return;
+        }
+        let mut graph = Vec::new();
+        fields(payload, |field, wire, payload, encoded| {
+            let mut phase_output = false;
+            if (field, wire) == (12, 2) {
+                fields(payload, |field, wire, payload, _| {
+                    phase_output |= (field, wire) == (1, 2) && payload == b"streaming_nsf_phase";
+                });
+            }
+            if !phase_output {
+                graph.extend_from_slice(encoded);
+            }
+        });
+        if matches!(phase, TinyPhaseOutput::Scalar) {
+            // Gather the last sample on axis 1, retaining [1, 1, 1]. The scalar
+            // reproduces the old final-window phase, which overlapping-window
+            // callers must ignore in favor of CPU accumulation.
+            let mut index = Vec::new();
+            integer(1, 1, &mut index); // TensorProto.dims
+            integer(2, 7, &mut index); // INT64
+            bytes(8, b"legacy_phase_index", &mut index);
+            bytes(9, &(-1_i64).to_le_bytes(), &mut index);
+            bytes(5, &index, &mut graph); // GraphProto.initializer
+            let mut axis = Vec::new();
+            bytes(1, b"axis", &mut axis);
+            integer(3, 1, &mut axis);
+            integer(20, 2, &mut axis); // AttributeProto.INT
+            let mut node = Vec::new();
+            bytes(1, b"streaming_nsf_phase", &mut node);
+            bytes(1, b"legacy_phase_index", &mut node);
+            bytes(2, b"phase_out", &mut node);
+            bytes(4, b"Gather", &mut node);
+            bytes(5, &axis, &mut node);
+            bytes(1, &node, &mut graph);
+            let mut dimension = Vec::new();
+            integer(1, 1, &mut dimension);
+            let mut shape = Vec::new();
+            for _ in 0..3 {
+                bytes(1, &dimension, &mut shape);
+            }
+            let mut tensor_type = Vec::new();
+            integer(1, 1, &mut tensor_type); // FLOAT
+            bytes(2, &shape, &mut tensor_type);
+            let mut value_type = Vec::new();
+            bytes(1, &tensor_type, &mut value_type);
+            let mut output = Vec::new();
+            bytes(1, b"phase_out", &mut output);
+            bytes(2, &value_type, &mut output);
+            bytes(12, &output, &mut graph);
+        }
+        bytes(7, &graph, &mut result);
+    });
+    result
+}
+
+#[cfg(any(feature = "ort", native_tensorrt))]
+fn check_legacy_streaming_session(provider: Provider, pinned: bool) {
+    use super::inspect::inspect_rvc_model;
+    use super::sessions::RvcModelSession;
+    use super::tensorrt::TensorRtSessionPurpose;
+    #[cfg(feature = "ort")]
+    use super::tensorrt::{RvcTensorRtBinding, RvcTensorRtPinnedBinding};
+    use super::time_state::{RvcTimeState, StreamParams};
+
+    const FRAMES: usize = 4;
+    const HOP: usize = 400;
+    let mut reference_audio = Vec::new();
+    let mut reference_phase = Vec::new();
+    for phase_kind in [
+        TinyPhaseOutput::PerSample,
+        TinyPhaseOutput::Scalar,
+        TinyPhaseOutput::None,
+    ] {
+        with_temp_model(
+            "legacy-streaming",
+            &legacy_streaming_tiny(phase_kind),
+            |path| {
+                let info = inspect_rvc_model(path).unwrap();
+                #[cfg(feature = "ort")]
+                let names = info.io_names.clone();
+                let profile = (provider.is_tensorrt()
+                    || provider == Provider::WindowsMlNvTensorRtRtx
+                    || pinned)
+                    .then(|| {
+                        TensorRtSessionProfile::rvc(FRAMES, 768, &info.io_names, Some(HOP))
+                            .with_model_cache_key(tensor_rt_model_cache_key(path).unwrap())
+                    });
+                let mut session = RvcModelSession::load(
+                    path,
+                    provider,
+                    profile,
+                    Some(768),
+                    TensorRtRunMode::PinnedCpu,
+                    TensorRtSessionPurpose::Main,
+                    info.io_names,
+                )
+                .unwrap();
+                #[cfg(feature = "ort")]
+                if pinned {
+                    let shape = session.warmup_output_shape(FRAMES, 768, 0).unwrap();
+                    if !provider.uses_fixed_shape() {
+                        // CPU and Windows ML TensorRT-RTX use session.run in
+                        // production. Also exercise the shared pinned binding
+                        // contract explicitly with portable CPU allocators.
+                        let shape: Vec<usize> = shape
+                            .iter()
+                            .map(|&dim| usize::try_from(dim).unwrap())
+                            .collect();
+                        session.tensor_rt_binding = Some(RvcTensorRtBinding::Pinned(
+                            RvcTensorRtPinnedBinding::new_with_allocators(
+                                session.session.as_ref().unwrap(),
+                                &[1, FRAMES, 768],
+                                &[1, FRAMES],
+                                &shape,
+                                FRAMES as i64,
+                                0,
+                                &names,
+                                Some(FRAMES * HOP),
+                                ort::memory::Allocator::default(),
+                                ort::memory::Allocator::default(),
+                            )
+                            .unwrap(),
+                        ));
+                    } else {
+                        session.enable_tensorrt_binding(&shape, 0).unwrap();
+                    }
+                    let Some(RvcTensorRtBinding::Pinned(binding)) =
+                        session.tensor_rt_binding.as_ref()
+                    else {
+                        panic!("pinned binding required");
+                    };
+                    assert!(binding.nsf_noise.is_some() && binding.phase_in.is_some());
+                    assert_eq!(
+                        binding.phase_out.is_some(),
+                        matches!(phase_kind, TinyPhaseOutput::PerSample)
+                    );
+                }
+                let mut state = RvcTimeState::new(
+                    None,
+                    Some(StreamParams {
+                        frame_hop: HOP,
+                        sample_rate: 40_000,
+                    }),
+                );
+                let pitch = vec![100_i64; FRAMES];
+                let pitchf = vec![113.0_f32; FRAMES];
+                let mut phone = vec![0.0; FRAMES * 768];
+                phone[0] = 1.0;
+                let rnd = vec![0.25; 8 * FRAMES];
+                let mut audio = Vec::new();
+                let mut phase = vec![0.9; FRAMES * HOP]; // stale trace must be cleared for legacy
+                let mut audio_runs = Vec::new();
+                let mut phase_runs = Vec::new();
+                for call in 0..3 {
+                    state.roll(2, FRAMES);
+                    let noise: Vec<f32> = (0..FRAMES * HOP)
+                        .map(|i| ((i + call * 37) as f32 * 0.13).sin() * 0.7)
+                        .collect();
+                    let phase_in = state.phase_in();
+                    let started = std::time::Instant::now();
+                    session
+                        .infer(
+                            &phone,
+                            &[1, FRAMES as i64, 768],
+                            FRAMES,
+                            &pitch,
+                            &pitchf,
+                            0,
+                            Some(&rnd),
+                            Some(&noise),
+                            phase_in,
+                            Some(&mut phase),
+                            &mut audio,
+                        )
+                        .unwrap();
+                    eprintln!("legacy streaming provider={} pinned={pinned} phase={phase_kind:?} call={call} elapsed_us={}", provider.label(), started.elapsed().as_micros());
+                    assert_eq!(audio.len(), FRAMES * HOP);
+                    assert!(audio.iter().chain(&phase).all(|value| value.is_finite()));
+                    if matches!(phase_kind, TinyPhaseOutput::PerSample) && !phase.is_empty() {
+                        assert_eq!(phase.len(), FRAMES * HOP);
+                        // Finite output can hide an unread/unwritten
+                        // TensorRT output. Check the actual trace values too.
+                        for index in [0, 2 * HOP - 1, FRAMES * HOP - 1] {
+                            let expected = (phase_in.unwrap()
+                                + pitchf[0] * (index + 1) as f32 / 40_000.0)
+                                .rem_euclid(1.0);
+                            let delta = (phase[index] - expected).abs().rem_euclid(1.0);
+                            assert!(
+                                delta.min(1.0 - delta) < 1e-5,
+                                "phase trace call={call} index={index}: {} vs {expected}",
+                                phase[index]
+                            );
+                        }
+                        assert!(state.set_phase_from_output(&phase));
+                    } else {
+                        assert!(phase.is_empty(), "scalar/no output must select CPU carry");
+                        if matches!(phase_kind, TinyPhaseOutput::PerSample) {
+                            assert!(
+                                provider.is_tensorrt(),
+                                "only native plans may use the unwritten-output fallback"
+                            );
+                            eprintln!("native per-sample phase fallback call={call}");
+                        }
+                        assert!(!state.set_phase_from_output(&phase));
+                        state.advance_phase(&pitchf);
+                    }
+                    let expected_carry =
+                        ((call + 1) as f32 * 113.0 * (2 * HOP) as f32 / 40_000.0).rem_euclid(1.0);
+                    let delta = (state.phase_in().unwrap() - expected_carry)
+                        .abs()
+                        .rem_euclid(1.0);
+                    assert!(
+                        delta.min(1.0 - delta) < 1e-5,
+                        "113 Hz carry mismatch call={call}: {:?} vs {expected_carry}",
+                        state.phase_in()
+                    );
+                    phase_runs.push(state.phase_in().unwrap());
+                    audio_runs.push(audio.clone());
+                }
+                assert_ne!(
+                    audio_runs[0], audio_runs[1],
+                    "NSF inputs must update after first inference"
+                );
+                if matches!(phase_kind, TinyPhaseOutput::PerSample) {
+                    reference_audio = audio_runs;
+                    reference_phase = phase_runs;
+                } else {
+                    for (call, (actual, expected)) in
+                        phase_runs.iter().zip(&reference_phase).enumerate()
+                    {
+                        let error = (actual - expected).abs().rem_euclid(1.0);
+                        eprintln!("legacy phase comparison provider={} phase={phase_kind:?} call={call} actual={actual:.9} expected={expected:.9} circular_error={:.9}", provider.label(), error.min(1.0 - error));
+                    }
+                    let audio_max_diff = audio_runs
+                        .iter()
+                        .flatten()
+                        .zip(reference_audio.iter().flatten())
+                        .map(|(actual, expected)| (actual - expected).abs())
+                        .fold(0.0_f32, f32::max);
+                    eprintln!("legacy audio comparison provider={} phase={phase_kind:?} max_abs_diff={audio_max_diff:.9}", provider.label());
+                    for (actual, expected) in phase_runs.iter().zip(&reference_phase) {
+                        let error = (actual - expected).abs().rem_euclid(1.0);
+                        assert!(error.min(1.0 - error) < 1e-5);
+                    }
+                    for (actual, expected) in audio_runs
+                        .iter()
+                        .flatten()
+                        .zip(reference_audio.iter().flatten())
+                    {
+                        assert!(
+                            (actual - expected).abs() < 1e-6,
+                            "legacy audio differs: {actual} vs {expected}"
+                        );
+                    }
+                }
+            },
+        );
+    }
+}
+
+#[cfg(feature = "ort")]
+#[test]
+fn legacy_streaming_phase_outputs_use_cpu_fallback() {
+    check_legacy_streaming_session(Provider::Cpu, false);
+}
+
+#[cfg(feature = "ort")]
+#[test]
+fn legacy_streaming_cpu_pinned_phase_outputs_use_cpu_fallback() {
+    check_legacy_streaming_session(Provider::Cpu, true);
+}
+
+#[cfg(native_tensorrt)]
+#[test]
+#[ignore = "requires NVIDIA CUDA/TensorRT SDK and vc-tensorrt-builder"]
+fn native_tensorrt_legacy_streaming_smoke() {
+    check_legacy_streaming_session(Provider::TensorRt, false);
+}
+
+#[cfg(all(windows, feature = "windowsml"))]
+#[test]
+#[ignore = "requires Windows ML TensorRT-RTX EP/device"]
+fn windowsml_nvtrtx_legacy_streaming_smoke() {
+    check_legacy_streaming_session(Provider::WindowsMlNvTensorRtRtx, false);
+    check_legacy_streaming_session(Provider::WindowsMlNvTensorRtRtx, true);
 }
 
 /// ORT CPU execution of the converted streaming model (port of the runtime
