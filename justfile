@@ -41,6 +41,7 @@ test-cpu:
 test-ci:
     . ./scripts/rustflags.ps1; $env:VC_RS_ENABLE_NATIVE_TENSORRT = "0"; cargo test -p vc-core -p vc-app -p vc-cli --no-default-features --features cpu && cargo test -p vc-gui -p vc-vst3 -p vc-convert
     just test-gui-variants
+    pwsh -NoProfile -File scripts/test-release-scan.ps1
 
 # Package-scoped UI checks with each distribution's isolated feature set.
 test-gui-variants:

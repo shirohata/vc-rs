@@ -11,6 +11,42 @@ Version numbers come from `[workspace.package].version` in the root
 release archives. See [`docs/distribution.md`](docs/distribution.md) for the full
 versioning and publishing procedure.
 
+## [0.5.3] - 2026-10-04
+
+### Changed
+
+- Default source builds of the standalone CLI, GUI, and shared runtime now use
+  Windows ML without enabling native TensorRT. TensorRT remains an explicit
+  build feature; RNNoise and GTCRN remain enabled by default.
+
+### Fixed
+
+- Stabilized SOLA and PSOLA sliding-window energy calculations to avoid
+  rounding errors affecting overlap alignment.
+- Normalized integer WAV input using its original PCM bit depth.
+- Preserved loaded VST3 models across host resets, processing-mode changes, and
+  block-size changes. Offline export/freeze preserves the initial input and final
+  partial chunk through latency compensation and tail processing.
+- Corrected native TensorRT buffer initialization, engine-build serialization,
+  and compatibility with supported RVC export conventions.
+- Corrected streaming denoiser priming delay and RVC output candidate lengths,
+  including the matching fixed GPU input profiles.
+- Recovered from transient exclusive WASAPI capture errors and stopped sessions
+  on fatal audio-stream errors while preserving diagnostics.
+- Preserved still-voiced output tails after silent input chunks and compensated
+  independent capture/render device clock drift with continuous output resampling.
+- Delay-loaded native TensorRT DLLs in the GUI so an explicitly enabled combined
+  build can start before those DLLs are needed.
+- Included packaged `.vst3` module binaries in the release path-leak scan and
+  retained explicit TensorRT coverage in the release Clippy gate.
+
+### Distribution notes
+
+- Prefer release builds for realtime use. The device-clock resampler has
+  substantially higher CPU cost in unoptimized debug builds.
+- Windows binaries are not code-signed; Windows may display a security warning
+  when downloading or running them.
+
 ## [0.5.2] - 2026-09-19
 
 ### Added
@@ -240,6 +276,7 @@ Initial release.
 - One-shot distribution packaging scripts for all four Windows x64 variants.
 - Auto-generated bundled third-party license notices during packaging.
 
+[0.5.3]: https://github.com/shirohata/vc-rs/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/shirohata/vc-rs/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/shirohata/vc-rs/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/shirohata/vc-rs/compare/v0.4.0...v0.5.0

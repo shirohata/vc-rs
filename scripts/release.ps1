@@ -139,7 +139,9 @@ function Test-BytesContainText {
 # Files that are ours and therefore must not leak build-machine paths/names.
 # Third-party vendor DLLs (NVIDIA/Microsoft) legitimately carry their own build
 # paths, so the deep path scan is limited to binaries we produce.
-$ourBinaryGlobs = @('vc-rs.exe', 'vc-gui.exe', 'vc-tensorrt-builder.exe', 'vc-vst3*.dll')
+# The packaged Windows module has the same .vst3 filename as its outer bundle;
+# keep the .dll glob too for older/raw layouts. Entries below exclude directories.
+$ourBinaryGlobs = @('vc-rs.exe', 'vc-gui.exe', 'vc-tensorrt-builder.exe', 'vc-vst3*.dll', 'vc-vst3*.vst3')
 
 # Prohibited anywhere in any package (docs\distribution.md "Package Contents").
 $prohibitedGlobs = @('*.pdb', '*.onnx', '*.wav', '*.log', '*.tmp')
@@ -315,8 +317,8 @@ try {
         throw "rustfmt check failed; release blocked. Run 'cargo fmt --all', recommit, and retry."
     }
 
-    Write-Host "==> Lint gate: cargo clippy --workspace --all-targets -- -D warnings" -ForegroundColor Cyan
-    cargo clippy --workspace --all-targets -- -D warnings
+    Write-Host "==> Lint gate: cargo clippy --workspace --all-targets --features tensorrt -- -D warnings" -ForegroundColor Cyan
+    cargo clippy --workspace --all-targets --features tensorrt -- -D warnings
     if ($LASTEXITCODE -ne 0) {
         throw "clippy reported warnings/errors; release blocked. Fix them, recommit, and retry."
     }

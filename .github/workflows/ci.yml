@@ -66,6 +66,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: TensorRT SDK selection (synthetic fixtures, no NVIDIA SDK)
         run: pwsh -File scripts/test-tensorrt-sdk.ps1
+      - name: Release ZIP scan (synthetic fixtures)
+        run: pwsh -File scripts/test-release-scan.ps1
       - name: test (cpu feature)
         run: >
           cargo test
