@@ -26,6 +26,8 @@ use super::onnx_meta::RvcIoNames;
 #[cfg(feature = "ort")]
 use super::sessions::HubertEmbedderSession;
 use super::shape::onnx_silence_front_feature_frames;
+#[cfg(feature = "ort")]
+use super::shape::rvc_output_samples_for_context;
 
 // Fixed-shape GPU bindings are intentionally model-worker state, not audio callback state.
 // Keep CUDA Graph tensor addresses stable for each session; do not allocate or re-bind them on chunk runs.
@@ -1290,12 +1292,17 @@ pub(super) fn derive_rvc_feature_len(
     contentvec_frames: usize,
     extra_convert_samples: usize,
     rvc_sample_rate: u32,
+    output_samples: usize,
 ) -> Result<usize> {
     let frames2 = contentvec_frames
         .checked_mul(2)
         .context("RVC feature length overflow")?;
-    let silence_front_frames =
-        onnx_silence_front_feature_frames(extra_convert_samples, rvc_sample_rate);
+    let silence_front_frames = onnx_silence_front_feature_frames(
+        extra_convert_samples,
+        rvc_sample_rate,
+        frames2,
+        output_samples,
+    );
     let feature_len = if silence_front_frames > 0 && silence_front_frames < frames2 {
         frames2 - silence_front_frames
     } else {
@@ -1303,6 +1310,9 @@ pub(super) fn derive_rvc_feature_len(
     };
     if feature_len == 0 {
         bail!("derived zero RVC frames");
+    }
+    if feature_len as u64 * (rvc_sample_rate as u64) < output_samples as u64 * 100 {
+        bail!("ContentVec output cannot supply the requested RVC audio length");
     }
     Ok(feature_len)
 }
@@ -1320,8 +1330,12 @@ pub(super) fn tensor_rt_warmup_feature_len(
     embedder.extract_into(&silence, &mut features)?;
     let contentvec_output_shape = features.shape.clone();
     let contentvec_frames = feature_len_from_shape(&features.shape, "embedder warmup output")?;
-    let feature_len =
-        derive_rvc_feature_len(contentvec_frames, extra_convert_samples, rvc_sample_rate)?;
+    let feature_len = derive_rvc_feature_len(
+        contentvec_frames,
+        extra_convert_samples,
+        rvc_sample_rate,
+        rvc_output_samples_for_context(input_samples_16k, extra_convert_samples, rvc_sample_rate),
+    )?;
     info!(
         "TensorRT warmup derived RVC frame count: contentvec_input_samples={} rvc_frames={}",
         input_samples_16k, feature_len
@@ -1705,14 +1719,17 @@ mod tests {
         let rvc_rate = 48_000;
         // No extra convert window -> no leading silence to trim -> exactly 2x,
         // matching the realtime pipeline's repeat_frames(2).
-        assert_eq!(derive_rvc_feature_len(100, 0, rvc_rate).unwrap(), 200);
+        assert_eq!(
+            derive_rvc_feature_len(100, 0, rvc_rate, 48_000).unwrap(),
+            200
+        );
 
         // With a nonzero extra window the result is 2x minus the trimmed leading
         // silence frames, exactly what tensor_rt_warmup_feature_len computes from
         // a run (repeat_frames(2) followed by trim_front_frames).
         let frames = 100usize;
         let extra = 48_000usize;
-        let silence_front = onnx_silence_front_feature_frames(extra, rvc_rate);
+        let silence_front = onnx_silence_front_feature_frames(extra, rvc_rate, 200, 48_000);
         assert!(
             silence_front > 0,
             "test input should exercise the trim branch"
@@ -1720,13 +1737,26 @@ mod tests {
         let frames2 = frames * 2;
         let expected = frames2 - silence_front;
         assert_eq!(
-            derive_rvc_feature_len(frames, extra, rvc_rate).unwrap(),
+            derive_rvc_feature_len(frames, extra, rvc_rate, 48_000).unwrap(),
             expected
         );
     }
 
     #[test]
     fn derive_rvc_feature_len_rejects_zero_frames() {
-        assert!(derive_rvc_feature_len(0, 0, 48_000).is_err());
+        assert!(derive_rvc_feature_len(0, 0, 48_000, 1).is_err());
+    }
+
+    #[test]
+    fn fixed_profiles_keep_the_same_complete_candidate_as_runtime() {
+        assert_eq!(
+            derive_rvc_feature_len(20, 5424, 48_000, 14_736).unwrap(),
+            31
+        );
+        assert_eq!(
+            derive_rvc_feature_len(16, 1200, 48_000, 15_120).unwrap(),
+            32
+        );
+        assert!(derive_rvc_feature_len(15, 1200, 48_000, 15_120).is_err());
     }
 }

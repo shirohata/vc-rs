@@ -9,11 +9,51 @@ use thread_priority::{set_current_thread_priority, ThreadPriority};
 use tracing::{debug, warn};
 use wasapi::{
     calculate_period_100ns, initialize_mta, initialize_sta, AudioClient, Device, DeviceEnumerator,
-    Direction, SampleType, StreamMode, WaveFormat,
+    Direction, SampleType, StreamMode, WasapiError, WaveFormat,
 };
 
 const EVENT_WAIT_TIMEOUT_MS: u32 = 100;
 const AUDIO_CLIENT_INIT_RETRY_DELAYS_MS: [u64; 5] = [25, 50, 100, 200, 400];
+const AUDCLNT_E_BUFFER_ERROR: u32 = 0x8889_0018;
+const CAPTURE_BUFFER_ERROR_RETRIES: usize = 3;
+
+struct CaptureReadRecovery {
+    exclusive: bool,
+    consecutive_errors: usize,
+}
+
+impl CaptureReadRecovery {
+    fn accept<T>(
+        &mut self,
+        packet: std::result::Result<T, WasapiError>,
+    ) -> std::result::Result<Option<T>, WasapiError> {
+        match packet {
+            Ok(packet) => {
+                self.consecutive_errors = 0;
+                Ok(Some(packet))
+            }
+            Err(err)
+                if self.exclusive
+                    && matches!(
+                        &err, WasapiError::Windows(error)
+                            if error.code().0.cast_unsigned() == AUDCLNT_E_BUFFER_ERROR
+                    ) =>
+            {
+                self.consecutive_errors += 1;
+                // GetBuffer can fail transiently in exclusive mode. The caller
+                // must leave the packet-drain loop and wait for the next event,
+                // not retry in a tight loop or fabricate audio. Bound repeated
+                // failures so the control thread can stop/report a broken device.
+                if self.consecutive_errors <= CAPTURE_BUFFER_ERROR_RETRIES {
+                    Ok(None)
+                } else {
+                    Err(err)
+                }
+            }
+            Err(err) => Err(err),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WasapiSampleFormat {
@@ -205,7 +245,16 @@ where
     let thread_started = Arc::clone(&started);
     let handle = thread::Builder::new()
         .name(format!("wasapi_{name}"))
-        .spawn(move || run(thread_running, thread_started, init_tx, start_tx))
+        .spawn(move || {
+            let result = run(
+                Arc::clone(&thread_running),
+                thread_started,
+                init_tx,
+                start_tx,
+            );
+            thread_running.store(false, Ordering::SeqCst);
+            result
+        })
         .with_context(|| format!("failed to spawn WASAPI {name} thread"))?;
 
     let init_result = init_rx
@@ -273,12 +322,19 @@ where
         let bytes_needed = buffer_frames * bytes_per_frame;
         let mut raw = Vec::<u8>::with_capacity(bytes_needed);
         let mut mono = Vec::<f32>::with_capacity(buffer_frames);
+        let mut recovery = CaptureReadRecovery {
+            exclusive: config.exclusive,
+            consecutive_errors: 0,
+        };
 
         while running.load(Ordering::SeqCst) {
             while running.load(Ordering::SeqCst) && stream.audio_client.get_current_padding()? > 0 {
                 raw.resize(bytes_needed, 0);
-                let (frames_read, buffer_info) =
-                    stream.capture_client.read_from_device(&mut raw)?;
+                let Some((frames_read, buffer_info)) =
+                    recovery.accept(stream.capture_client.read_from_device(&mut raw))?
+                else {
+                    break;
+                };
                 if frames_read == 0 {
                     break;
                 }
@@ -847,6 +903,84 @@ pub(crate) fn encode_mono_to_interleaved(
 mod tests {
     use super::*;
     use approx::assert_abs_diff_eq;
+
+    fn windows_error(code: u32) -> WasapiError {
+        // Negative HRESULTs survive HRESULT_FROM_WIN32 unchanged. Construct a
+        // real Windows error without introducing another Windows dependency.
+        WasapiError::Windows(std::io::Error::from_raw_os_error(code.cast_signed()).into())
+    }
+
+    #[test]
+    fn capture_recovers_after_transient_buffer_errors_and_bounds_retries() {
+        let mut recovery = CaptureReadRecovery {
+            exclusive: true,
+            consecutive_errors: 0,
+        };
+        for _ in 0..2 {
+            for _ in 0..CAPTURE_BUFFER_ERROR_RETRIES {
+                assert_eq!(
+                    recovery
+                        .accept::<usize>(Err(windows_error(AUDCLNT_E_BUFFER_ERROR)))
+                        .unwrap(),
+                    None
+                );
+            }
+            // A successful read must reset the consecutive-error budget.
+            assert_eq!(recovery.accept(Ok(480)).unwrap(), Some(480));
+        }
+        for _ in 0..CAPTURE_BUFFER_ERROR_RETRIES {
+            assert!(recovery
+                .accept::<usize>(Err(windows_error(AUDCLNT_E_BUFFER_ERROR)))
+                .unwrap()
+                .is_none());
+        }
+        assert!(recovery
+            .accept::<usize>(Err(windows_error(AUDCLNT_E_BUFFER_ERROR)))
+            .is_err());
+    }
+
+    #[test]
+    fn capture_propagates_fatal_errors_and_shared_mode_errors() {
+        let mut recovery = CaptureReadRecovery {
+            exclusive: true,
+            consecutive_errors: 0,
+        };
+        // AUDCLNT_E_DEVICE_INVALIDATED must never be retried as a missing packet.
+        let result = recovery.accept::<usize>(Err(windows_error(0x8889_0004)));
+        assert!(matches!(result, Err(WasapiError::Windows(error))
+            if error.code().0.cast_unsigned() == 0x8889_0004));
+        assert!(recovery
+            .accept::<usize>(Err(WasapiError::EventTimeout))
+            .is_err());
+        recovery.exclusive = false;
+        assert!(recovery
+            .accept::<usize>(Err(windows_error(AUDCLNT_E_BUFFER_ERROR)))
+            .is_err());
+    }
+
+    #[test]
+    fn failed_audio_thread_is_reported_to_session_control() {
+        let (fail_tx, fail_rx) = mpsc::sync_channel(1);
+        let stream = spawn_stream("test", move |running, started, init_tx, start_tx| {
+            init_tx.send(Ok(()))?;
+            wait_until_started(&running, &started);
+            start_tx.send(Ok(()))?;
+            fail_rx.recv()?;
+            bail!("injected capture failure");
+        })
+        .unwrap();
+        stream.play().unwrap();
+        fail_tx.send(()).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !stream.has_finished() {
+            assert!(std::time::Instant::now() < deadline);
+            thread::yield_now();
+        }
+        assert!(!stream.running.load(Ordering::SeqCst));
+        assert!(stream.play().is_err());
+        let mut audio = crate::audio::AudioStream::Wasapi(stream);
+        assert!(audio.report_errors());
+    }
 
     fn test_config(exclusive: bool) -> WasapiStreamConfig {
         WasapiStreamConfig {

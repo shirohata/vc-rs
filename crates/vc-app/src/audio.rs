@@ -306,8 +306,8 @@ pub enum AudioStream {
 }
 
 impl AudioStream {
-    /// Test sessions stop output on device errors; inspect before report_errors
-    /// consumes CPAL counters. This runs on the control thread only.
+    /// Inspect before report_errors consumes CPAL counters. This runs on the
+    /// control thread only, for both conversion and device-test sessions.
     pub(crate) fn has_error(&self) -> bool {
         match self {
             Self::Cpal(stream) => stream.errors.counts.iter().enumerate().any(|(i, count)| {
@@ -398,13 +398,32 @@ where
 
 impl AudioStream {
     /// Called only by the session control thread, never the audio callback.
-    pub(crate) fn report_errors(&mut self) {
+    pub(crate) fn report_errors(&mut self) -> bool {
+        // Snapshot fatal errors before reporting clears CPAL's counters. The
+        // conversion control loop must stop the session, even if its inference
+        // worker is still parked waiting for input from a dead audio stream.
+        let failed = match self {
+            // DeviceChanged (automatic rerouting), RealtimeDenied and xruns
+            // can leave callbacks alive. Preserve that recovery behavior;
+            // only terminal device/stream loss stops a conversion session.
+            Self::Cpal(stream) => stream.errors.counts.iter().enumerate().any(|(i, count)| {
+                matches!(
+                    ERROR_KINDS[i],
+                    cpal::ErrorKind::DeviceNotAvailable
+                        | cpal::ErrorKind::HostUnavailable
+                        | cpal::ErrorKind::StreamInvalidated
+                ) && count.load(Ordering::Relaxed) > 0
+            }),
+            #[cfg(windows)]
+            Self::Wasapi(stream) => stream.has_finished(),
+        };
         if let Self::Cpal(stream) = self {
             if stream.last_report.elapsed() >= Duration::from_secs(1) {
                 stream.errors.report(stream.direction);
                 stream.last_report = Instant::now();
             }
         }
+        failed
     }
 }
 
@@ -901,6 +920,33 @@ where
 #[cfg(test)]
 mod error_tests {
     use super::*;
+
+    #[test]
+    fn fatal_stream_error_survives_consuming_the_report_counters() {
+        for (kind, terminal) in [
+            (cpal::ErrorKind::Xrun, false),
+            (cpal::ErrorKind::DeviceChanged, false),
+            (cpal::ErrorKind::RealtimeDenied, false),
+            (cpal::ErrorKind::BackendError, false),
+            (cpal::ErrorKind::DeviceNotAvailable, true),
+            (cpal::ErrorKind::HostUnavailable, true),
+            (cpal::ErrorKind::StreamInvalidated, true),
+        ] {
+            let errors = Arc::new(StreamErrors::default());
+            errors.record(kind);
+            let mut stream = AudioStream::Cpal(CpalStream {
+                stream: None,
+                errors: Arc::clone(&errors),
+                direction: "test",
+                last_report: Instant::now() - Duration::from_secs(2),
+            });
+            assert_eq!(stream.report_errors(), terminal, "{kind:?}");
+            assert!(errors
+                .counts
+                .iter()
+                .all(|count| count.load(Ordering::Relaxed) == 0));
+        }
+    }
 
     #[test]
     fn concurrent_error_reporting_preserves_counts() {

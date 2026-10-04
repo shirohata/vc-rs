@@ -12,11 +12,10 @@ use anyhow::{bail, Result};
 
 use crate::dsp::StreamingResampleMono;
 
-// Rubato's streaming adapter operates in batches; prime a conservative,
-// fixed-size delay that covers a full resampler batch on each side. This is an
-// over-estimate of the real per-direction batch (480 samples today) kept large
-// on purpose so the output FIFO never underruns on the realtime path. Changing
-// it shifts the reported latency, so treat it as a guarded constant.
+// Preserve the historical minimum delay where it already suffices. The actual
+// bound below can be larger: the FFT block depends on the rate pair, and the
+// wrapper also removes startup filter samples. A fixed 1024-sample estimate
+// alone underruns at rates such as 11,025 and 22,050 Hz.
 const RESAMPLER_BATCH_DELAY: usize = 1024;
 
 /// A model-specific denoiser that consumes and produces fixed-size frames at a
@@ -105,11 +104,24 @@ impl<D: FrameDenoiser> FixedDelayAdapter<D> {
         // independent of any model reconstruction delay.
         let frame_margin = 2 * frame_size;
         let priming_model_domain = from_model_delay + frame_margin;
-        let priming_samples = to_model_delay.saturating_add(
+        let minimum_priming_samples = to_model_delay.saturating_add(
             priming_model_domain
                 .saturating_mul(device_rate)
                 .div_ceil(model_rate),
         );
+        let to_model = StreamingResampleMono::new(device_rate, model_rate)?;
+        let from_model = StreamingResampleMono::new(model_rate, device_rate)?;
+        // Both bounds are in their respective OUTPUT domains. Convert the
+        // first deficit plus frame scheduling to device samples, then add the
+        // second deficit. Keep this coupled to StreamingResampleMono's batching
+        // contract; changing chunk partitions must never insert/drop content.
+        let bounded_priming_samples = to_model
+            .fixed_output_delay_samples()
+            .saturating_add(frame_margin)
+            .saturating_mul(device_rate)
+            .div_ceil(model_rate)
+            .saturating_add(from_model.fixed_output_delay_samples());
+        let priming_samples = minimum_priming_samples.max(bounded_priming_samples);
         // The model's reconstruction delay is already baked into its output
         // samples (it emits delayed content, still 1:1). Don't prime zeros for
         // it — only report it as latency so callers and the finite drain trim at
@@ -126,8 +138,8 @@ impl<D: FrameDenoiser> FixedDelayAdapter<D> {
             device_rate,
             model_rate,
             frame_size,
-            to_model: StreamingResampleMono::new(device_rate, model_rate)?,
-            from_model: StreamingResampleMono::new(model_rate, device_rate)?,
+            to_model,
+            from_model,
             model_input: Vec::new(),
             model_input_start: 0,
             model_output: Vec::new(),
@@ -439,5 +451,60 @@ mod tests {
         a.process_in_place(&mut second).unwrap();
 
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn awkward_rates_preserve_continuous_audio_across_batch_phases() {
+        for (model_rate, frame) in [(16_000, 256), (48_000, 480)] {
+            for rate in [11_025u32, 22_050] {
+                let input: Vec<f32> = (0..rate as usize * 3)
+                    .map(|i| 0.3 * (std::f32::consts::TAU * 733.0 * i as f32 / rate as f32).sin())
+                    .collect();
+                let build =
+                    || FixedDelayAdapter::new(DelayCopy::new(model_rate, frame, 0), rate).unwrap();
+                let mut whole = input.clone();
+                build().process_in_place(&mut whole).unwrap();
+                // Include the 50 ms finite-WAV partition and the 20 ms GTCRN
+                // partition that used to fail, plus one-sample calls covering
+                // every possible phase of the two resampler accumulators.
+                for hop in [1, (rate as usize / 20).max(128), rate as usize / 50] {
+                    let mut adapter = build();
+                    let mut split = input.clone();
+                    for chunk in split.chunks_mut(hop) {
+                        adapter.process_in_place(chunk).unwrap();
+                    }
+                    assert_eq!(split, whole, "model={model_rate} rate={rate} hop={hop}");
+                    assert!(crate::dsp::rms(&split) > 0.1);
+                    adapter.reset().unwrap();
+                    let mut reset = input.clone();
+                    adapter.process_in_place(&mut reset).unwrap();
+                    assert_eq!(reset, whole);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn resampled_finite_impulse_keeps_its_position() {
+        for rate in [11_025, 22_050, 44_100, 48_000] {
+            let mut input = vec![0.0; rate as usize];
+            let position = 1000;
+            input[position] = 1.0;
+            for delay_frames in [0, 2] {
+                let mut adapter = adapter(rate, 256, delay_frames);
+                let output = adapter.process_finite(&input).unwrap();
+                let peak = output
+                    .iter()
+                    .enumerate()
+                    .max_by(|(_, a), (_, b)| a.abs().total_cmp(&b.abs()))
+                    .unwrap()
+                    .0;
+                assert_eq!(output.len(), input.len());
+                assert!(
+                    peak.abs_diff(position) <= 1,
+                    "rate={rate} delay_frames={delay_frames} peak={peak}"
+                );
+            }
+        }
     }
 }

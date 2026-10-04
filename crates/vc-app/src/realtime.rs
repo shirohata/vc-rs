@@ -650,15 +650,24 @@ fn control_loop(
                 "Audio device disconnected or test worker stopped. Retry the device test.".into()
             });
         }
+        let mut audio_failure = None;
         if let Some(session) = session.as_mut() {
-            for stream in [&mut session.input_stream, &mut session.output_stream]
-                .into_iter()
-                .flatten()
-            {
-                stream.report_errors();
+            for (message, stream) in [
+                ("Input audio stream stopped", &mut session.input_stream),
+                ("Output audio stream stopped", &mut session.output_stream),
+            ] {
+                if let Some(stream) = stream {
+                    if stream.report_errors() {
+                        audio_failure.get_or_insert(message);
+                    }
+                }
             }
         }
-        if session
+        if let Some(message) = audio_failure {
+            let detail = session.as_ref().and_then(|s| s.last_error());
+            drop(session.take());
+            set_error_message(&status, message, detail);
+        } else if session
             .as_ref()
             .is_some_and(|s| !s.running.load(Ordering::Relaxed))
         {

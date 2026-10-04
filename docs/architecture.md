@@ -300,6 +300,14 @@ uses ORT CPU for the tiny graph, while TensorRT uses a native TensorRT engine so
 the TensorRT package remains ORT-free. VST3 intentionally does not enable or ship
 these optional core denoisers.
 
+The shared denoiser adapter's startup FIFO covers the actual output deficit of
+both resamplers (input batching, FFT accumulation, and trimmed filter startup)
+plus model-frame scheduling. Each deficit is converted from its own output
+sample domain before combining them. The historical minimum is retained where
+it suffices; larger rate-dependent bounds also appear in the reported latency
+and finite-WAV delay trim. Model reconstruction delay is reported separately
+because it is already present in the model's emitted samples.
+
 Conceptually, RVC conversion has three model-facing inputs:
 
 - Content features describe what is being spoken while discarding much of the
@@ -314,6 +322,14 @@ generation. F0 is then length-matched to the resulting feature frame count and
 kept both as continuous `pitchf` and quantized coarse pitch. Misaligning these
 streams usually sounds like timing drift, pitch lag, or unstable consonants, so
 frame-grid changes should be treated as audio-quality changes, not cleanup.
+
+Leading past-context feature trimming must retain enough 10 ms generator frames
+for the complete requested audio candidate, including the join margins.
+ContentVec's convolution reduces the available frame count; duration-based
+context trimming alone is insufficient at settings such as 25 or 113 ms.
+Runtime trimming and fixed GPU profile derivation share the same sample-length
+bound. Fractional-frame excess is cropped from the generated audio at sample
+precision; an output shorter than the requested candidate is an error.
 
 After generation, the output may be shaped by volume envelope, RMS mixing, and
 manual or automatic gain. These operations happen before chunk joining so the

@@ -177,6 +177,28 @@ mod tests {
     }
 
     #[test]
+    fn finite_three_seconds_at_11025_hz_does_not_underrun() {
+        let rate = 11_025;
+        for voiced in [false, true] {
+            let input: Vec<f32> = (0..rate as usize * 3)
+                .map(|i| {
+                    if voiced {
+                        0.3 * (i as f32 * 0.04).sin()
+                    } else {
+                        0.0
+                    }
+                })
+                .collect();
+            let output = RnnoiseDenoiser::process_finite(&input, rate).unwrap();
+            assert_eq!(output.len(), input.len());
+            assert!(output.iter().all(|sample| sample.is_finite()));
+            if voiced {
+                assert!(crate::dsp::rms(&output) > 0.01);
+            }
+        }
+    }
+
+    #[test]
     fn chunk_partition_does_not_reset_rnnoise_state() {
         let input: Vec<f32> = (0..48_000).map(|i| 0.4 * (i as f32 * 0.04).sin()).collect();
         let mut whole = input.clone();

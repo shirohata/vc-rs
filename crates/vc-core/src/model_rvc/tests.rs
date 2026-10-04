@@ -559,7 +559,10 @@ fn stream_state_pitch_update_drops_center_padded_tail_frame() {
 
 #[test]
 fn derives_vcclient_onnx_silence_front_feature_offset() {
-    assert_eq!(onnx_silence_front_feature_frames(4096, 48_000), 6);
+    assert_eq!(
+        onnx_silence_front_feature_frames(4096, 48_000, 200, 48_000),
+        6
+    );
 }
 
 #[test]

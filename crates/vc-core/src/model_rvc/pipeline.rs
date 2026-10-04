@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use tracing::{debug, info};
 
 use crate::dsp;
@@ -23,7 +23,7 @@ use super::sessions::{HubertEmbedderSession, RmvpePitchSession, RvcModelSession}
 use super::shape::{
     extra_convert_samples_from_ms, keep_tail_in_place, ms_to_samples,
     onnx_silence_front_feature_frames, rmvpe_model_input_samples_for_context_16k,
-    tensor_rt_model_input_samples_16k, RVC_SAMPLE_RATE,
+    rvc_output_samples_for_context, tensor_rt_model_input_samples_16k, RVC_SAMPLE_RATE,
 };
 use super::stream::RvcStreamState;
 use super::tensorrt::{
@@ -856,8 +856,16 @@ impl RvcPipeline {
                 Some(frames) => frames?,
                 None => bail!("native TensorRT embedder is missing its engine"),
             };
-            let feature_len =
-                derive_rvc_feature_len(contentvec_frames, extra_convert_samples, rvc_sample_rate)?;
+            let feature_len = derive_rvc_feature_len(
+                contentvec_frames,
+                extra_convert_samples,
+                rvc_sample_rate,
+                rvc_output_samples_for_context(
+                    input_samples_16k,
+                    extra_convert_samples,
+                    rvc_sample_rate,
+                ),
+            )?;
             // Native TensorRT models streaming: pass the frame hop so the profile
             // includes the `nsf_noise` `[1, feature_len*frame_hop, 1]` input.
             let rvc_profile = TensorRtSessionProfile::rvc(
@@ -1337,8 +1345,12 @@ impl VoiceModel for RvcPipeline {
             .checked_mul(2)
             .context("repeated embedder frame length overflowed")?;
 
-        let silence_front_frames =
-            onnx_silence_front_feature_frames(self.extra_convert_samples, self.rvc_sample_rate);
+        let silence_front_frames = onnx_silence_front_feature_frames(
+            self.extra_convert_samples,
+            self.rvc_sample_rate,
+            feature_len_before_trim,
+            stream_input.out_size,
+        );
         if silence_front_frames > 0 && silence_front_frames < feature_len_before_trim {
             if silence_front_frames.is_multiple_of(2) {
                 // `silence_front_frames` is on RVC's repeated 10 ms grid. Drop
@@ -1511,6 +1523,12 @@ impl VoiceModel for RvcPipeline {
             self.stream_state.time_state.advance_phase(pitchf);
         }
         let raw_output_samples = out_audio.len();
+        ensure!(
+            raw_output_samples >= stream_input.out_size,
+            "RVC output is too short for chunk assembly: need {} samples, got {}",
+            stream_input.out_size,
+            raw_output_samples,
+        );
         keep_tail_in_place(out_audio, stream_input.out_size);
         pitchf_tail_for_output_into(pitchf, out_audio.len(), self.rvc_sample_rate, out_pitchf);
         let output_envelope = if self.volume_envelope {

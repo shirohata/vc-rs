@@ -42,10 +42,40 @@ pub(super) fn samples_between_rates(
 pub(super) fn onnx_silence_front_feature_frames(
     extra_convert_samples: usize,
     rvc_sample_rate: u32,
+    available_frames: usize,
+    output_samples: usize,
 ) -> usize {
     let extra_16k_samples = (extra_convert_samples as u64 * EMBEDDER_SAMPLE_RATE as u64
         / rvc_sample_rate as u64) as usize;
-    (extra_16k_samples / 360) * 2
+    let requested_trim = (extra_16k_samples / 360) * 2;
+    // Preserve the existing context trim when it fits. ContentVec's convolution
+    // emits fewer frames than input_duration / 20 ms, so the context heuristic
+    // alone can remove frames needed by the output assembly (e.g. 25/113 ms
+    // extra context). Retain enough 10 ms generator frames for the complete
+    // candidate; sample-level tail cropping removes the fractional-frame excess.
+    // Fixed GPU profiles must use this same bound as the runtime feature trim.
+    let required_frames = (output_samples as u64 * 100).div_ceil(rvc_sample_rate as u64) as usize;
+    requested_trim.min(available_frames.saturating_sub(required_frames))
+}
+
+pub(super) fn rvc_output_samples_for_context(
+    convert_samples_16k: usize,
+    extra_convert_samples: usize,
+    rvc_sample_rate: u32,
+) -> usize {
+    let extra_16k = samples_between_rates(
+        extra_convert_samples,
+        rvc_sample_rate,
+        EMBEDDER_SAMPLE_RATE,
+        Rounding::Floor,
+    );
+    samples_between_rates(
+        convert_samples_16k.saturating_sub(extra_16k),
+        EMBEDDER_SAMPLE_RATE,
+        rvc_sample_rate,
+        Rounding::Floor,
+    )
+    .max(1)
 }
 
 pub(super) fn keep_tail_in_place<T>(values: &mut Vec<T>, len: usize) {
@@ -178,4 +208,59 @@ pub(super) fn tensor_rt_convert_size_16k(
         new_audio_16k_samples + output_extra_16k_samples + extra_16k_samples,
         CONTENTVEC_CONTEXT_ALIGN_SAMPLES,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn context_trim_keeps_complete_candidate_on_supported_time_grids() {
+        // Reference ContentVec's 400-sample receptive field and 320-sample
+        // stride, including the convolution's lost frame at aligned lengths.
+        // Cover the full allowed extra-context range, not only round 20 ms values.
+        for rate in [32_000, 40_000, 48_000] {
+            for hop_ms in [20, 30, 200] {
+                for extra_ms in 20..=3000 {
+                    let extra = ms_to_samples(rate, extra_ms);
+                    let input_16k = tensor_rt_model_input_samples_16k(
+                        ms_to_samples(48_000, hop_ms),
+                        48_000,
+                        107,
+                        extra,
+                        rate,
+                    );
+                    let frames = ((input_16k - 400) / 320 + 1) * 2;
+                    let output = rvc_output_samples_for_context(input_16k, extra, rate);
+                    let trim = onnx_silence_front_feature_frames(extra, rate, frames, output);
+                    assert!(
+                        (frames - trim) * rate as usize / 100 >= output,
+                        "rate={rate} hop_ms={hop_ms} extra_ms={extra_ms}"
+                    );
+                    assert!(output >= ms_to_samples(rate, hop_ms + 107));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn context_trim_preserves_working_geometry_and_retains_partial_frames() {
+        // Observed reference-model geometry at a 200 ms hop / 107 ms margin.
+        for (extra_ms, frames, output, retained) in [
+            (20, 32, 15_360, 32),
+            (25, 32, 15_120, 32),
+            (30, 32, 14_880, 31),
+            (40, 34, 15_360, 32),
+            (100, 40, 15_360, 32),
+            (113, 40, 14_736, 31),
+        ] {
+            let trim = onnx_silence_front_feature_frames(
+                ms_to_samples(48_000, extra_ms),
+                48_000,
+                frames,
+                output,
+            );
+            assert_eq!(frames - trim, retained, "extra_ms={extra_ms}");
+        }
+    }
 }

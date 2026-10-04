@@ -3,8 +3,9 @@ use anyhow::{anyhow, ensure, Result};
 use crate::dsp;
 
 use super::shape::{
-    feature_len_for_samples, keep_tail_in_place, samples_between_rates, tensor_rt_convert_size_16k,
-    Rounding, EMBEDDER_SAMPLE_RATE, RMVPE_FRAME_SAMPLES_16K,
+    feature_len_for_samples, keep_tail_in_place, rvc_output_samples_for_context,
+    samples_between_rates, tensor_rt_convert_size_16k, Rounding, EMBEDDER_SAMPLE_RATE,
+    RMVPE_FRAME_SAMPLES_16K,
 };
 use super::time_state::{RvcTimeState, StreamParams};
 
@@ -242,12 +243,6 @@ impl RvcStreamState {
         self.pitchf_buffer
             .extend(std::iter::repeat_n(0.0, new_feature_len));
 
-        let extra_16k_samples = samples_between_rates(
-            extra_convert_samples,
-            self.rvc_sample_rate,
-            EMBEDDER_SAMPLE_RATE,
-            Rounding::Floor,
-        );
         let volume_excluded_16k_samples = samples_between_rates(
             volume_excluded_samples,
             self.rvc_sample_rate,
@@ -267,13 +262,11 @@ impl RvcStreamState {
             sample_rate,
             Rounding::Ceil,
         );
-        let out_size = samples_between_rates(
-            convert_size_16k.saturating_sub(extra_16k_samples),
-            EMBEDDER_SAMPLE_RATE,
+        let out_size = rvc_output_samples_for_context(
+            convert_size_16k,
+            extra_convert_samples,
             self.rvc_sample_rate,
-            Rounding::Floor,
         );
-        let out_size = out_size.max(1);
         let feature_size = feature_len_for_samples(convert_size_16k, EMBEDDER_SAMPLE_RATE);
 
         // Left-pad with zeros in place (reusing the buffers) when a chunk arrives
