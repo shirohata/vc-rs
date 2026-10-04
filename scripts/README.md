@@ -134,7 +134,7 @@ see [`../docs/cli.md`](../docs/cli.md).
 pwsh -File scripts/verify.ps1
 ```
 
-Runs `cargo test --workspace` then `cargo xtask bundle vc-vst3`. Flags:
+Runs `cargo test --workspace --features tensorrt` then `cargo xtask bundle vc-vst3`. Flags:
 - `-Variant tensorrt` — build the TensorRT bundle instead of the default Windows ML one.
 - `-SkipBundle` — tests only.
 - `-NoNativeTensorRT` — skip the GPU stack and run tests fast.
@@ -373,7 +373,8 @@ feature it has, e.g. `-FeaturesA windowsml` (it still runs with `--provider cpu`
 
 ## Gotcha: STATUS_DLL_NOT_FOUND
 
-Test exes link the native TensorRT shim, so the TensorRT bin must be on PATH
+When the `tensorrt` feature is enabled, test exes link the native TensorRT shim,
+so the TensorRT bin must be on PATH
 (via `activate.ps1`) or they fail to launch with `STATUS_DLL_NOT_FOUND`. To run
 tests without a GPU stack, set `VC_RS_ENABLE_NATIVE_TENSORRT=0` (or use
 `scripts/verify.ps1 -NoNativeTensorRT`).

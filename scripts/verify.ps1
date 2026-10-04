@@ -12,8 +12,8 @@
     By default it builds the Windows ML plugin variant. Use -Variant tensorrt for
     the TensorRT-only build, or -SkipBundle to only run tests.
 
-    Tests link the native TensorRT shim (via the CLI's `tensorrt` feature), so
-    the TensorRT bin must be on PATH or the test exes fail to launch with
+    Tests explicitly enable `tensorrt` in addition to the Windows ML default, so
+    the TensorRT bin must be on PATH or the linked native shim fails to launch with
     STATUS_DLL_NOT_FOUND. activate.ps1 handles that. To run tests fast without a
     GPU stack, pass -NoNativeTensorRT (sets VC_RS_ENABLE_NATIVE_TENSORRT=0).
 
@@ -66,7 +66,7 @@ if (-not $NoNativeTensorRT) {
 Push-Location $repoRoot
 try {
     # --- Tests --------------------------------------------------------------
-    Invoke-Step "cargo test --workspace" { cargo test --workspace }
+    Invoke-Step "cargo test --workspace --features tensorrt" { cargo test --workspace --features tensorrt }
 
     # --- Standalone package feature set ------------------------------------
     # Both standalone variants ship GTCRN. Windows ML uses ORT CPU for GTCRN;

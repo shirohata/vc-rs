@@ -29,11 +29,26 @@ pwsh -File scripts/verify.ps1      # 疎通確認: cargo test + bundle
 
 ## ビルド
 
+Windowsでの既定のバックエンドはWindows MLです。通常のビルドにはNVIDIA SDKは
+不要ですが、実行時にはWindows MLランタイムが必要です。RNNoiseとGTCRNは既定で
+含まれます。Linux対応を導入する際に、その環境のバックエンドと既定構成を再検討します。
+
 CLI（`vc-rs`）:
 
 ```powershell
 cargo build --release
 ```
+
+GUI（`vc-gui`）:
+
+```powershell
+cargo run --release --bin vc-gui
+# TensorRT専用（事前に scripts/activate.ps1 でNVIDIA SDK環境を有効化）:
+cargo run --release -p vc-gui --no-default-features --features tensorrt,rnnoise,gtcrn
+```
+
+Windows MLとTensorRTを両方含める開発用ビルドは、既定の構成に
+`--features tensorrt` を追加して明示的に選択します。
 
 VST3 プラグイン（`vc-vst3`）:
 

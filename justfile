@@ -48,7 +48,7 @@ test-gui-variants:
 
 # Full workspace tests with the native TensorRT shim (activates the GPU stack).
 test:
-    . ./scripts/activate.ps1; . ./scripts/rustflags.ps1; cargo test --workspace
+    . ./scripts/activate.ps1; . ./scripts/rustflags.ps1; cargo test --workspace --features tensorrt
 
 # Microbenchmarks for the vc-core CPU hot paths (dsp/sola). No GPU stack needed:
 # the bench target doesn't enable `tensorrt`, so the native shim is never built.
@@ -56,13 +56,13 @@ test:
 bench *args:
     cargo bench -p vc-core -- {{args}}
 
-# Dev CLI build — both backends in one vc-rs.exe (activates the GPU stack).
+# Default Windows ML build; no NVIDIA SDK needed.
 build:
-    . ./scripts/activate.ps1; . ./scripts/rustflags.ps1; cargo build --release
+    . ./scripts/rustflags.ps1; cargo build --release
 
 # Single-provider CLI build: `just build-cli windowsml` (GPU-free) or `tensorrt`.
 build-cli variant="windowsml":
-    . ./scripts/activate.ps1; . ./scripts/rustflags.ps1; cargo build --release -p vc-cli --no-default-features --features {{variant}}
+    if ('{{variant}}' -in @('tensorrt', 'cuda')) { . ./scripts/activate.ps1 }; . ./scripts/rustflags.ps1; cargo build --release -p vc-cli --no-default-features --features {{variant}}
 
 # Bundle the VST3 plugin into target/bundled: `just bundle [windowsml|tensorrt]`.
 bundle variant="windowsml":
@@ -96,9 +96,9 @@ release *args:
 fmt:
     cargo fmt --all
 
-# Clippy across the workspace (activates the GPU stack).
+# Clippy across the workspace, including opt-in native TensorRT (activates the GPU stack).
 lint:
-    . ./scripts/activate.ps1; . ./scripts/rustflags.ps1; cargo clippy --workspace --all-targets
+    . ./scripts/activate.ps1; . ./scripts/rustflags.ps1; cargo clippy --workspace --all-targets --features tensorrt
 
 # Remove build artifacts.
 clean:

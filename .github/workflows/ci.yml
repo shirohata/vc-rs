@@ -4,7 +4,7 @@
 # stack and NO Windows App SDK Runtime installed. Two things make that possible:
 #
 #   * VC_RS_ENABLE_NATIVE_TENSORRT=0 makes vc-core/build.rs skip the cc shim and
-#     the nvinfer link, so the default feature set (windowsml + tensorrt) builds
+#     the nvinfer link, so the lint feature set (windowsml + opt-in tensorrt) builds
 #     and lints without CUDA/TensorRT. The native-TensorRT FFI behind
 #     #[cfg(native_tensorrt)] still needs the GPU SDKs and is only linted locally
 #     via `just lint`; CI cannot cover it.
@@ -17,7 +17,7 @@
 #     never open an ORT session, which is the only point load-dynamic resolves
 #     the runtime DLLs.
 #
-# So: clippy on the default (shipped) feature set is the lint gate; tests run on
+# So: clippy on the default features plus opt-in TensorRT is the lint gate; tests run on
 # the deterministic `cpu` feature (plus the session-free GUI/VST3 suites). Keep
 # this green — `-D warnings` is enforced. `just test-ci` mirrors the test job
 # locally.
@@ -40,7 +40,7 @@ env:
   VC_RS_ENABLE_NATIVE_TENSORRT: "0"
 
 jobs:
-  # ---- Format + lint: the shipped feature set (windowsml + tensorrt stub) ----
+  # ---- Format + lint: default Windows ML plus opt-in TensorRT stub ----
   lint:
     name: fmt + clippy
     runs-on: windows-latest
@@ -53,7 +53,7 @@ jobs:
       - name: rustfmt (check only)
         run: cargo fmt --all --check
       - name: clippy (deny warnings)
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --features tensorrt -- -D warnings
 
   # ---- Tests on the self-contained CPU provider (real, deterministic) ----
   test:

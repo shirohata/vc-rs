@@ -9,7 +9,8 @@ description = "Shared realtime application runtime for vc-rs frontends"
 workspace = true
 
 [features]
-default = ["windowsml", "tensorrt", "rnnoise", "gtcrn"]
+# Match the Windows-first CLI/GUI default without requiring an NVIDIA SDK.
+default = ["windowsml", "rnnoise", "gtcrn"]
 windowsml = ["vc-core/windowsml"]
 tensorrt = ["vc-core/tensorrt"]
 cuda = ["vc-core/cuda"]

@@ -10,7 +10,8 @@ workspace = true
 
 [features]
 ui-snapshots = ["egui_kittest/snapshot", "dep:egui-wgpu", "dep:wgpu", "dep:image", "dep:pollster"]
-default = ["windowsml", "tensorrt", "rnnoise", "gtcrn"]
+# Match the Windows-first CLI/runtime default without requiring an NVIDIA SDK.
+default = ["windowsml", "rnnoise", "gtcrn"]
 windowsml = ["vc-app/windowsml", "vc-core/windowsml"]
 tensorrt = ["vc-app/tensorrt", "vc-core/tensorrt"]
 cuda = ["vc-app/cuda", "vc-core/cuda"]

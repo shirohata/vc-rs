@@ -72,7 +72,7 @@ fn main() {
     println!("cargo:rustc-link-lib=dylib=cudart");
 
     // Propagate the resolved DLL versions to dependent build scripts (vc-cli,
-    // vc-vst3) as DEP_VC_RS_NATIVE_TENSORRT_{NVINFER_MAJOR,CUDA_MAJOR}. They use
+    // vc-gui, vc-vst3) as DEP_VC_RS_NATIVE_TENSORRT_{NVINFER_MAJOR,CUDA_MAJOR}. They use
     // these to emit `/DELAYLOAD:` linker args (which do not propagate from a lib
     // crate's build script), so nvinfer_<N>.dll / nvinfer_plugin_<N>.dll /
     // cudart64_<M>.dll are delay-loaded and resolved from the module directory.
