@@ -6,6 +6,10 @@ use anyhow::{anyhow, Result};
 use rubato::audioadapter_buffers::direct::SequentialSlice;
 use rubato::{Fft, FixedSync, Resampler, WindowFunction};
 
+#[path = "dsp/adaptive_output.rs"]
+mod adaptive_output;
+pub use adaptive_output::{AdaptiveOutputResampler, MAX_CLOCK_CORRECTION_PPM};
+
 // Explicit paths also let the CPU bench compile these private adapters from
 // their source module without exposing their fixed-hop API to library users.
 #[path = "dsp/fixed_hop.rs"]

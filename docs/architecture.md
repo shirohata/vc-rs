@@ -204,6 +204,26 @@ behind, bounded queues make the failure mode explicit: input overrun drops new
 input samples, output underrun emits silence, and output overflow drops newly
 produced samples rather than blocking the realtime callback.
 
+Standalone input and output streams can have different physical clocks even
+when they negotiate equal sample rates. Their final output uses the shared
+`dsp::AdaptiveOutputResampler`: a continuous 256-tap sinc filter with fixed
+input hops and variable output counts. A worker-only queue PI controller samples
+occupancy before inference at input-hop boundaries, low-pass filters callback
+quantization, limits correction to +/-2000 ppm and slews at 50 ppm/s. It learns
+the initial queue phase instead of targeting whole chunks. Startup reserves
+20 ms or two observed output callbacks, bounded to leave queue capacity for
+converted hops; nominal filter delay and the reserve are exposed in telemetry.
+The callbacks still only move ring samples and update atomics, and initial
+silence before the first queued output is not counted as an underrun.
+
+Input backlog, inference overload, queue faults and route changes suspend/rebase
+queue-error learning while retaining the bounded clock estimate. They do not
+reset the resampler per hop or hide actual overload counters. All prepared
+output, including quiet hops, is queued: two silent input increments can still
+have a voiced output tail, and omitting even truly silent chunks would corrupt
+the clock feedback. WAV and VST3 retain their existing fixed-duration adapters;
+the file timeline and DAW-owned clock do not need this standalone queue servo.
+
 Standalone sessions with a complete model set keep both RVC and passthrough
 routes available on the worker. The live passthrough flag is sampled once per
 input chunk. Passthrough stops invoking RVC inference and applies input gain,
@@ -355,6 +375,14 @@ startup once, and declares its fixed output-domain buffering delay. It requires
 the model and output hops to have exactly equal rational durations. Resetting
 this adapter per chunk, or appending a separately resampled overlap tail, breaks
 the filter timeline and can create audible seams.
+
+`ChunkConverter::new_adaptive` replaces that final adapter for standalone device
+streams only. It preserves the same nominal model/join hop durations but emits
+every variable-length ASRC result without rounding, truncating or padding it to
+the nominal device hop. Its filter remains active at equal nominal rates. The
+passthrough route uses that same DSP primitive for input-to-output rate conversion.
+Switching routes discards the inactive route's filter history as before, while
+rebasing the device controller's queue phase and retaining its clock estimate.
 
 `dsp::resample_mono` uses the same output adapter with finite draining and one
 startup-delay removal. It remains appropriate for isolated buffers such as the

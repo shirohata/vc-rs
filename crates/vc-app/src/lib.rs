@@ -5,6 +5,7 @@
 //! to GUI rendering, model loading, or other blocking work.
 
 pub mod audio;
+mod clock_drift;
 mod realtime;
 
 pub use realtime::{

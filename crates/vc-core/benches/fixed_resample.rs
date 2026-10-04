@@ -22,6 +22,18 @@ fn signal(rate: usize) -> Vec<f32> {
         .collect()
 }
 
+#[divan::bench(args = [32_000, 40_000, 44_100, 48_000])]
+fn adaptive_output_20ms(bencher: Bencher, from: usize) {
+    let input = signal(from)[..from / 50].to_vec();
+    let mut resampler = dsp::AdaptiveOutputResampler::new(from, 48_000, input.len()).unwrap();
+    let mut out = Vec::with_capacity(2 * 48_000 / 50);
+    resampler.set_correction_ppm(500.0).unwrap();
+    for _ in 0..10 {
+        resampler.process_into(&input, &mut out).unwrap();
+    }
+    bencher.bench_local(|| resampler.process_into(black_box(&input), &mut out).unwrap());
+}
+
 #[divan::bench(args = [16_000, 32_000, 44_100, 48_000, 96_000])]
 fn input_200ms(bencher: Bencher, from: usize) {
     let input = signal(from);

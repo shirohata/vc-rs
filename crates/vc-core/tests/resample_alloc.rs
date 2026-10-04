@@ -30,7 +30,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 
 #[test]
-fn warmed_independent_reference_windows_do_not_allocate() {
+fn warmed_reference_and_adaptive_resamplers_do_not_allocate() {
     let input: Vec<f32> = (0..4912).map(|i| (i as f32 * 0.07).sin() * 0.3).collect();
     for rate in [32_000, 40_000, 48_000] {
         let mut scratch = vc_core::dsp::ResampleMonoScratch::default();
@@ -47,5 +47,26 @@ fn warmed_independent_reference_windows_do_not_allocate() {
         }
         TRACK.store(false, Ordering::Relaxed);
         assert_eq!(ALLOCS.load(Ordering::Relaxed), 0, "16k->{rate} allocated");
+    }
+    for (from, to) in [(32_000, 48_000), (44_100, 48_000), (48_000, 48_000)] {
+        let hop = from / 50;
+        let signal = vec![0.25; hop];
+        let mut resampler = vc_core::dsp::AdaptiveOutputResampler::new(from, to, hop).unwrap();
+        let mut out = Vec::with_capacity(to / 25);
+        resampler.process_into(&signal, &mut out).unwrap();
+        ALLOCS.store(0, Ordering::Relaxed);
+        TRACK.store(true, Ordering::Relaxed);
+        for index in 0..50 {
+            resampler
+                .set_correction_ppm(index as f64 * 10.0 - 250.0)
+                .unwrap();
+            resampler.process_into(&signal, &mut out).unwrap();
+        }
+        TRACK.store(false, Ordering::Relaxed);
+        assert_eq!(
+            ALLOCS.load(Ordering::Relaxed),
+            0,
+            "adaptive {from}->{to} allocated"
+        );
     }
 }

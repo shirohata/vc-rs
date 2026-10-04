@@ -115,7 +115,7 @@ pub fn run_realtime(args: RunArgs) -> Result<()> {
                 })
                 .unwrap_or_else(|| "unknown".to_string());
             info!(
-                "state={:?} chunks={} infer={}us processing={}us content_delay_ms={} (nominal; excludes devices, queues and chunk accumulation) input_rms={:.8} output_rms={:.8} input_overruns={} output_underruns={} output_dropped_samples={} output_buffer_samples={}",
+                "state={:?} chunks={} infer={}us processing={}us content_delay_ms={} (nominal; excludes devices, queues and chunk accumulation) input_rms={:.8} output_rms={:.8} input_overruns={} output_underruns={} output_dropped_samples={} output_buffer_samples={} output_clock_ppm={:.2} output_clock_target_samples={} output_reserve_samples={} output_resample_delay_samples={:?}",
                 status.state,
                 metrics.chunks,
                 metrics.inference_us,
@@ -127,6 +127,10 @@ pub fn run_realtime(args: RunArgs) -> Result<()> {
                 metrics.output_underruns,
                 metrics.output_dropped_samples,
                 metrics.output_buffer_samples,
+                metrics.output_clock_correction_ppm,
+                metrics.output_clock_target_samples,
+                metrics.output_reserve_samples,
+                metrics.output_resample_delay_samples,
             );
         }
     }

@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
-use crate::dsp::OutputResampler;
+use crate::dsp::{AdaptiveOutputResampler, OutputResampler};
 use crate::sola::{self, ChunkSmoother, ChunkSmootherConfig, JoinDiagnostics, SmoothingKind};
 
 use super::{ContentDelay, ModelOutput, VoiceModel};
@@ -19,6 +19,7 @@ pub struct ChunkOutputConfig {
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ChunkStats {
+    /// Model input-silence hint; joined/resampled output may still contain voice.
     pub silent: bool,
     pub inference_time: Duration,
     /// Existing model-stage timers, forwarded without extra timing or allocation.
@@ -35,7 +36,7 @@ pub struct ChunkStats {
     pub model_output_samples: usize,
 }
 
-/// Owns the stateful model-to-fixed-output conversion shared by WAV and the
+/// Owns the stateful model-to-output conversion shared by WAV and the
 /// worker-side realtime paths.
 ///
 /// Keep this off audio callbacks: model processing, smoothing, and resampling
@@ -47,6 +48,9 @@ pub struct ChunkConverter<M> {
     output: ChunkOutputConfig,
     smoother: Option<(u32, ChunkSmoother)>,
     output_resampler: Option<OutputResampler>,
+    adaptive_output: Option<AdaptiveOutputResampler>,
+    adaptive_enabled: bool,
+    correction_ppm: f64,
     // Reused per-chunk buffers for the model's converted audio and output
     // pitchf, so `process_chunk` does not allocate them every chunk.
     model_audio: Vec<f32>,
@@ -60,6 +64,9 @@ impl<M: VoiceModel> ChunkConverter<M> {
             output,
             smoother: None,
             output_resampler: None,
+            adaptive_output: None,
+            adaptive_enabled: false,
+            correction_ppm: 0.0,
             model_audio: Vec::new(),
             model_pitchf: Vec::new(),
         }
@@ -69,13 +76,42 @@ impl<M: VoiceModel> ChunkConverter<M> {
         &mut self.model
     }
 
+    /// Standalone device streams have independent clocks. WAV and VST3 keep
+    /// `new`'s fixed-duration output; model/F0/join hops stay fixed in both modes.
+    pub fn new_adaptive(model: M, output: ChunkOutputConfig) -> Self {
+        let mut converter = Self::new(model, output);
+        converter.adaptive_enabled = true;
+        converter
+    }
+
+    pub fn set_output_clock_correction(&mut self, ppm: f64) -> Result<()> {
+        anyhow::ensure!(
+            self.adaptive_enabled
+                && ppm.is_finite()
+                && ppm.abs() <= crate::dsp::MAX_CLOCK_CORRECTION_PPM,
+            "invalid adaptive output correction"
+        );
+        if let Some(resampler) = &mut self.adaptive_output {
+            resampler.set_correction_ppm(ppm)?;
+        }
+        self.correction_ppm = ppm;
+        Ok(())
+    }
+
     pub fn output_chunk_samples(&self) -> usize {
         self.output.output_chunk_samples
     }
 
-    /// Output-side filter and incomplete-block buffering delay. This is known
-    /// after the first process/prime and is zero for identical sample rates.
+    /// Output-side filter/buffering delay after the first process/prime. Fixed
+    /// equal-rate mode bypasses resampling; adaptive device mode needs a filter
+    /// even at equal nominal rates because physical clocks can still differ.
     pub fn output_resample_delay_samples(&self) -> Option<usize> {
+        if self.adaptive_enabled {
+            return self
+                .adaptive_output
+                .as_ref()
+                .map(AdaptiveOutputResampler::delay_samples);
+        }
         self.output_resampler
             .as_ref()
             .map(OutputResampler::delay_samples)
@@ -138,6 +174,7 @@ impl<M: VoiceModel> ChunkConverter<M> {
         // Join history and the FFT/FIFO timeline are a single stream. Retaining
         // either across pass-through would replay stale audio on resumption.
         self.output_resampler = None;
+        self.adaptive_output = None;
     }
 
     pub fn process_chunk(
@@ -161,10 +198,17 @@ impl<M: VoiceModel> ChunkConverter<M> {
         // separate fields, so this does not conflict.
         let smoother = &mut self.smoother.as_mut().expect("smoother set above").1;
         smoother.process(&self.model_audio, &self.model_pitchf);
-        self.output_resampler
-            .as_mut()
-            .expect("resampler set above")
-            .process_fixed(smoother.output(), output_chunk_samples, out)?;
+        if self.adaptive_enabled {
+            self.adaptive_output
+                .as_mut()
+                .expect("resampler set above")
+                .process_into(smoother.output(), out)?;
+        } else {
+            self.output_resampler
+                .as_mut()
+                .expect("resampler set above")
+                .process_fixed(smoother.output(), output_chunk_samples, out)?;
+        }
         stats.content_delay_samples = Some(self.output_content_delay_samples());
         stats.processing_time = started.elapsed();
         Ok(stats)
@@ -204,14 +248,28 @@ impl<M: VoiceModel> ChunkConverter<M> {
                 sola_search_ms: self.output.sola_search_ms,
                 tail_discard_ms: self.output.tail_discard_ms,
             });
-            let resampler = OutputResampler::new_fixed(
-                model_sample_rate as usize,
-                self.output.output_sample_rate as usize,
-                smoother.chunk_samples(),
-                self.output.output_chunk_samples,
-            )?;
+            if self.adaptive_enabled {
+                anyhow::ensure!(
+                    smoother.chunk_samples() as u128 * self.output.output_sample_rate as u128
+                        == self.output.output_chunk_samples as u128 * model_sample_rate as u128,
+                    "model and nominal output hops must have equal durations"
+                );
+                let mut resampler = AdaptiveOutputResampler::new(
+                    model_sample_rate as usize,
+                    self.output.output_sample_rate as usize,
+                    smoother.chunk_samples(),
+                )?;
+                resampler.set_correction_ppm(self.correction_ppm)?;
+                self.adaptive_output = Some(resampler);
+            } else {
+                self.output_resampler = Some(OutputResampler::new_fixed(
+                    model_sample_rate as usize,
+                    self.output.output_sample_rate as usize,
+                    smoother.chunk_samples(),
+                    self.output.output_chunk_samples,
+                )?);
+            }
             self.smoother = Some((model_sample_rate, smoother));
-            self.output_resampler = Some(resampler);
         }
         Ok(())
     }
@@ -318,6 +376,47 @@ mod tests {
             volume: 0.0,
         };
         (audio, meta)
+    }
+
+    #[test]
+    fn adaptive_output_keeps_model_hops_fixed_and_resets_the_filter_timeline() {
+        for kind in [SmoothingKind::Sola, SmoothingKind::Psola] {
+            for from in [32_000, 40_000, 48_000] {
+                let settings = ChunkOutputConfig {
+                    kind,
+                    output_sample_rate: 48_000,
+                    output_chunk_samples: 960,
+                    crossfade_ms: 10,
+                    sola_search_ms: 0,
+                    tail_discard_ms: 0,
+                };
+                let outputs =
+                    (0..32).map(|_| Ok(output(vec![0.25; from as usize * 3 / 100], from)));
+                let mut converter = ChunkConverter::new_adaptive(FakeModel::new(outputs), settings);
+                converter.set_output_clock_correction(500.0).unwrap();
+                let mut initial = Vec::new();
+                converter.process_chunk(&[], from, &mut initial).unwrap();
+                let mut total = initial.len();
+                let mut out = Vec::new();
+                let mut varied = false;
+                for index in 0..30 {
+                    let stats = converter.process_chunk(&[], from, &mut out).unwrap();
+                    assert_eq!(stats.model_output_samples, from as usize * 3 / 100);
+                    varied |= out.len() != 960;
+                    total += out.len();
+                    if index > 2 {
+                        assert!(out.iter().all(|v| (*v - 0.25).abs() < 1e-4));
+                    }
+                }
+                assert!(varied);
+                assert!(total > 31 * 960 - converter.output_resample_delay_samples().unwrap());
+                assert_eq!(converter.model_mut().calls, 31);
+                converter.reset_streaming_state();
+                assert_eq!(converter.output_resample_delay_samples(), None);
+                converter.process_chunk(&[], from, &mut out).unwrap();
+                assert_eq!(initial, out);
+            }
+        }
     }
 
     #[test]

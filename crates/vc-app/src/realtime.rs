@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
+
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle, Thread};
@@ -27,6 +28,9 @@ const INPUT_QUEUE_CHUNKS: usize = 4;
 const OUTPUT_QUEUE_CHUNKS: usize = 4;
 const COMMAND_CAPACITY: usize = 8;
 
+#[cfg(test)]
+#[path = "realtime/clock_tests.rs"]
+mod clock_tests;
 mod device_test;
 use device_test::DeviceTestSession;
 pub use device_test::{DeviceTestConfig, DeviceTestSnapshot, TestOutput};
@@ -385,6 +389,12 @@ pub struct TelemetrySnapshot {
     pub output_underruns: u64,
     pub output_dropped_samples: u64,
     pub output_buffer_samples: u64,
+    /// Device ASRC correction; positive means more output samples per input hop.
+    pub output_clock_correction_ppm: f32,
+    /// Learned queue phase at the pre-inference hop boundary (not total latency).
+    pub output_clock_target_samples: u64,
+    pub output_reserve_samples: u64,
+    pub output_resample_delay_samples: Option<u64>,
 }
 
 #[derive(Default)]
@@ -403,6 +413,12 @@ struct Telemetry {
     output_underruns: AtomicU64,
     output_dropped_samples: AtomicU64,
     output_buffer_samples: AtomicU64,
+    output_clock_ppm_bits: AtomicU32,
+    output_clock_target_samples: AtomicU64,
+    output_reserve_samples: AtomicU64,
+    output_resample_delay_encoded: AtomicU64,
+    output_callback_frames: AtomicU64,
+    output_ready: AtomicBool,
 }
 
 impl Telemetry {
@@ -419,6 +435,13 @@ impl Telemetry {
         self.output_underruns.store(0, Ordering::Relaxed);
         self.output_dropped_samples.store(0, Ordering::Relaxed);
         self.output_buffer_samples.store(0, Ordering::Relaxed);
+        self.output_clock_ppm_bits.store(0, Ordering::Relaxed);
+        self.output_clock_target_samples.store(0, Ordering::Relaxed);
+        self.output_reserve_samples.store(0, Ordering::Relaxed);
+        self.output_resample_delay_encoded
+            .store(0, Ordering::Relaxed);
+        self.output_callback_frames.store(0, Ordering::Relaxed);
+        self.output_ready.store(false, Ordering::Relaxed);
     }
 
     fn snapshot(&self) -> TelemetrySnapshot {
@@ -438,6 +461,15 @@ impl Telemetry {
             output_underruns: self.output_underruns.load(Ordering::Relaxed),
             output_dropped_samples: self.output_dropped_samples.load(Ordering::Relaxed),
             output_buffer_samples: self.output_buffer_samples.load(Ordering::Relaxed),
+            output_clock_correction_ppm: f32::from_bits(
+                self.output_clock_ppm_bits.load(Ordering::Relaxed),
+            ),
+            output_clock_target_samples: self.output_clock_target_samples.load(Ordering::Relaxed),
+            output_reserve_samples: self.output_reserve_samples.load(Ordering::Relaxed),
+            output_resample_delay_samples: self
+                .output_resample_delay_encoded
+                .load(Ordering::Relaxed)
+                .checked_sub(1),
         }
     }
 }
@@ -799,6 +831,9 @@ struct PassthroughProcessor {
     gtcrn_backend: vc_core::denoise::GtcrnBackend,
     denoiser: PassthroughDenoiser,
     resampler: dsp::StreamingResampleMono,
+    adaptive_enabled: bool,
+    adaptive_resampler: Option<dsp::AdaptiveOutputResampler>,
+    correction_ppm: f64,
     input_scratch: Vec<f32>,
 }
 
@@ -822,6 +857,9 @@ impl PassthroughProcessor {
             gtcrn_backend,
             denoiser: PassthroughDenoiser::Off,
             resampler: dsp::StreamingResampleMono::new(input_rate as usize, output_rate as usize)?,
+            adaptive_enabled: false,
+            adaptive_resampler: None,
+            correction_ppm: 0.0,
             input_scratch: Vec::new(),
         };
         processor.reset(live)?;
@@ -829,6 +867,7 @@ impl PassthroughProcessor {
     }
 
     fn reset(&mut self, live: &LiveParams) -> Result<()> {
+        self.adaptive_resampler = None;
         self.resampler =
             dsp::StreamingResampleMono::new(self.input_rate as usize, self.output_rate as usize)?;
         self.denoiser = match self.mode {
@@ -867,6 +906,10 @@ impl PassthroughProcessor {
         };
         self.update_live_denoiser(live);
         Ok(())
+    }
+
+    fn enable_adaptive_output(&mut self) {
+        self.adaptive_enabled = true;
     }
 
     fn update_live_denoiser(&mut self, live: &LiveParams) {
@@ -921,7 +964,20 @@ impl PassthroughProcessor {
         }
         let input_rms = dsp::rms(&self.input_scratch);
         prepared.clear();
-        self.resampler.process_into(&self.input_scratch, prepared)?;
+        if self.adaptive_enabled {
+            if self.adaptive_resampler.is_none() {
+                self.adaptive_resampler = Some(dsp::AdaptiveOutputResampler::new(
+                    self.input_rate as usize,
+                    self.output_rate as usize,
+                    audio.len(),
+                )?);
+            }
+            let resampler = self.adaptive_resampler.as_mut().expect("initialized above");
+            resampler.set_correction_ppm(self.correction_ppm)?;
+            resampler.process_into(&self.input_scratch, prepared)?;
+        } else {
+            self.resampler.process_into(&self.input_scratch, prepared)?;
+        }
         let output_gain = live.output_gain.max(0.0);
         if (output_gain - 1.0).abs() > f32::EPSILON {
             for sample in prepared.iter_mut() {
@@ -958,6 +1014,42 @@ enum RuntimeModel {
 }
 
 impl RuntimeModel {
+    fn output_resample_delay_samples(&self, passthrough_requested: bool) -> Option<usize> {
+        match self {
+            Self::PassthroughOnly(passthrough) => passthrough
+                .adaptive_resampler
+                .as_ref()
+                .map(dsp::AdaptiveOutputResampler::delay_samples),
+            Self::Switchable {
+                passthrough, rvc, ..
+            } => {
+                if passthrough_requested {
+                    passthrough
+                        .adaptive_resampler
+                        .as_ref()
+                        .map(dsp::AdaptiveOutputResampler::delay_samples)
+                } else {
+                    rvc.output_resample_delay_samples()
+                }
+            }
+        }
+    }
+    fn set_clock_correction(&mut self, ppm: f64, passthrough_requested: bool) -> Result<()> {
+        match self {
+            Self::PassthroughOnly(passthrough) => passthrough.correction_ppm = ppm,
+            Self::Switchable {
+                passthrough, rvc, ..
+            } => {
+                if passthrough_requested {
+                    passthrough.correction_ppm = ppm;
+                } else {
+                    rvc.set_output_clock_correction(ppm)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn process_chunk(
         &mut self,
         audio: &[f32],
@@ -1113,7 +1205,7 @@ impl RealtimeSession {
         );
         let debug_input = Arc::new(Mutex::new(Vec::new()));
         let debug_output = Arc::new(Mutex::new(Vec::new()));
-        let passthrough_processor = PassthroughProcessor::new(
+        let mut passthrough_processor = PassthroughProcessor::new(
             config.denoiser_mode,
             config.noise_gate_shaping,
             input_rate,
@@ -1123,6 +1215,7 @@ impl RealtimeSession {
             gtcrn_backend,
             &current_live,
         )?;
+        passthrough_processor.enable_adaptive_output();
         let passthrough_live_switchable = config.has_complete_model_set();
         let model = if passthrough_live_switchable {
             let report_progress = |progress| {
@@ -1172,7 +1265,7 @@ impl RealtimeSession {
             };
             RuntimeModel::Switchable {
                 passthrough: passthrough_processor,
-                rvc: ChunkConverter::new(
+                rvc: ChunkConverter::new_adaptive(
                     pipeline,
                     ChunkOutputConfig {
                         kind: config.smoother.kind(),
@@ -1229,6 +1322,12 @@ impl RealtimeSession {
                     let mut model = model;
                     let mut input_acc = Vec::<f32>::with_capacity(input_chunk * 2);
                     let mut prepared = Vec::<f32>::with_capacity(output_chunk * 2);
+                    let mut clock = crate::clock_drift::ClockDriftController::new(output_rate);
+                    let hop_seconds = input_chunk as f64 / input_rate as f64;
+                    let mut previous_faults = (0, 0, 0);
+                    let mut previous_route = None;
+                    let mut previous_overload = false;
+                    let mut primed = false;
                     while worker_running.load(Ordering::SeqCst) {
                         if !accumulate_input_chunk(&mut input_consumer, &mut input_acc, input_chunk)
                         {
@@ -1252,19 +1351,45 @@ impl RealtimeSession {
                         }
                         let process_start = Instant::now();
                         let live_params = live.load();
+                        let passthrough_requested = passthrough_live.load(Ordering::Relaxed);
+                        let faults = (
+                            worker_telemetry.input_overruns.load(Ordering::Relaxed),
+                            worker_telemetry.output_underruns.load(Ordering::Relaxed),
+                            worker_telemetry
+                                .output_dropped_samples
+                                .load(Ordering::Relaxed),
+                        );
+                        if previous_route != Some(passthrough_requested) {
+                            clock.rebase();
+                            previous_route = Some(passthrough_requested);
+                        }
+                        let ppm = clock.update(
+                            output_capacity - output_producer.slots(),
+                            hop_seconds,
+                            primed
+                                && faults == previous_faults
+                                && !previous_overload
+                                && input_consumer.slots() < input_chunk,
+                        );
+                        previous_faults = faults;
                         // Meter on the worker, using the same gain snapshot as
                         // conversion. Never clip the input measurement: the GUI
                         // must still warn when denoising hides an overloaded mic.
                         let input_peak = sample_peak(&input_acc[..input_chunk])
                             * live_params.input_gain.max(0.0);
-                        let stats = model.process_chunk(
-                            &input_acc[..input_chunk],
-                            input_rate,
-                            &live_params,
-                            passthrough_live.load(Ordering::Relaxed),
-                            &mut prepared,
-                        );
+                        let stats = model
+                            .set_clock_correction(ppm, passthrough_requested)
+                            .and_then(|()| {
+                                model.process_chunk(
+                                    &input_acc[..input_chunk],
+                                    input_rate,
+                                    &live_params,
+                                    passthrough_requested,
+                                    &mut prepared,
+                                )
+                            });
                         let processing_time = process_start.elapsed();
+                        previous_overload = processing_time.as_secs_f64() >= hop_seconds;
                         input_acc.clear();
                         let stats = match stats {
                             Ok(stats) => stats,
@@ -1282,6 +1407,12 @@ impl RealtimeSession {
                             }
                         };
                         worker_telemetry.chunks.fetch_add(1, Ordering::Relaxed);
+                        worker_telemetry.output_resample_delay_encoded.store(
+                            model
+                                .output_resample_delay_samples(passthrough_requested)
+                                .map_or(0, |samples| samples as u64 + 1),
+                            Ordering::Relaxed,
+                        );
                         worker_telemetry
                             .inference_us
                             .store(stats.inference_time.as_micros() as u64, Ordering::Relaxed);
@@ -1306,23 +1437,39 @@ impl RealtimeSession {
                         worker_telemetry
                             .output_peak_bits
                             .store(sample_peak(&prepared).to_bits(), Ordering::Relaxed);
-                        let output_silent = stats.silent;
                         if capture_output {
                             if let Ok(mut samples) = worker_debug_output.lock() {
                                 samples.extend_from_slice(&prepared);
                             }
                         }
-                        let should_queue = !output_silent
-                            || should_queue_silent_output(
-                                output_capacity - output_producer.slots(),
+                        if !primed {
+                            let reserve = crate::clock_drift::startup_reserve(
+                                output_rate,
+                                worker_telemetry
+                                    .output_callback_frames
+                                    .load(Ordering::Relaxed)
+                                    as usize,
                                 output_chunk,
                             );
-                        if should_queue {
-                            let (_, remainder) = output_producer.push_partial_slice(&prepared);
+                            for _ in 0..reserve {
+                                let _ = output_producer.push(0.0);
+                            }
                             worker_telemetry
-                                .output_dropped_samples
-                                .fetch_add(remainder.len() as u64, Ordering::Relaxed);
+                                .output_reserve_samples
+                                .store(reserve as u64, Ordering::Relaxed);
+                            primed = true;
                         }
+                        // Input silence can precede voiced output tails.
+                        // Moreover, omitting even truly quiet hops would fool
+                        // the clock servo. Queue the entire output timeline.
+                        queue_output(&mut output_producer, &prepared, &worker_telemetry);
+                        worker_telemetry.output_ready.store(true, Ordering::Release);
+                        worker_telemetry
+                            .output_clock_ppm_bits
+                            .store((ppm as f32).to_bits(), Ordering::Relaxed);
+                        worker_telemetry
+                            .output_clock_target_samples
+                            .store(clock.target_samples() as u64, Ordering::Relaxed);
                         worker_telemetry.output_buffer_samples.store(
                             (output_capacity - output_producer.slots()) as u64,
                             Ordering::Relaxed,
@@ -1405,13 +1552,11 @@ impl Drop for RealtimeSession {
     }
 }
 
-fn should_queue_silent_output(buffered: usize, output_chunk: usize) -> bool {
-    // Only append silence when at most one chunk is already queued; appending
-    // may bring the ring to two chunks. Skip this newly generated chunk above
-    // the threshold, rather than removing samples already queued for playback.
-    // This drains excess output backlog during quiet periods, but does not
-    // reset or advance the upstream resampler/model/smoother signal histories.
-    buffered <= output_chunk
+fn queue_output(producer: &mut rtrb::Producer<f32>, prepared: &[f32], telemetry: &Telemetry) {
+    let (_, remainder) = producer.push_partial_slice(prepared);
+    telemetry
+        .output_dropped_samples
+        .fetch_add(remainder.len() as u64, Ordering::Relaxed);
 }
 
 /// Streams plus the worker-side ring-buffer ends created in the same attempt.
@@ -1456,7 +1601,14 @@ fn build_streams(
     let output_running = Arc::clone(running);
     let output_telemetry = Arc::clone(telemetry);
     let output_stream = audio.build_output_stream(move |out| {
+        output_telemetry
+            .output_callback_frames
+            .fetch_max(out.len() as u64, Ordering::Relaxed);
         if !output_running.load(Ordering::Relaxed) {
+            out.fill(0.0);
+            return;
+        }
+        if !output_telemetry.output_ready.load(Ordering::Acquire) {
             out.fill(0.0);
             return;
         }
@@ -1771,10 +1923,18 @@ mod tests {
     }
 
     #[test]
-    fn silent_output_does_not_fill_the_output_ring() {
-        assert!(should_queue_silent_output(0, 1_000));
-        assert!(should_queue_silent_output(1_000, 1_000));
-        assert!(!should_queue_silent_output(1_001, 1_000));
+    fn quiet_and_weak_output_are_queued_and_only_overflow_is_counted() {
+        let (mut tx, mut rx) = RingBuffer::new(16);
+        let telemetry = Telemetry::default();
+        tx.push_entire_slice(&[0.5; 8]).unwrap();
+        let output = [0.0, 1e-12, 0.5, -0.0];
+        queue_output(&mut tx, &output, &telemetry);
+        assert_eq!(telemetry.snapshot().output_dropped_samples, 0);
+        let mut result = [0.0; 12];
+        rx.pop_entire_slice(&mut result).unwrap();
+        assert_eq!(&result[8..], &output);
+        queue_output(&mut tx, &[0.0; 20], &telemetry);
+        assert_eq!(telemetry.snapshot().output_dropped_samples, 4);
     }
 
     #[test]
