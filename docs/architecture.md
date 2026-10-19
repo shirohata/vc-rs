@@ -356,6 +356,14 @@ manual or automatic gain. These operations happen before chunk joining so the
 smoother compares and crossfades audio at the level that will actually be
 played.
 
+RMS mixing measures 40 ms forward windows at 10 ms sample positions and
+interpolates on that fixed grid. Stretching the envelope to each candidate's
+length would give shared source times different gains in adjacent candidates.
+After the final measurement anchor it holds that value; the existing
+zero-padded analysis windows at the candidate tail remain a separate boundary
+policy. This adds no lookahead, stream state, or content delay. Different raw
+model generations can still require different gains on overlapping content.
+
 ### Continuous resampling with fixed hops
 
 Rubato can emit samples in bursts whose sizes differ from the logical RVC hop.

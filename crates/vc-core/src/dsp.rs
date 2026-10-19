@@ -228,7 +228,7 @@ pub fn compute_rms_envelope_into(input: &[f32], sample_rate: usize, output: &mut
         return;
     }
 
-    let hop_len = (sample_rate / 100).max(1);
+    let hop_len = rms_envelope_hop_samples(sample_rate);
     let frame_len = hop_len.saturating_mul(4).max(1);
     let frame_count = input.len().div_ceil(hop_len);
     output.reserve(frame_count);
@@ -243,10 +243,10 @@ pub fn compute_rms_envelope_into(input: &[f32], sample_rate: usize, output: &mut
                 sum += square;
             }
         }
-        // Match the RVC WebUI-style frame grid by keeping 0, hop, 2*hop...
-        // starts and treating missing tail samples as zero padding. Do not
-        // change this to a short-frame denominator without retuning tests and
-        // comparing the SOLA-before envelope behavior.
+        // Points belong to sample positions 0, hop, 2*hop...; RMS mixing must
+        // preserve that grid across overlapping candidates of different lengths.
+        // Keep the existing forward window and zero-padded tail denominator;
+        // their finite-window boundary behavior is separate from interpolation.
         output.push((sum / frame_len as f32).sqrt());
     }
 }
@@ -324,15 +324,15 @@ pub fn apply_rms_mix_with_scratch(
     // slower powf path without approximating nearby rates, which would change
     // the level curve.
     let gain_curve = RmsMixGainCurve::for_exponent(exponent);
-    let output_len = output.len();
+    let hop_len = rms_envelope_hop_samples(sample_rate);
 
     for (index, sample) in output.iter_mut().enumerate() {
         if !sample.is_finite() {
             *sample = 0.0;
             continue;
         }
-        let in_rms = linear_resample_envelope_at(&scratch.input_rms, index, output_len);
-        let out_rms = linear_resample_envelope_at(&scratch.output_rms, index, output_len);
+        let in_rms = rms_envelope_at(&scratch.input_rms, index, hop_len);
+        let out_rms = rms_envelope_at(&scratch.output_rms, index, hop_len);
         let out_rms = finite_nonnegative(out_rms).max(1e-3);
         let ratio = finite_nonnegative(in_rms) / out_rms;
         let gain = gain_curve.gain(ratio);
@@ -753,22 +753,24 @@ fn finite_nonnegative(value: f32) -> f32 {
     }
 }
 
-fn linear_resample_envelope_at(points: &[f32], index: usize, output_len: usize) -> f32 {
-    if output_len == 0 || points.is_empty() {
+fn rms_envelope_hop_samples(sample_rate: usize) -> usize {
+    (sample_rate / 100).max(1)
+}
+
+fn rms_envelope_at(points: &[f32], index: usize, hop_samples: usize) -> f32 {
+    if points.is_empty() {
         return 0.0;
     }
-    if points.len() == 1 || output_len == 1 {
-        return finite_nonnegative(points[0]);
+    let left = index / hop_samples;
+    // Hold the final measured value after its anchor. Do not stretch it to
+    // the candidate end: that changes the gain at shared source times when
+    // the next model window advances. No extra lookahead or delay is added.
+    if left >= points.len() - 1 {
+        return finite_nonnegative(points[points.len() - 1]);
     }
-
-    let last_point = points.len() - 1;
-    let last_output = output_len - 1;
-    let position = index as f32 * last_point as f32 / last_output as f32;
-    let left = position.floor() as usize;
-    let right = (left + 1).min(last_point);
-    let frac = position - left as f32;
+    let frac = (index % hop_samples) as f32 / hop_samples as f32;
     let left_value = finite_nonnegative(points[left]);
-    let right_value = finite_nonnegative(points[right]);
+    let right_value = finite_nonnegative(points[left + 1]);
     left_value + (right_value - left_value) * frac
 }
 
@@ -992,6 +994,23 @@ mod tests {
     }
 
     #[test]
+    fn rms_envelope_sampling_preserves_anchors_and_holds_the_final_value() {
+        let points = [0.0, 1.0, 0.25];
+        for (sample, expected) in [
+            (0, 0.0),
+            (2, 0.5),
+            (4, 1.0),
+            (6, 0.625),
+            (8, 0.25),
+            (99, 0.25),
+        ] {
+            assert_eq!(rms_envelope_at(&points, sample, 4), expected);
+        }
+        assert_eq!(rms_envelope_at(&[], 2, 4), 0.0);
+        assert_eq!(rms_envelope_at(&[0.3], 2, 4), 0.3);
+    }
+
+    #[test]
     fn rms_mix_rate_one_keeps_output_unchanged() {
         let input = [0.1, 0.2, 0.3, 0.4];
         let mut output = [0.4, -0.2, 0.1, -0.3];
@@ -1022,6 +1041,39 @@ mod tests {
         apply_rms_mix(&input, &mut output, 100, 0.0);
 
         assert_abs_diff_eq!(rms(&output), rms(&input), epsilon = 1e-6);
+    }
+
+    #[test]
+    fn rms_mix_keeps_shared_time_gain_independent_of_window_length() {
+        for sample_rate in [32_000, 40_000, 44_100, 48_000] {
+            let hop = sample_rate / 100;
+            let window = 22 * hop;
+            let advance = 10 * hop;
+            let next_window = window + 3 * hop + hop / 2;
+            let input = vec![0.1; advance + next_window];
+            // Both candidates contain exactly the same underlying waveform.
+            // Only their boundaries differ; no model randomness or SOLA search
+            // can account for a gain difference at a shared source sample.
+            let generated: Vec<f32> = (0..input.len())
+                .map(|i| if i < window - 5 * hop / 4 { 0.2 } else { 0.8 })
+                .collect();
+            for mix in [0.0, 0.5, 0.9] {
+                let mut previous = generated[..window].to_vec();
+                let mut next = generated[advance..advance + next_window].to_vec();
+                apply_rms_mix(&input[..window], &mut previous, sample_rate, mix);
+                apply_rms_mix(
+                    &input[advance..advance + next_window],
+                    &mut next,
+                    sample_rate,
+                    mix,
+                );
+                // Leave a complete 40 ms forward window on both sides. Finite
+                // candidate zero padding is a separate boundary policy.
+                for i in advance..window - 4 * hop {
+                    assert_abs_diff_eq!(previous[i], next[i - advance], epsilon = 1e-6);
+                }
+            }
+        }
     }
 
     #[test]
@@ -1058,6 +1110,27 @@ mod tests {
         let mut short = vec![1.0];
         apply_rms_mix(&[0.0], &mut short, 100, 0.0);
         assert_abs_diff_eq!(short[0], 0.0, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn rms_mix_preserves_constant_gain_for_partial_hops_and_silence() {
+        for sample_rate in [32_000, 40_000, 44_100, 48_000] {
+            let hop = sample_rate / 100;
+            for len in [1, hop - 1, hop, hop + 1, 7 * hop + hop / 3] {
+                let input = vec![0.4; len];
+                let mut output = vec![0.8; len];
+                apply_rms_mix(&input, &mut output, sample_rate, 0.0);
+                assert!(output.iter().all(|sample| (*sample - 0.4).abs() < 1e-6));
+
+                output.fill(0.0);
+                apply_rms_mix(&input, &mut output, sample_rate, 0.0);
+                assert!(output.iter().all(|sample| *sample == 0.0));
+
+                output.fill(0.8);
+                apply_rms_mix(&vec![0.0; len], &mut output, sample_rate, 0.0);
+                assert!(output.iter().all(|sample| *sample == 0.0));
+            }
+        }
     }
 
     #[test]
