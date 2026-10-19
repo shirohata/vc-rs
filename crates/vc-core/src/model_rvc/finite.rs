@@ -248,7 +248,11 @@ mod tests {
 
     #[test]
     fn finite_identity_preserves_both_ends_and_partial_chunks() {
-        for kind in [SmoothingKind::Sola, SmoothingKind::Psola] {
+        for kind in [
+            SmoothingKind::Sola,
+            SmoothingKind::Psola,
+            SmoothingKind::PhaseVocoder,
+        ] {
             for len in [0, 1, 79, 1599, 1600, 1601, 3199, 3200, 3201] {
                 for (delay, fade, tail) in [(0, 0, 0), (0, 10, 0), (768, 10, 10), (2400, 85, 20)] {
                     let input: Vec<f32> = (0..len)
@@ -301,7 +305,11 @@ mod tests {
         let mut input = vec![0.0; 3201];
         input[..160].fill(0.5);
         input[3041..].fill(0.4);
-        for kind in [SmoothingKind::Sola, SmoothingKind::Psola] {
+        for kind in [
+            SmoothingKind::Sola,
+            SmoothingKind::Psola,
+            SmoothingKind::PhaseVocoder,
+        ] {
             let converter = converter_with_search(kind, 768, 10, 10, 16_000, 12);
             let result = convert_finite(converter, &input, 16_000, 1600).unwrap();
             assert_eq!(result.audio.len(), input.len());

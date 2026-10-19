@@ -169,9 +169,9 @@ struct GuiSettings {
     chunk_ms: u32,
     crossfade_ms: u32,
     sola_search_ms: u32,
-    smoother: String,
     rvc_output_tail_discard_ms: u32,
     extra_convert_ms: u32,
+    smoother: String,
     f0_threshold: f32,
     silence_threshold: f32,
     pitch_shift: f32,
@@ -223,9 +223,9 @@ impl Default for GuiSettings {
             chunk_ms: 500,
             crossfade_ms: GUI_CROSSFADE_MS,
             sola_search_ms: GUI_SOLA_SEARCH_MS,
-            smoother: "sola".to_string(),
             rvc_output_tail_discard_ms: 10,
             extra_convert_ms: 100,
+            smoother: "phase-vocoder".to_string(),
             f0_threshold: 0.3,
             silence_threshold: 0.0001,
             pitch_shift: 0.0,
@@ -330,10 +330,12 @@ impl GuiSettings {
             chunk_ms: self.chunk_ms,
             crossfade_ms: GUI_CROSSFADE_MS,
             sola_search_ms: GUI_SOLA_SEARCH_MS,
-            smoother: if self.smoother == "psola" {
-                Smoother::Psola
-            } else {
-                Smoother::Sola
+            // Missing keys use the new default; explicit saved choices retain
+            // their behavior, including the legacy SOLA fallback for unknown values.
+            smoother: match self.smoother.as_str() {
+                "psola" => Smoother::Psola,
+                "phase-vocoder" => Smoother::PhaseVocoder,
+                _ => Smoother::Sola,
             },
             rvc_output_tail_discard_ms: self.rvc_output_tail_discard_ms,
             extra_convert_ms: self.extra_convert_ms,
@@ -1417,6 +1419,25 @@ passthrough = true
         assert_eq!(config.wasapi_buffer_ms, 0);
         assert_eq!(config.crossfade_ms, GUI_CROSSFADE_MS);
         assert_eq!(config.sola_search_ms, GUI_SOLA_SEARCH_MS);
+    }
+
+    #[test]
+    fn smoother_defaults_only_when_missing_and_preserves_saved_choices() {
+        for (source, expected) in [
+            ("", Smoother::PhaseVocoder),
+            ("smoother = 'sola'", Smoother::Sola),
+            ("smoother = 'psola'", Smoother::Psola),
+            ("smoother = 'phase-vocoder'", Smoother::PhaseVocoder),
+            ("smoother = 'unknown'", Smoother::Sola),
+        ] {
+            let mut settings: GuiSettings = toml::from_str(source).unwrap();
+            settings.normalize_gui_managed_settings();
+            assert_eq!(settings.realtime().unwrap().smoother, expected);
+            let saved = toml::to_string(&settings).unwrap();
+            let restored: GuiSettings = toml::from_str(&saved).unwrap();
+            assert_eq!(restored.smoother, settings.smoother);
+            assert_eq!(restored.realtime().unwrap().smoother, expected);
+        }
     }
 
     #[test]

@@ -54,7 +54,11 @@ impl VoiceModel for RollingIdentity {
 
 #[test]
 fn two_silent_inputs_preserve_the_still_voiced_joined_tail() {
-    for kind in [SmoothingKind::Sola, SmoothingKind::Psola] {
+    for kind in [
+        SmoothingKind::Sola,
+        SmoothingKind::Psola,
+        SmoothingKind::PhaseVocoder,
+    ] {
         for adaptive in [false, true] {
             let model = RollingIdentity {
                 history: Vec::new(),

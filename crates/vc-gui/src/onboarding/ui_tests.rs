@@ -56,6 +56,55 @@ fn ui_normal_screen_and_start_do_not_spawn_model_validation() {
 }
 
 #[test]
+fn ui_smoother_selection_is_staged_and_used_on_start() {
+    for lang in [text::Language::English, text::Language::Japanese] {
+        for (value, label, expected) in [
+            ("sola", "SOLA", Smoother::Sola),
+            ("psola", "PSOLA", Smoother::Psola),
+            ("phase-vocoder", "Phase vocoder", Smoother::PhaseVocoder),
+        ] {
+            let mut fixture = ready_main_fixture(lang);
+            // Start from a different choice so each case exercises an edit.
+            fixture.app.settings.smoother = if value == "sola" { "psola" } else { "sola" }.into();
+            let mut h = harness(fixture);
+            h.get_by_label(lang.text("Backend Details")).scroll_to_me();
+            h.run_steps(8);
+            h.get_by_label(lang.text("Backend Details")).click();
+            h.run_steps(4);
+            h.get_by_label(lang.text("Smoother")).scroll_to_me();
+            h.run_steps(8);
+            h.get_by_label(lang.text("Smoother")).click();
+            h.run_steps(4);
+            h.get_by_label(label).click();
+            h.run_steps(4);
+            assert_eq!(h.state().app.settings.smoother, value);
+            let saved = toml::to_string(&h.state().app.settings).unwrap();
+            let restored: GuiSettings = toml::from_str(&saved).unwrap();
+            assert_eq!(restored.realtime().unwrap().smoother, expected);
+            assert_eq!(h.state().app.onboarding.effects.start_requests, 0);
+            h.get_by_label(lang.text(text::START)).scroll_to_me();
+            h.run_steps(8);
+            h.get_by_label(lang.text(text::START)).click();
+            h.run_steps(4);
+            assert_eq!(h.state().app.onboarding.effects.start_requests, 1);
+            assert_eq!(
+                h.state()
+                    .app
+                    .onboarding
+                    .normal
+                    .requested
+                    .as_ref()
+                    .unwrap()
+                    .realtime()
+                    .unwrap()
+                    .smoother,
+                expected
+            );
+        }
+    }
+}
+
+#[test]
 fn ui_start_does_not_redirect_for_setup_checks() {
     for lang in [text::Language::English, text::Language::Japanese] {
         for check_state in 0..3 {

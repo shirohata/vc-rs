@@ -15,7 +15,7 @@ chunk-conversion, smoothing, or output-assembly implementations.
 ## Module Boundaries
 
 - `vc-core`: shared audio-I/O-agnostic conversion components, including
-  `RvcPipeline`, `ChunkConverter`, `convert_finite`, DSP, and SOLA/PSOLA smoothing.
+  `RvcPipeline`, `ChunkConverter`, `convert_finite`, DSP, and SOLA/PSOLA/phase-vocoder smoothing.
 - `vc-app`: shared standalone realtime runtime for CLI and GUI, including device
   I/O, bounded queues, worker orchestration, and metrics. The audio host is the
   `AudioHost` enum (cpal-`HostId`-aligned: `Wasapi`/`Asio`/`CoreAudio`/`Alsa`/`Jack`)
@@ -121,7 +121,7 @@ RMVPE against CPU with silence and fixed harmonic inputs. Set
 regression guards the RMVPE workaround without shipping those large models.
 
 All conversion modes should use the shared `vc-core` model and chunk-conversion
-components. Inference, model streaming state, output shaping, and SOLA/PSOLA
+components. Inference, model streaming state, output shaping, and chunk
 joining must not be reimplemented in a front-end merely because its audio source
 or scheduler differs.
 
@@ -169,7 +169,7 @@ flowchart LR
     in_cb --> in_ring["Input ring buffer"]
     in_ring --> worker["Worker thread"]
     worker --> model["RVC pipeline"]
-    model --> smooth["SOLA / PSOLA smoother"]
+    model --> smooth["SOLA / PSOLA / Phase vocoder"]
     smooth --> resample["Persistent output resampler / FIFO"]
     resample --> out_ring["Output ring buffer"]
     out_ring --> out_cb["Output audio callback"]
@@ -294,7 +294,7 @@ flowchart TD
     coarse --> rvc
     rvc --> tail["Select stable output tail"]
     tail --> level["RMS/envelope/gain shaping"]
-    level --> join["SOLA or PSOLA chunk join"]
+    level --> join["SOLA / PSOLA / Phase vocoder chunk join"]
     join --> output_resample["Persistent output resampler / FIFO"]
     output_resample --> device["Fixed device-rate output chunk"]
 ```
@@ -367,7 +367,7 @@ hops; it never truncates a burst or inserts fresh silence to conceal an underrun
 An underrun is an error in the timing contract. Equal rates bypass resampling
 and add no resampler delay.
 
-After SOLA/PSOLA joins in the native model rate, `ChunkConverter` sends only the
+After joining in the native model rate, `ChunkConverter` sends only the
 committed, non-overlapping hop to its persistent `dsp::OutputResampler`.
 Candidate search/crossfade margins must not be resampled again as new audio.
 The output adapter retains filter and FIFO state across chunks, removes filter
@@ -557,6 +557,56 @@ the supported range, PSOLA falls back to normal SOLA. That fallback is important
 forcing pitch-synchronous alignment on noisy consonants or silence usually makes
 the boundary worse.
 
+## Phase vocoder
+
+`phase-vocoder` retains the same SOLA alignment, model-domain candidate trimming,
+overlap cap, startup, history, and fixed output hop as `sola`. It replaces only
+the crossfade with the phase-interpolated overlap synthesis in
+[Applio 3.6.4](https://github.com/IAHispano/Applio/blob/3.6.4/rvc/realtime/core.py#L32-L89).
+This deliberately retains vc-rs's correlation weighting and native model sample
+rate rather than reproducing Applio's entire 48 kHz output path. No model or F0
+change is needed. The shared standalone runtime and CLI (`run` and `wav`)
+default to phase vocoder, as do GUI and VST3 when no `smoother` setting is saved.
+All front-ends allow SOLA, PSOLA, and phase-vocoder selection. GUI settings and
+VST3 project/config state preserve explicit saved choices; changes apply on
+Start / Restart or Load / Reload respectively.
+
+The overlap uses sin² fade-in, complementary fade-out, and the square root of
+their product as an FFT analysis/synthesis window. Each real-FFT bin's wrapped
+phase difference is spread across the overlap; the summed sinusoidal synthesis
+is added to the squared time-domain fades. DC and even-length Nyquist bins are
+not doubled; the final positive bin of an odd-length FFT is doubled. This is
+not a time-stretching STFT, nor an inverse FFT with one static phase per bin.
+
+FFT plans/windows/scratch are initialized on the worker and reused at fixed
+overlap lengths. The off-bin synthesis uses a centered degree-14 expansion of
+`exp(i * delta * (t/N - 1/2))`, evaluated by 15 real inverse FFTs. Since wrapped
+`delta` is within +/-pi, the expansion argument is bounded by pi/2; its complex
+exponential remainder is below 3.3e-9 before spectral magnitude weighting.
+This reduces the old direct sinusoidal sum from O(N²) to O(15 N log N), with
+O(N) storage. Inverse FFTs and accumulation use f64. Forward FFTs/phase extraction
+retain their original f32 precision so the wrapped-phase branch at +/-pi does
+not change. DC/even-Nyquist imaginary coefficients must survive between orders,
+although each inverse FFT's scratch spectrum has real endpoints.
+
+The direct DFT and realistic-length direct-sum regression tests bound output
+error, including opposite spectra and odd/even overlap lengths. A short model
+candidate can rebuild the FFT on the worker; no work runs on an audio callback.
+Nominal content delay is unchanged for matched timing settings. Converter
+resets recreate the overlap state just as with SOLA/PSOLA.
+
+`ChunkStats::smoothing_time` times alignment/crossfade only, excluding initial
+FFT planning and output resampling; it is included in `processing_time`.
+WAV `--performance-report` exposes `smoothing_ms` and `processing_ms` with
+warmup, steady-state, and drain results separated. Compare these together with
+the join CSV and listening tests; a low boundary step alone does not establish
+good sound throughout a phase-interpolated overlap.
+
+`just bench-phase-vocoder` measures the crossfade alone,
+without inference, SOLA search, output resampling or FFT planning. Run it without
+concurrent builds or other measurements when comparing changes. The existing
+`sola_bench::prepare_model_output_chunk` benchmark includes alignment as well.
+
 ## Latency Trade-offs
 
 End-to-end latency is the sum of device buffering, input chunk accumulation,
@@ -574,7 +624,7 @@ time are not content delay; a denoiser delay already compensated by offline
 preprocessing must not be counted again.
 
 The join hold uses the actual capped crossfade, search allowance, and tail
-discard; with crossfade disabled only tail discard remains. SOLA/PSOLA can
+discard; with crossfade disabled only tail discard remains. All three smoothers can
 advance the selected content within the search window, so this hold is a
 nominal bound rather than an exact source-time mapping for every chunk.
 An unprimed smoother's first silent output hop is separate startup behavior.

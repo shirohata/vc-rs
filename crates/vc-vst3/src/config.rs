@@ -56,7 +56,7 @@ pub struct PluginConfig {
     pub sola_search_ms: u32,
     pub rvc_output_tail_discard_ms: u32,
     pub extra_convert_ms: u32,
-    /// "sola" | "psola".
+    /// "sola" | "psola" | "phase-vocoder". Applied on Load / Reload.
     pub smoother: String,
     pub volume_envelope: bool,
     pub rms_mix_rate: f32,
@@ -87,7 +87,7 @@ impl Default for PluginConfig {
             sola_search_ms: 12,
             rvc_output_tail_discard_ms: 10,
             extra_convert_ms: 100,
-            smoother: "sola".to_string(),
+            smoother: "phase-vocoder".to_string(),
             volume_envelope: false,
             rms_mix_rate: 0.0,
             auto_output_gain: false,
@@ -121,8 +121,11 @@ impl PluginConfig {
     }
 
     pub fn smoothing_kind(&self) -> vc_core::sola::SmoothingKind {
+        // Serde supplies the new default only for missing keys. Preserve saved
+        // selections and the legacy SOLA fallback for unrecognized values.
         match self.smoother.trim().to_ascii_lowercase().as_str() {
             "psola" => vc_core::sola::SmoothingKind::Psola,
+            "phase-vocoder" => vc_core::sola::SmoothingKind::PhaseVocoder,
             _ => vc_core::sola::SmoothingKind::Sola,
         }
     }
@@ -288,6 +291,25 @@ fn os_config_dir() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn smoother_defaults_only_when_missing_and_preserves_saved_choices() {
+        use vc_core::sola::SmoothingKind;
+        for (source, expected) in [
+            ("", SmoothingKind::PhaseVocoder),
+            ("smoother = 'sola'", SmoothingKind::Sola),
+            ("smoother = 'psola'", SmoothingKind::Psola),
+            ("smoother = 'phase-vocoder'", SmoothingKind::PhaseVocoder),
+            ("smoother = 'unknown'", SmoothingKind::Sola),
+        ] {
+            let settings: super::PluginConfig = toml::from_str(source).unwrap();
+            assert_eq!(settings.smoothing_kind(), expected);
+            let saved = toml::to_string(&settings).unwrap();
+            let restored: super::PluginConfig = toml::from_str(&saved).unwrap();
+            assert_eq!(restored.smoother, settings.smoother);
+            assert_eq!(restored.smoothing_kind(), expected);
+        }
+    }
+
     #[test]
     fn openvino_device_selection_survives_plugin_state_round_trip() {
         for name in [

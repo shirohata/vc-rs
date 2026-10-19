@@ -136,12 +136,54 @@ lower `--chunk-ms`** to reduce latency.
 - `--rms-mix-rate <0.0-1.0>`: closer to 0.0 follows the input's loudness
   dynamics, closer to 1.0 keeps the model output's loudness (default: 0.0).
 
+`--smoother sola|psola|phase-vocoder` selects the shared chunk joiner for `run`
+and `wav` (default: `phase-vocoder`), including quality comparisons and diagnostics.
+GUI and VST3 also offer all three joiners. They default to `phase-vocoder` when
+`smoother` is absent and honor explicit saved settings. Phase vocoder uses
+SOLA alignment followed by phase-interpolated crossfading and may increase
+processing time.
+
 Other options the GUI keeps pinned are also available from the CLI:
-`--smoother sola|psola`, `--sola-search-ms`, `--crossfade-ms`,
+`--sola-search-ms`, `--crossfade-ms`,
 `--rvc-output-tail-discard-ms`, `--gpu-priority normal|high`,
 `--gpu-device-id <ID>` (CUDA/native TensorRT only), and the WASAPI exclusive
 controls (`--wasapi-exclusive*`, `--wasapi-buffer-ms`).
 See `--help` for the full list and defaults.
+
+### Compare smoother quality and processing time
+
+From a repository checkout, run all three joiners with the same model and
+timing settings. Paths below are examples; supply your compatible voice model:
+
+```powershell
+just compare-smoothers -InputWav clip.wav -Model voice.onnx `
+    -Embedder assets/content_vec_500.onnx -F0Model assets/rmvpe.onnx `
+    -ChunkMs 100 -CrossfadeMs 50 -SolaSearchMs 12 `
+    -OutDir target/smoother-comparison -KeepArtifacts
+```
+
+The output directory must be new. This builds the self-contained CPU CLI once
+and retains one WAV, join CSV, and timing JSON per configuration, plus
+`summary.csv`. Use a clip long enough to leave steady-state chunks after the
+default three warmup chunks. `-Smoother sola,phase-vocoder` selects a subset.
+
+Listen to consonants, sustained vowels, silence transitions and the full
+overlap, alongside the CSV seam metrics. Compare `steady.smoothing_ms` for
+join cost and `steady.processing_ms` for the full model/join/resample cost
+(mean, p95, p99, maximum and budget misses). These offline times exclude audio
+devices/queues and do not measure microphone-to-speaker latency. The report's
+existing `configuration` field records the selected smoother and timings.
+
+For a different backend, use the matching CLI's `wav --smoother phase-vocoder`
+with `--join-report` and `--performance-report`, or run
+`scripts/benchmark-wav.ps1` separately for each smoother using
+`-ExtraArgs @('--smoother', 'phase-vocoder')`. Keep all other settings fixed.
+`just bench sola_bench::prepare_model_output_chunk` compares pure joining cost
+and steady-state allocations without model inference.
+`just bench-phase-vocoder` isolates phase-vocoder crossfading
+itself, including both analysis FFTs and synthesis but excluding SOLA alignment,
+model inference, resampling and initial FFT planning. It covers 10–200 ms
+overlaps at 48 kHz; use it without concurrent builds for optimization comparisons.
 
 ## Audio backends
 

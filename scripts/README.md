@@ -130,6 +130,13 @@ see [`../docs/cli.md`](../docs/cli.md).
 
 ## Verify
 
+Compare chunk joiners with `just compare-smoothers -InputWav clip.wav -Model
+voice.onnx -ChunkMs 100 -CrossfadeMs 50 -SolaSearchMs 12 -KeepArtifacts`.
+It uses `join_sweep.ps1` and retains SOLA/PSOLA/phase-vocoder listening WAVs,
+join CSVs, timing JSONs, and a summary. See the
+[comparison workflow](../docs/cli.md#compare-smoother-quality-and-processing-time)
+for model paths and timing interpretation.
+
 ```powershell
 pwsh -File scripts/verify.ps1
 ```

@@ -291,6 +291,7 @@ pub const TRANSLATIONS: &[(&str, &str)] = &[
     ("ASIO uses one driver for both directions; pick the same device for input and output.", "ASIOは入出力で1つのドライバを使います。同じデバイスを選んでください。"),
     ("Input device", "入力デバイス"), ("Output device", "出力デバイス"),
     ("Engine configuration (Apply to restart)", "エンジン設定（反映時に再起動）"),
+    ("Smoother", "チャンク接続方式"),
     ("Chunk ms", "チャンク長（ms）"),
     ("RVC: 10 ms steps, with integer samples at both device rates.", "RVCは10 ms刻みです。入出力のサンプル数が整数になる設定を使います。"),
     ("Extra convert ms", "追加変換時間（ms）"), ("Live parameters", "リアルタイム調整"),

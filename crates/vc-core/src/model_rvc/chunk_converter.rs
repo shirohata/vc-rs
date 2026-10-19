@@ -26,6 +26,9 @@ pub struct ChunkStats {
     pub embedder_time: Duration,
     pub pitch_time: Duration,
     pub rvc_time: Duration,
+    /// Worker-side alignment and crossfade time; excludes model/resampling and
+    /// one-time FFT planning. Included in `processing_time`.
+    pub smoothing_time: Duration,
     /// Worker time including model processing, joining and output resampling.
     pub processing_time: Duration,
     /// Nominal retained content in output samples, excluding chunk accumulation,
@@ -197,7 +200,9 @@ impl<M: VoiceModel> ChunkConverter<M> {
         // Disjoint field borrows: the smoother and the model output buffers are
         // separate fields, so this does not conflict.
         let smoother = &mut self.smoother.as_mut().expect("smoother set above").1;
+        let smoothing_started = Instant::now();
         smoother.process(&self.model_audio, &self.model_pitchf);
+        stats.smoothing_time = smoothing_started.elapsed();
         if self.adaptive_enabled {
             self.adaptive_output
                 .as_mut()
@@ -228,7 +233,9 @@ impl<M: VoiceModel> ChunkConverter<M> {
         let mut stats = chunk_stats(&meta, self.model_audio.len());
         self.ensure_smoother(meta.sample_rate)?;
         let smoother = &mut self.smoother.as_mut().expect("smoother set above").1;
+        let smoothing_started = Instant::now();
         smoother.prime_model_output(&self.model_audio, &self.model_pitchf);
+        stats.smoothing_time = smoothing_started.elapsed();
         stats.content_delay_samples = Some(self.output_content_delay_samples());
         stats.processing_time = started.elapsed();
         Ok(stats)
@@ -282,6 +289,7 @@ fn chunk_stats(meta: &ModelOutput, model_output_samples: usize) -> ChunkStats {
         embedder_time: meta.embedder_time,
         pitch_time: meta.pitch_time,
         rvc_time: meta.rvc_time,
+        smoothing_time: Duration::ZERO,
         processing_time: Duration::ZERO,
         content_delay_samples: None,
         input_rms: meta.input_rms,
@@ -380,7 +388,11 @@ mod tests {
 
     #[test]
     fn adaptive_output_keeps_model_hops_fixed_and_resets_the_filter_timeline() {
-        for kind in [SmoothingKind::Sola, SmoothingKind::Psola] {
+        for kind in [
+            SmoothingKind::Sola,
+            SmoothingKind::Psola,
+            SmoothingKind::PhaseVocoder,
+        ] {
             for from in [32_000, 40_000, 48_000] {
                 let settings = ChunkOutputConfig {
                     kind,
@@ -568,7 +580,11 @@ mod tests {
 
     #[test]
     fn persistent_output_resampling_removes_join_boundary_dc_distortion() {
-        for kind in [SmoothingKind::Sola, SmoothingKind::Psola] {
+        for kind in [
+            SmoothingKind::Sola,
+            SmoothingKind::Psola,
+            SmoothingKind::PhaseVocoder,
+        ] {
             for (from, to) in [(32_000, 48_000), (48_000, 44_100)] {
                 let settings = ChunkOutputConfig {
                     kind,
@@ -621,7 +637,11 @@ mod tests {
 
     #[test]
     fn joined_voiced_sines_match_continuous_output_filter_after_delay() {
-        for kind in [SmoothingKind::Sola, SmoothingKind::Psola] {
+        for kind in [
+            SmoothingKind::Sola,
+            SmoothingKind::Psola,
+            SmoothingKind::PhaseVocoder,
+        ] {
             for (from, to) in [(32_000, 48_000), (48_000, 44_100)] {
                 let hop = from as usize / 10;
                 let fade = from as usize / 100;

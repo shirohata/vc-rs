@@ -317,7 +317,7 @@ mod sola_bench {
     // closest model-free stand-in for a realtime chunk's post-inference cost.
     // The smoother is primed once so we measure steady-state joins; the model
     // audio/pitchf and the output buffer are reused like the realtime worker.
-    #[divan::bench(args = [SmoothingKind::Sola, SmoothingKind::Psola])]
+    #[divan::bench(args = [SmoothingKind::Sola, SmoothingKind::Psola, SmoothingKind::PhaseVocoder])]
     fn prepare_model_output_chunk(bencher: Bencher, kind: SmoothingKind) {
         let chunk = CHUNK_48K_100MS;
         let mut joiner = model_domain_chunk_smoother(smoother_config(kind, chunk));

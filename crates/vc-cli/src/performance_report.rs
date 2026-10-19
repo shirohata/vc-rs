@@ -15,6 +15,7 @@ fn sample(stats: &ChunkStats) -> Value {
         "rmvpe_ms": milliseconds(stats.pitch_time),
         "rvc_ms": milliseconds(stats.rvc_time),
         "inference_ms": milliseconds(stats.inference_time),
+        "smoothing_ms": milliseconds(stats.smoothing_time),
         "processing_ms": milliseconds(stats.processing_time),
     })
 }
@@ -38,6 +39,7 @@ fn summarize(stats: &[&ChunkStats], deadline: f64) -> Value {
         "rmvpe_ms",
         "rvc_ms",
         "inference_ms",
+        "smoothing_ms",
         "processing_ms",
     ] {
         let values = stats
@@ -133,6 +135,7 @@ mod tests {
                 flushing,
                 stats: ChunkStats {
                     processing_time: Duration::from_millis(ms),
+                    smoothing_time: Duration::from_millis(ms / 2),
                     ..Default::default()
                 },
                 join: JoinDiagnostics::default(),
@@ -150,6 +153,7 @@ mod tests {
         };
         let report = build(&output, 1, 30.0, Duration::ZERO);
         assert_eq!(report["steady"]["processing_ms"]["mean_ms"], 30.0);
+        assert_eq!(report["steady"]["smoothing_ms"]["mean_ms"], 15.0);
         assert_eq!(report["steady"]["processing_ms"]["deadline_misses"], 1);
         assert_eq!(report["initial"]["processing_ms"]["count"], 1);
         assert_eq!(report["flush"]["processing_ms"]["count"], 1);

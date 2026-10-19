@@ -90,10 +90,12 @@ pub struct EngineCacheClearArgs {
     pub yes: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 pub enum Smoother {
     Sola,
     Psola,
+    #[default]
+    PhaseVocoder,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -161,6 +163,7 @@ impl From<Smoother> for vc_app::Smoother {
         match value {
             Smoother::Sola => Self::Sola,
             Smoother::Psola => Self::Psola,
+            Smoother::PhaseVocoder => Self::PhaseVocoder,
         }
     }
 }
@@ -232,7 +235,7 @@ pub struct RunArgs {
     pub crossfade_ms: u32,
     #[arg(long, default_value_t = DEFAULT_SOLA_SEARCH_MS)]
     pub sola_search_ms: u32,
-    #[arg(long, value_enum, default_value_t = Smoother::Sola)]
+    #[arg(long, value_enum, default_value_t = Smoother::default())]
     pub smoother: Smoother,
     #[arg(long, default_value_t = DEFAULT_RVC_OUTPUT_TAIL_DISCARD_MS)]
     pub rvc_output_tail_discard_ms: u32,
@@ -322,7 +325,7 @@ pub struct WavArgs {
     pub output: PathBuf,
     #[arg(long, default_value_t = DEFAULT_WAV_CHUNK_MS, help = "Chunk duration in ms; requires multiples of 10 and integer samples at input/model rates")]
     pub chunk_ms: u32,
-    #[arg(long, value_enum, default_value_t = Smoother::Sola)]
+    #[arg(long, value_enum, default_value_t = Smoother::default())]
     pub smoother: Smoother,
     // Exposed so `--join-report` can sweep the SOLA/crossfade window offline;
     // mirrors the realtime command's flags. The 3/4-of-chunk cap in
@@ -394,7 +397,7 @@ pub struct WavArgs {
     #[arg(
         long,
         value_name = "PATH",
-        help = "Write a per-chunk SOLA/PSOLA join report (CSV) for offline seam analysis"
+        help = "Write a per-chunk smoother join report (CSV) for offline seam analysis"
     )]
     pub join_report: Option<PathBuf>,
     /// Write offline stage/chunk timing samples and summaries as JSON.
@@ -666,7 +669,11 @@ mod tests {
         assert!(!args.wasapi_output_exclusive());
         assert_eq!(args.wasapi_buffer_ms, DEFAULT_WASAPI_BUFFER_MS);
         assert_eq!(args.rms_mix_rate, 0.0);
-        assert_eq!(args.smoother, Smoother::Sola);
+        assert_eq!(args.smoother, Smoother::PhaseVocoder);
+        assert_eq!(
+            vc_app::Smoother::from(args.smoother),
+            vc_app::RealtimeConfig::default().smoother
+        );
         assert_eq!(
             args.rvc_output_tail_discard_ms,
             DEFAULT_RVC_OUTPUT_TAIL_DISCARD_MS
@@ -1005,6 +1012,45 @@ mod tests {
     }
 
     #[test]
+    fn explicit_smoother_selection_overrides_defaults_in_run_and_wav() {
+        for (name, expected) in [
+            ("sola", Smoother::Sola),
+            ("psola", Smoother::Psola),
+            ("phase-vocoder", Smoother::PhaseVocoder),
+        ] {
+            let cli =
+                Cli::try_parse_from(["vc-rs", "run", "--passthrough", "--smoother", name]).unwrap();
+            let Command::Run(args) = cli.command else {
+                panic!("expected run");
+            };
+            assert_eq!(args.smoother, expected);
+            let cli = Cli::try_parse_from([
+                "vc-rs",
+                "wav",
+                "--input",
+                "input.wav",
+                "--output",
+                "output.wav",
+                "--model",
+                "model.onnx",
+                "--embedder",
+                "embedder.onnx",
+                "--f0-model",
+                "f0.onnx",
+                "--smoother",
+                name,
+                "--performance-report",
+                "timing.json",
+            ])
+            .unwrap();
+            let Command::Wav(args) = cli.command else {
+                panic!("expected wav");
+            };
+            assert_eq!(args.smoother, expected);
+        }
+    }
+
+    #[test]
     fn rvc_output_tail_discard_defaults_to_10_ms_for_rvc_commands() {
         let cli = Cli::try_parse_from(["vc-rs", "run", "--passthrough"]).unwrap();
         let Command::Run(args) = cli.command else {
@@ -1033,7 +1079,7 @@ mod tests {
         let Command::Wav(args) = cli.command else {
             panic!("expected wav command");
         };
-        assert_eq!(args.smoother, Smoother::Sola);
+        assert_eq!(args.smoother, Smoother::PhaseVocoder);
         assert_eq!(
             args.rvc_output_tail_discard_ms,
             DEFAULT_RVC_OUTPUT_TAIL_DISCARD_MS

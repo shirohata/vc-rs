@@ -1320,7 +1320,7 @@ mod tests {
 
     #[test]
     fn offline_freewheeling_preserves_first_short_and_final_partial_audio() {
-        for kind in ["sola", "psola"] {
+        for kind in ["sola", "psola", "phase-vocoder"] {
             for len in [1, 37, HOP - 1, HOP + 1, HOP * 4 + 79] {
                 let params = configured_params(10, 10, kind);
                 let mut runtime = loaded_runtime(

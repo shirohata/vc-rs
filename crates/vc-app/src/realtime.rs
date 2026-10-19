@@ -81,9 +81,10 @@ impl Default for AudioHost {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Smoother {
-    #[default]
     Sola,
     Psola,
+    #[default]
+    PhaseVocoder,
 }
 
 impl Smoother {
@@ -91,6 +92,7 @@ impl Smoother {
         match self {
             Self::Sola => SmoothingKind::Sola,
             Self::Psola => SmoothingKind::Psola,
+            Self::PhaseVocoder => SmoothingKind::PhaseVocoder,
         }
     }
 }
@@ -163,7 +165,7 @@ impl Default for RealtimeConfig {
             chunk_ms: 500,
             crossfade_ms: 85,
             sola_search_ms: 12,
-            smoother: Smoother::Sola,
+            smoother: Smoother::default(),
             rvc_output_tail_discard_ms: 10,
             extra_convert_ms: 100,
             f0: F0Config::default(),
@@ -991,6 +993,7 @@ impl PassthroughProcessor {
             embedder_time: Duration::ZERO,
             pitch_time: Duration::ZERO,
             rvc_time: Duration::ZERO,
+            smoothing_time: Duration::ZERO,
             processing_time: started.elapsed(),
             content_delay_samples: None,
             input_rms,

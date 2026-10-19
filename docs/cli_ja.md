@@ -125,7 +125,11 @@ GUI にはない機能です。バッチ処理や、設定変更の決定的な�
 - `--rms-mix-rate <0.0-1.0>`: 0.0 に近いほど入力音量の起伏を反映、1.0 に近いほど
   モデル出力の音量を保持（デフォルト: 0.0）。
 
-その他に `--smoother sola|psola`、`--sola-search-ms`、`--crossfade-ms`、
+`--smoother sola|psola|phase-vocoder` で接続方式を選べます。`run` / `wav` は
+`phase-vocoder` が既定です。GUIとVST3でも3方式を選べます。保存済みの
+`smoother` 指定があればその設定に従い、未指定の場合だけ `phase-vocoder` を使います。
+
+その他に `--sola-search-ms`、`--crossfade-ms`、
 `--rvc-output-tail-discard-ms`、`--gpu-priority normal|high`、
 `--gpu-device-id <ID>`（CUDA / ネイティブ TensorRT のみ）、WASAPI 排他関連
 （`--wasapi-exclusive*`、`--wasapi-buffer-ms`）など、GUI が固定している項目も

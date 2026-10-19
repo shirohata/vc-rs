@@ -30,6 +30,11 @@ models:
 compare-audio *args:
     ./scripts/compare-audio.ps1 {{args}}
 
+# Compare SOLA / PSOLA / phase vocoder with matched WAV settings. Pass models,
+# -InputWav, and -KeepArtifacts to retain WAVs, seam CSVs and timing reports.
+compare-smoothers *args:
+    ./scripts/join_sweep.ps1 {{args}}
+
 # Fast workspace tests, no GPU stack (TensorRT shim disabled).
 test-cpu:
     . ./scripts/rustflags.ps1; $env:VC_RS_ENABLE_NATIVE_TENSORRT = "0"; cargo test --workspace
@@ -56,6 +61,10 @@ test:
 # Filter to one bench with `just bench dsp_bench::rms`.
 bench *args:
     cargo bench -p vc-core -- {{args}}
+
+# Phase-vocoder crossfade alone, excluding inference/SOLA search/resampling.
+bench-phase-vocoder *args:
+    cargo bench -p vc-core --bench phase_vocoder -- {{args}}
 
 # Default Windows ML build; no NVIDIA SDK needed.
 build:

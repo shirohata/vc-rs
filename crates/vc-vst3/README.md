@@ -39,7 +39,7 @@ host process() ─┬─ downmix L/R → mono ─→ input ring ─┐
                 │                                     ▼
                 │                          worker thread (vc-core)
                 │                          RvcPipeline::process @ host rate
-                │                          → SOLA/PSOLA smooth + resample
+                │                          → SOLA / PSOLA / Phase vocoder join + resample
                 │                                     │
                 └─ mono → L/R  ◀── output ring ◀──────┘
 ```
@@ -74,12 +74,19 @@ unset, and initially closed for configured instances.
   CPU options, and EP choices from this PC's Windows ML catalog; the TensorRT
   package offers `tensorrt`. Catalog presence does not establish model compatibility
 - set the **chunk size** (ms) — larger means more latency but more context
+- choose the **smoother**: SOLA, PSOLA, or Phase vocoder, as in the standalone
+  GUI. Phase vocoder is the default when `smoother` is absent; explicit saved
+  choices in projects/configs are preserved. Phase vocoder may increase worker
+  processing time; matched timing settings retain the same reported content
+  latency. Use the CLI
+  [comparison workflow](../../docs/cli.md#compare-smoother-quality-and-processing-time)
+  to compare SOLA, PSOLA, and phase-vocoder output through the shared pipeline
 - hit **Load / Reload** to apply model / backend / chunk edits
 - watch the **status** line (`no models configured` / `models configured; click
   Load / Reload` / `loading…` / `running (cuda)` / `load failed: …`)
 - adjust the live parameters (Pitch / Speaker / Input · Output gain)
 
-Model/backend/chunk, Extra convert, and gate attack/release/floor edits are
+Model/backend/chunk, Extra convert, smoother, and gate attack/release/floor edits are
 **staged**: they only take effect when you press
 **Load / Reload** (shown by an "unapplied" indicator). Live parameters apply
 immediately. Changing the chunk size also re-reports the plugin latency to the

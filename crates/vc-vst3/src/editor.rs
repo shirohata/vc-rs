@@ -171,7 +171,9 @@ fn draw_contents(ui: &mut egui::Ui, setter: &ParamSetter, state: &mut EditorStat
 
     ui.separator();
     ui.heading("Setup");
-    ui.small("Models, backend, chunk, Extra convert, and gate timing apply on Load / Reload.");
+    ui.small(
+        "Models, backend, chunk, Extra convert, smoother, and gate timing apply on Load / Reload.",
+    );
     ui.horizontal_wrapped(|ui| {
         let loading = state.loading.load(Ordering::SeqCst);
         if ui
@@ -370,6 +372,29 @@ fn draw_staged_settings(ui: &mut egui::Ui, state: &mut EditorState) {
     }
     ui.small("Chunk = latency vs. context. Extra convert = extra model context.");
 
+    let mut smoother = state.params.settings.read().unwrap().smoother.clone();
+    let before = smoother.clone();
+    egui::ComboBox::new("smoother", "Smoother")
+        .selected_text(match smoother.trim().to_ascii_lowercase().as_str() {
+            "psola" => "PSOLA",
+            "phase-vocoder" => "Phase vocoder",
+            _ => "SOLA",
+        })
+        .show_ui(ui, |ui| {
+            for (value, label) in [
+                ("sola", "SOLA"),
+                ("psola", "PSOLA"),
+                ("phase-vocoder", "Phase vocoder"),
+            ] {
+                ui.selectable_value(&mut smoother, value.to_string(), label);
+            }
+        });
+    if smoother != before {
+        state.params.settings.write().unwrap().smoother = smoother;
+        mark_dirty(state);
+    }
+    ui.small("Phase vocoder may increase processing time.");
+
     // Keep these controls in the staged section: unlike the gate toggle and
     // threshold, attack/release/floor require a worker reload.
     ui.separator();
@@ -395,7 +420,7 @@ fn draw_staged_settings(ui: &mut egui::Ui, state: &mut EditorState) {
         mark_dirty(state);
     }
 
-    ui.small("Crossfade and SOLA settings are configured in the config file and apply on reinstantiation.");
+    ui.small("Crossfade length and SOLA search are configured in the config file and apply on reinstantiation.");
 }
 
 /// A labelled control: the name + Browse button on one line, and the current

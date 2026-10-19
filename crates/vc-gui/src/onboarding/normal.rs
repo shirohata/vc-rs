@@ -641,6 +641,24 @@ impl VcGui {
             )
             .changed();
 
+        egui::ComboBox::new("Smoother", lang.text("Smoother"))
+            .selected_text(match self.settings.smoother.as_str() {
+                "psola" => "PSOLA",
+                "phase-vocoder" => "Phase vocoder",
+                _ => "SOLA",
+            })
+            .show_ui(ui, |ui| {
+                for (value, label) in [
+                    ("sola", "SOLA"),
+                    ("psola", "PSOLA"),
+                    ("phase-vocoder", "Phase vocoder"),
+                ] {
+                    changed |= ui
+                        .selectable_value(&mut self.settings.smoother, value.to_string(), label)
+                        .changed();
+                }
+            });
+
         if changed {
             self.changed();
         }

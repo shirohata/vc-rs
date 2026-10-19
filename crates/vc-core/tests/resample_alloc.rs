@@ -1,6 +1,6 @@
 //! Isolated allocator test: only allocations inside the warmed finite-resample
 //! calls are counted. No GPU runtime, logging, input generation or assertions
-//! run while counting, so the result specifically guards the RMS scratch path.
+//! run while counting. Also guards the worker-side smoother's warmed FFT/scratch.
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -68,5 +68,56 @@ fn warmed_reference_and_adaptive_resamplers_do_not_allocate() {
             0,
             "adaptive {from}->{to} allocated"
         );
+    }
+
+    use vc_core::sola::{
+        model_domain_chunk_smoother, prepare_model_output, ChunkSmootherConfig, SmoothingKind,
+    };
+    for kind in [
+        SmoothingKind::Sola,
+        SmoothingKind::Psola,
+        SmoothingKind::PhaseVocoder,
+    ] {
+        let mut smoother = model_domain_chunk_smoother(ChunkSmootherConfig {
+            kind,
+            output_chunk_samples: 4800,
+            output_sample_rate: 48_000,
+            model_sample_rate: 48_000,
+            crossfade_ms: 50,
+            sola_search_ms: 12,
+            tail_discard_ms: 10,
+        });
+        let input = vec![0.25; 8256];
+        let pitch = vec![200.0; 18];
+        let mut out = Vec::new();
+        smoother.prime_model_output(&input, &pitch);
+        prepare_model_output(
+            &input,
+            &pitch,
+            48_000,
+            48_000,
+            4800,
+            &mut smoother,
+            None,
+            &mut out,
+        )
+        .unwrap();
+        ALLOCS.store(0, Ordering::Relaxed);
+        TRACK.store(true, Ordering::Relaxed);
+        for _ in 0..5 {
+            prepare_model_output(
+                &input,
+                &pitch,
+                48_000,
+                48_000,
+                4800,
+                &mut smoother,
+                None,
+                &mut out,
+            )
+            .unwrap();
+        }
+        TRACK.store(false, Ordering::Relaxed);
+        assert_eq!(ALLOCS.load(Ordering::Relaxed), 0, "{kind:?} allocated");
     }
 }

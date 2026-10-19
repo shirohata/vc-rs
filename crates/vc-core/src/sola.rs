@@ -2,10 +2,14 @@ use anyhow::Result;
 
 use crate::dsp;
 
+mod phase_vocoder;
+use phase_vocoder::PhaseVocoder;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SmoothingKind {
     Sola,
     Psola,
+    PhaseVocoder,
 }
 
 /// Per-chunk record of how the smoother joined the latest chunk. Diagnostics
@@ -63,6 +67,7 @@ pub struct SolaChunkJoiner {
     // Diagnostics for the most recent `process` call. Stored (not returned) so the
     // hot `process` signature stays a plain `usize`; read via `last_diagnostics`.
     last_diagnostics: JoinDiagnostics,
+    phase_vocoder: Option<Box<PhaseVocoder>>,
 }
 
 impl SolaChunkJoiner {
@@ -81,6 +86,7 @@ impl SolaChunkJoiner {
             weighted_reference: Vec::new(),
             output_buffer: Vec::new(),
             last_diagnostics: JoinDiagnostics::default(),
+            phase_vocoder: None,
         }
     }
 
@@ -178,7 +184,11 @@ impl SolaChunkJoiner {
         output.extend_from_slice(&audio[sola_offset..output_end]);
         pad_to_len_in_place(output, target_len);
         output.truncate(target_len);
-        vcclient_crossfade(reference, &mut output[..crossfade_len]);
+        if let Some(phase_vocoder) = &mut self.phase_vocoder {
+            phase_vocoder.crossfade(reference, &mut output[..crossfade_len]);
+        } else {
+            vcclient_crossfade(reference, &mut output[..crossfade_len]);
+        }
         self.update_sola_buffer(audio, sola_offset);
 
         self.last_diagnostics = JoinDiagnostics {
@@ -328,20 +338,21 @@ impl PsolaChunkJoiner {
 pub enum ChunkSmoother {
     Sola(SolaChunkJoiner),
     Psola(PsolaChunkJoiner),
+    PhaseVocoder(SolaChunkJoiner),
 }
 
 impl ChunkSmoother {
     #[cfg(test)]
     fn prime(&mut self, audio: &[f32]) {
         match self {
-            Self::Sola(joiner) => joiner.prime(audio),
+            Self::Sola(joiner) | Self::PhaseVocoder(joiner) => joiner.prime(audio),
             Self::Psola(joiner) => joiner.prime(audio),
         }
     }
 
     pub(crate) fn process(&mut self, audio: &[f32], pitchf: &[f32]) -> usize {
         match self {
-            Self::Sola(joiner) => joiner.process(audio),
+            Self::Sola(joiner) | Self::PhaseVocoder(joiner) => joiner.process(audio),
             Self::Psola(joiner) => joiner.process(audio, pitchf),
         }
     }
@@ -349,7 +360,7 @@ impl ChunkSmoother {
     /// The most recent joined chunk (model domain), valid after [`Self::process`].
     pub(crate) fn output(&self) -> &[f32] {
         match self {
-            Self::Sola(joiner) => joiner.output(),
+            Self::Sola(joiner) | Self::PhaseVocoder(joiner) => joiner.output(),
             Self::Psola(joiner) => joiner.inner.output(),
         }
     }
@@ -371,33 +382,37 @@ impl ChunkSmoother {
                 kind: Some(SmoothingKind::Psola),
                 ..joiner.inner.last_diagnostics
             },
+            Self::PhaseVocoder(joiner) => JoinDiagnostics {
+                kind: Some(SmoothingKind::PhaseVocoder),
+                ..joiner.last_diagnostics
+            },
         }
     }
 
     fn candidate_audio<'a>(&self, audio: &'a [f32]) -> &'a [f32] {
         match self {
-            Self::Sola(joiner) => joiner.candidate_audio(audio),
+            Self::Sola(joiner) | Self::PhaseVocoder(joiner) => joiner.candidate_audio(audio),
             Self::Psola(joiner) => joiner.candidate_audio(audio),
         }
     }
 
     pub(crate) fn chunk_samples(&self) -> usize {
         match self {
-            Self::Sola(joiner) => joiner.chunk_samples,
+            Self::Sola(joiner) | Self::PhaseVocoder(joiner) => joiner.chunk_samples,
             Self::Psola(joiner) => joiner.chunk_samples(),
         }
     }
 
     pub fn crossfade_samples(&self) -> usize {
         match self {
-            Self::Sola(joiner) => joiner.crossfade_samples,
+            Self::Sola(joiner) | Self::PhaseVocoder(joiner) => joiner.crossfade_samples,
             Self::Psola(joiner) => joiner.crossfade_samples(),
         }
     }
 
     pub fn sola_search_samples(&self) -> usize {
         match self {
-            Self::Sola(joiner) => joiner.sola_search_samples,
+            Self::Sola(joiner) | Self::PhaseVocoder(joiner) => joiner.sola_search_samples,
             Self::Psola(joiner) => joiner.sola_search_samples(),
         }
     }
@@ -408,7 +423,7 @@ impl ChunkSmoother {
     /// With overlap disabled `last_or_pad_into` selects the final hop directly.
     pub(crate) fn content_delay_samples(&self) -> usize {
         let joiner = match self {
-            Self::Sola(joiner) => joiner,
+            Self::Sola(joiner) | Self::PhaseVocoder(joiner) => joiner,
             Self::Psola(joiner) => &joiner.inner,
         };
         joiner.tail_discard_samples
@@ -694,7 +709,7 @@ fn model_domain_chunk_samples(config: &ChunkSmootherConfig) -> usize {
 }
 
 fn model_domain_sola_joiner(config: &ChunkSmootherConfig) -> SolaChunkJoiner {
-    // SOLA/PSOLA must stay on the worker side in the model output domain.
+    // All joiners must stay on the worker side in the model output domain.
     // Moving this work to the real-time callback would reintroduce allocation
     // and O(search*fade) processing on the audio thread.
     let chunk_samples = model_domain_chunk_samples(config);
@@ -709,6 +724,13 @@ fn model_domain_sola_joiner(config: &ChunkSmootherConfig) -> SolaChunkJoiner {
 pub fn model_domain_chunk_smoother(config: ChunkSmootherConfig) -> ChunkSmoother {
     match config.kind {
         SmoothingKind::Sola => ChunkSmoother::Sola(model_domain_sola_joiner(&config)),
+        SmoothingKind::PhaseVocoder => {
+            let mut joiner = model_domain_sola_joiner(&config);
+            if joiner.crossfade_samples > 1 {
+                joiner.phase_vocoder = Some(Box::new(PhaseVocoder::new(joiner.crossfade_samples)));
+            }
+            ChunkSmoother::PhaseVocoder(joiner)
+        }
         SmoothingKind::Psola => {
             let chunk_samples = model_domain_chunk_samples(&config);
             ChunkSmoother::Psola(PsolaChunkJoiner::new(
@@ -1065,7 +1087,11 @@ mod tests {
     fn crossfade_window_is_clamped_below_short_chunks() {
         // 85 ms crossfade would exceed an 80 ms chunk; it must clamp to 3/4 of the
         // chunk so the overlap stays below the hop (the small-chunk artifact fix).
-        for kind in [SmoothingKind::Sola, SmoothingKind::Psola] {
+        for kind in [
+            SmoothingKind::Sola,
+            SmoothingKind::Psola,
+            SmoothingKind::PhaseVocoder,
+        ] {
             let smoother = model_domain_chunk_smoother(smoother_config(kind, 80));
             let chunk = 48_000 * 80 / 1000;
             assert_eq!(smoother.crossfade_samples(), chunk * 3 / 4);
@@ -1076,7 +1102,11 @@ mod tests {
     #[test]
     fn crossfade_window_unchanged_for_large_chunks() {
         // 500 ms chunk leaves the 85 ms crossfade far under the 3/4 cap: untouched.
-        for kind in [SmoothingKind::Sola, SmoothingKind::Psola] {
+        for kind in [
+            SmoothingKind::Sola,
+            SmoothingKind::Psola,
+            SmoothingKind::PhaseVocoder,
+        ] {
             let smoother = model_domain_chunk_smoother(smoother_config(kind, 500));
             assert_eq!(smoother.crossfade_samples(), 48_000 * 85 / 1000);
         }

@@ -53,7 +53,7 @@ crossfade_ms = 85
 sola_search_ms = 12
 rvc_output_tail_discard_ms = 10
 extra_convert_ms = 100
-smoother = "sola"          # "sola" | "psola"
+smoother = "phase-vocoder"  # "sola" | "psola" | "phase-vocoder"
 
 # --- Volume handling ---
 volume_envelope = false

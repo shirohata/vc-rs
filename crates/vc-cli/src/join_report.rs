@@ -161,6 +161,7 @@ impl JoinReport {
             let kind = match d.kind {
                 Some(SmoothingKind::Sola) => "sola",
                 Some(SmoothingKind::Psola) => "psola",
+                Some(SmoothingKind::PhaseVocoder) => "phase-vocoder",
                 None => "none",
             };
             let capped = d.crossfade_len < r.crossfade_target;

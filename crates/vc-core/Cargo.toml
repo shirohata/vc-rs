@@ -43,7 +43,7 @@ rnnoise = ["dep:nnnoiseless"]
 # streaming graph is backend-swappable: ORT CPU when the `ort` feature is present,
 # native TensorRT when `tensorrt` is present. VST3 deliberately does not expose
 # this feature.
-gtcrn = ["dep:realfft"]
+gtcrn = []
 
 [dependencies]
 anyhow.workspace = true
@@ -54,11 +54,11 @@ ort = { workspace = true, optional = true }
 xxhash-rust = { version = "0.8.15", default-features = false, features = ["xxh3"] }
 clap = { version = "4.5", features = ["derive"], optional = true }
 nnnoiseless = { version = "0.5.2", default-features = false, optional = true }
-# STFT/iSTFT for the GTCRN denoiser. Pinned exactly: this is an audio-quality
+# FFT for phase-vocoder joining and GTCRN STFT/iSTFT. Pinned exactly: this is an audio-quality
 # dependency whose FFT planning must not drift under us, and the plan requires a
 # fixed rev cleared via cargo-about/cargo-deny. Pure Rust (wraps `rustfft`), no
 # `ndarray`, no git source.
-realfft = { version = "=3.5.0", optional = true }
+realfft = { version = "=3.5.0" }
 
 [build-dependencies]
 cc = "1"
@@ -83,4 +83,8 @@ harness = false
 
 [[bench]]
 name = "fixed_resample"
+harness = false
+
+[[bench]]
+name = "phase_vocoder"
 harness = false

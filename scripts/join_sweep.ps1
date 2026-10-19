@@ -14,9 +14,12 @@
         capped_pct  : fraction of seams where the crossfade hit the 3/4-of-chunk cap
         fallback_pct: fraction of voiced seams where PSOLA fell back to plain SOLA
 
+    Timing JSONs separate warmup/drain from steady-state smoothing and total
+    processing. Summary timing columns are offline wall times, not device latency.
+
     `--provider cpu` is deterministic run-to-run, so differences reflect the
     parameters, not inference jitter. SOLA/crossfade runs in the worker-side model
-    domain; the wav seam metrics are a faithful proxy for the realtime joiner.
+    domain. Seam metrics cover the boundary only; listen to the full overlap too.
 
     The RVC speaker model is not shipped: pass -Model or set
     $env:VC_RS_TEST_RVC_MODEL. Reference ContentVec / RMVPE default to ./assets
@@ -53,7 +56,8 @@ param(
     # the cap directly. Empty by default.
     [string[]]$CrossfadeRatios = @(),
     [string[]]$SolaSearchMs = @('12', '16', '20'),
-    [ValidateSet('sola', 'psola')] [string[]]$Smoother = @('sola', 'psola'),
+    [string[]]$Smoother = @('sola', 'psola', 'phase-vocoder'),
+    [ValidateRange(0, 10000)] [int]$WarmupChunks = 3,
 
     [double]$PitchShift = 0,
     [long]$SpeakerId = 0,
@@ -75,7 +79,10 @@ $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 if (-not $OutDir) {
     $OutDir = Join-Path ([System.IO.Path]::GetTempPath()) ("vc-rs-joinsweep-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
 }
-New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
+# Only clean up the fresh directory owned by this run.
+if (Test-Path -LiteralPath $OutDir) { throw "OutDir must be new: $OutDir" }
+$OutDir = (New-Item -ItemType Directory -Path $OutDir).FullName
+$ownedOutDir = $OutDir
 
 function Resolve-PathMaybe([string]$p) {
     if ([string]::IsNullOrWhiteSpace($p)) { return $null }
@@ -119,6 +126,10 @@ $chunkList = @(Expand-Numbers $ChunkMs $true)
 $crossfadeList = @(Expand-Numbers $CrossfadeMs $true)
 $searchList = @(Expand-Numbers $SolaSearchMs $true)
 $ratioList = @(Expand-Numbers $CrossfadeRatios $false)
+$smootherList = @($Smoother | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() })
+foreach ($sm in $smootherList) {
+    if ($sm -notin @('sola', 'psola', 'phase-vocoder')) { throw "Unknown smoother: $sm" }
+}
 
 # ---- Resolve inputs / models --------------------------------------------------
 
@@ -175,10 +186,11 @@ try {
 
             foreach ($cf in $crossfades) {
                 foreach ($search in $searchList) {
-                    foreach ($sm in $Smoother) {
+                    foreach ($sm in $smootherList) {
                         $tag = "{0}_c{1}_x{2}_s{3}_{4}" -f $clipName, $chunk, $cf, $search, $sm
                         $outWav = Join-Path $OutDir ("out_$tag.wav")
                         $csv = Join-Path $OutDir ("join_$tag.csv")
+                        $timingJson = Join-Path $OutDir ("timing_$tag.json")
 
                         $wavArgs = @(
                             'wav',
@@ -194,13 +206,16 @@ try {
                             '--smoother', $sm,
                             '--pitch-shift', $PitchShift,
                             '--speaker-id', $SpeakerId,
-                            '--join-report', $csv
+                            '--join-report', $csv,
+                            '--performance-report', $timingJson,
+                            '--performance-warmup-chunks', $WarmupChunks
                         )
 
                         Write-Host ("==> {0}" -f $tag) -ForegroundColor Cyan
                         & $exePath @wavArgs | Out-Null
                         if ($LASTEXITCODE -ne 0) { throw "vc-rs wav failed for $tag (exit $LASTEXITCODE)" }
                         if (-not (Test-Path -LiteralPath $csv)) { throw "join report not written: $csv" }
+                        $timing = Get-Content -LiteralPath $timingJson -Raw | ConvertFrom-Json
 
                         # Aggregate the per-chunk CSV. Chunk 0 has no seam; skip it.
                         $rows = Import-Csv -LiteralPath $csv | Where-Object { [int]$_.chunk -gt 0 }
@@ -228,6 +243,12 @@ try {
                                 corr_mean     = [math]::Round((($corrs | Measure-Object -Average).Average), 3)
                                 capped_pct    = [math]::Round(100.0 * $capped / $n, 0)
                                 fallback_pct  = [math]::Round(100.0 * $fallbk / $n, 0)
+                                timing_chunks = $timing.steady.processing_ms.count
+                                smoothing_mean_ms = $timing.steady.smoothing_ms.mean_ms
+                                smoothing_p95_ms = $timing.steady.smoothing_ms.p95_ms
+                                processing_mean_ms = $timing.steady.processing_ms.mean_ms
+                                processing_p95_ms = $timing.steady.processing_ms.p95_ms
+                                deadline_misses = $timing.steady.processing_ms.deadline_misses
                             })
                     }
                 }
@@ -247,14 +268,16 @@ try {
     $summary |
         Sort-Object -Property step_p95 -Descending |
         Format-Table clip, chunk_ms, crossfade_ms, sola_search, smoother, seams,
-            step_p50, step_p95, step_max, corr_min, corr_mean, capped_pct, fallback_pct -AutoSize |
+            step_p95, corr_mean, timing_chunks, smoothing_mean_ms, smoothing_p95_ms, processing_p95_ms, deadline_misses -AutoSize |
         Out-String -Width 200 | Write-Host
     Write-Host "summary CSV: $summaryCsv" -ForegroundColor DarkGray
 }
 finally {
     Pop-Location
     if (-not $KeepArtifacts) {
-        Remove-Item -Recurse -Force -LiteralPath $OutDir -ErrorAction SilentlyContinue
+        $resolvedOutDir = (Resolve-Path -LiteralPath $OutDir).Path
+        if ($resolvedOutDir -ne $ownedOutDir) { throw 'Refusing cleanup outside the run directory' }
+        Remove-Item -Recurse -Force -LiteralPath $resolvedOutDir -ErrorAction SilentlyContinue
     } else {
         Write-Host "artifacts (per-run join CSVs + wavs) kept in $OutDir" -ForegroundColor DarkGray
     }

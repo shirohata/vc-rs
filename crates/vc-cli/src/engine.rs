@@ -142,6 +142,7 @@ fn smoothing_kind(smoother: Smoother) -> SmoothingKind {
     match smoother {
         Smoother::Sola => SmoothingKind::Sola,
         Smoother::Psola => SmoothingKind::Psola,
+        Smoother::PhaseVocoder => SmoothingKind::PhaseVocoder,
     }
 }
 
