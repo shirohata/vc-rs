@@ -35,6 +35,9 @@ pub struct ChunkStats {
     /// device/queue latency and inference wall time. None until initialized.
     pub content_delay_samples: Option<usize>,
     pub input_rms: f32,
+    /// RMS of the joined/resampled output, including retained history and filter
+    /// startup. Zero for `prime`, which emits no audio. Model-stage RMS remains
+    /// available in `ModelOutput` and must not drive the output meter.
     pub output_rms: f32,
     pub model_output_samples: usize,
 }
@@ -214,6 +217,7 @@ impl<M: VoiceModel> ChunkConverter<M> {
                 .expect("resampler set above")
                 .process_fixed(smoother.output(), output_chunk_samples, out)?;
         }
+        stats.output_rms = crate::dsp::rms(out);
         stats.content_delay_samples = Some(self.output_content_delay_samples());
         stats.processing_time = started.elapsed();
         Ok(stats)
@@ -293,7 +297,7 @@ fn chunk_stats(meta: &ModelOutput, model_output_samples: usize) -> ChunkStats {
         processing_time: Duration::ZERO,
         content_delay_samples: None,
         input_rms: meta.input_rms,
-        output_rms: meta.output_rms,
+        output_rms: 0.0,
         // This is the length immediately before smoothing, not the pipeline's
         // separately reported `raw_output_samples` diagnostic.
         model_output_samples,
@@ -414,6 +418,7 @@ mod tests {
                 for index in 0..30 {
                     let stats = converter.process_chunk(&[], from, &mut out).unwrap();
                     assert_eq!(stats.model_output_samples, from as usize * 3 / 100);
+                    assert_eq!(stats.output_rms, crate::dsp::rms(&out));
                     varied |= out.len() != 960;
                     total += out.len();
                     if index > 2 {
@@ -452,8 +457,45 @@ mod tests {
             Some(converter.output_content_delay_samples())
         );
         assert_eq!(stats.input_rms, 0.25);
-        assert_eq!(stats.output_rms, 0.75);
+        assert_eq!(stats.output_rms, 0.0);
         assert_eq!(stats.model_output_samples, 8);
+    }
+
+    #[test]
+    fn output_rms_excludes_discarded_tail_and_includes_retained_history() {
+        for kind in [SmoothingKind::Sola, SmoothingKind::PhaseVocoder] {
+            let settings = ChunkOutputConfig {
+                kind,
+                output_sample_rate: 48_000,
+                output_chunk_samples: 4_800,
+                crossfade_ms: 75,
+                sola_search_ms: 12,
+                tail_discard_ms: 10,
+            };
+            // Energy only in the discarded tail must not appear in the output meter,
+            // including after startup. Then exercise history during a silent hop.
+            let mut tail_only = vec![0.0; 10_560];
+            tail_only[10_080..].fill(0.8);
+            let outputs = [
+                tail_only.clone(),
+                tail_only,
+                vec![0.25; 10_560],
+                vec![0.0; 10_560],
+            ]
+            .into_iter()
+            .map(|audio| Ok(output(audio, 48_000)));
+            let mut converter = ChunkConverter::new(FakeModel::new(outputs), settings);
+            let mut out = Vec::new();
+            for index in 0..4 {
+                let stats = converter.process_chunk(&[], 48_000, &mut out).unwrap();
+                assert_eq!(stats.output_rms, crate::dsp::rms(&out));
+                if index < 2 {
+                    assert_eq!(stats.output_rms, 0.0);
+                } else {
+                    assert!(stats.output_rms > 0.0);
+                }
+            }
+        }
     }
 
     #[test]
@@ -535,6 +577,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(stats.model_output_samples, 8);
+        assert_eq!(stats.output_rms, 0.0);
         assert_ne!(primed, unprimed);
     }
 
@@ -599,7 +642,8 @@ mod tests {
                 let mut converter = ChunkConverter::new(FakeModel::new(outputs), settings);
                 let mut out = Vec::new();
                 for index in 0..20 {
-                    converter.process_chunk(&[], from, &mut out).unwrap();
+                    let stats = converter.process_chunk(&[], from, &mut out).unwrap();
+                    assert_eq!(stats.output_rms, crate::dsp::rms(&out));
                     assert_eq!(out.len(), to as usize / 10);
                     if index >= 3 {
                         let error = out.iter().map(|v| (v - 0.25).abs()).fold(0.0, f32::max);

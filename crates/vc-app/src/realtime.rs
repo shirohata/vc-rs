@@ -981,12 +981,9 @@ impl PassthroughProcessor {
             self.resampler.process_into(&self.input_scratch, prepared)?;
         }
         let output_gain = live.output_gain.max(0.0);
-        if (output_gain - 1.0).abs() > f32::EPSILON {
-            for sample in prepared.iter_mut() {
-                *sample = (*sample * output_gain).clamp(-1.0, 1.0);
-            }
-        }
-        let output_rms = dsp::rms(prepared);
+        // Resampling can overshoot even with bounded input. Unity output gain
+        // must use the same clipping policy as every other gain setting.
+        let output_rms = dsp::apply_gain_and_rms(prepared, output_gain);
         Ok(ChunkStats {
             silent: false,
             inference_time: Duration::ZERO,
@@ -1867,6 +1864,39 @@ mod tests {
         assert!(prepared.iter().all(|sample| (*sample - 1.0).abs() < 1e-6));
         assert!((stats.input_rms - 0.5).abs() < 1e-6);
         assert!((stats.output_rms - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn passthrough_clips_resampling_overshoot_at_unity_gain() {
+        for output_gain in [1.0, 0.99] {
+            let live = LiveParams {
+                output_gain,
+                ..Default::default()
+            };
+            let mut processor = PassthroughProcessor::new(
+                DenoiserMode::Off,
+                NoiseGateShaping::default(),
+                32_000,
+                48_000,
+                None,
+                #[cfg(feature = "gtcrn")]
+                vc_core::denoise::GtcrnBackend::OrtCpu,
+                &live,
+            )
+            .unwrap();
+            let audio: Vec<_> = (0..3200)
+                .map(|i| if (i / 32) % 2 == 0 { 1.0 } else { -1.0 })
+                .collect();
+            let mut prepared = Vec::new();
+            for _ in 0..3 {
+                let stats = processor
+                    .process_chunk(&audio, &live, &mut prepared)
+                    .unwrap();
+                assert!(prepared.iter().all(|v| v.abs() <= 1.0));
+                assert_eq!(stats.output_rms, dsp::rms(&prepared));
+            }
+            assert!(prepared.iter().any(|v| v.abs() == 1.0));
+        }
     }
 
     #[test]

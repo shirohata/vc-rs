@@ -1573,13 +1573,13 @@ impl VoiceModel for RvcPipeline {
                 dsp::rms(out_audio)
             );
         }
-        let output_rms_before_gain = dsp::rms(out_audio);
-        let applied_output_gain = self.applied_output_gain(output_rms_before_gain);
-        let output_rms = if (applied_output_gain - 1.0).abs() > f32::EPSILON {
-            dsp::apply_gain_and_rms(out_audio, applied_output_gain)
-        } else {
-            output_rms_before_gain
-        };
+        let (output_rms, applied_output_gain) = apply_output_gain(
+            out_audio,
+            self.output_gain,
+            self.auto_output_gain,
+            self.target_output_rms,
+            self.max_output_gain,
+        );
 
         Ok(ModelOutput {
             sample_rate: self.rvc_sample_rate,
@@ -1672,15 +1672,69 @@ fn provider_drives_nvtrtx(provider: Provider) -> bool {
     false
 }
 
-impl RvcPipeline {
-    fn applied_output_gain(&self, output_rms: f32) -> f32 {
-        let manual_gain = self.output_gain.max(0.0);
-        if !self.auto_output_gain || output_rms <= 1e-8 {
-            return manual_gain;
+fn apply_output_gain(
+    audio: &mut [f32],
+    manual_gain: f32,
+    auto_output_gain: bool,
+    target_output_rms: f32,
+    max_output_gain: f32,
+) -> (f32, f32) {
+    let mut gain = manual_gain.max(0.0);
+    if auto_output_gain {
+        let before = dsp::rms(audio);
+        if before > 1e-8 {
+            gain *= (target_output_rms.max(0.0) / before).clamp(1.0, max_output_gain.max(1.0));
         }
-        let auto_gain = (self.target_output_rms.max(0.0) / output_rms)
-            .clamp(1.0, self.max_output_gain.max(1.0));
-        manual_gain * auto_gain
+    }
+    // RMS mixing can exceed full scale after the earlier generator clamp.
+    // Keep clipping at this stage even at unity gain, before SOLA compares
+    // candidates. Manual-only gain needs just this one allocation-free pass.
+    let rms = dsp::apply_gain_and_rms(audio, gain);
+    (rms, gain)
+}
+
+#[cfg(test)]
+mod output_gain_tests {
+    use super::*;
+
+    #[test]
+    fn rms_mix_peaks_are_clipped_at_and_around_unity_output_gain() {
+        let reference: Vec<_> = (0..10_560)
+            .map(|i| 0.5 * (std::f32::consts::TAU * 200.0 * i as f32 / 48_000.0).sin())
+            .collect();
+        let mut mixed: Vec<_> = reference.iter().map(|v| v * 0.02).collect();
+        mixed[4_800] = 0.2;
+        dsp::apply_rms_mix(&reference, &mut mixed, 48_000, 0.0);
+        assert!(mixed[4_800] > 8.0);
+        for auto in [false, true] {
+            for gain in [0.99, 1.0, 1.01] {
+                let mut audio = mixed.clone();
+                let (rms, applied) = apply_output_gain(&mut audio, gain, auto, 0.03, 512.0);
+                assert_eq!(applied, gain);
+                assert_eq!(audio[4_800], 1.0, "gain={gain} auto={auto}");
+                assert!(audio.iter().all(|v| v.abs() <= 1.0));
+                assert_eq!(rms, dsp::rms(&audio));
+            }
+        }
+    }
+
+    #[test]
+    fn output_gain_preserves_manual_and_automatic_gain_controls() {
+        for (input, manual, auto, target, max, expected_gain, expected_sample) in [
+            (0.25, 1.0, false, 0.5, 512.0, 1.0, 0.25),
+            (0.25, 0.5, false, 0.5, 512.0, 0.5, 0.125),
+            (0.25, 1.0, true, 0.5, 512.0, 2.0, 0.5),
+            (0.25, 1.0, true, 0.75, 2.0, 2.0, 0.5),
+            (0.5, 1.0, true, 0.25, 512.0, 1.0, 0.5),
+            (0.5, 0.0, true, 0.75, 512.0, 0.0, 0.0),
+            (0.0, 1.0, true, 0.5, 512.0, 1.0, 0.0),
+        ] {
+            let mut audio = [input; 8];
+            let (rms, gain) = apply_output_gain(&mut audio, manual, auto, target, max);
+            assert_eq!(gain, expected_gain);
+            assert_eq!(audio, [expected_sample; 8]);
+            assert_eq!(rms, expected_sample);
+        }
     }
 }
 

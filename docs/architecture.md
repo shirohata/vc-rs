@@ -356,6 +356,14 @@ manual or automatic gain. These operations happen before chunk joining so the
 smoother compares and crossfades audio at the level that will actually be
 played.
 
+The RVC output-gain stage clips after RMS mixing even at unity gain; mixing
+can exceed the generator's earlier full-scale clamp. The passthrough output-gain
+stage likewise clips resampler overshoot at unity gain. `ModelOutput.output_rms`
+describes the model candidate, while `ChunkStats.output_rms` measures the actual
+joined/resampled samples on the worker. The standalone output meter uses the
+latter, so discarded tails, crossfade history, and filter startup are reflected
+in its level. Priming emits no samples and reports zero output RMS.
+
 RMS mixing measures 40 ms forward windows at 10 ms sample positions and
 interpolates on that fixed grid. Stretching the envelope to each candidate's
 length would give shared source times different gains in adjacent candidates.
