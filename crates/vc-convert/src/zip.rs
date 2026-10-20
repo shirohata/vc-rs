@@ -1,5 +1,6 @@
 //! Bounded PTH ZIP access. ZIP/ZIP64 structure and CRC validation belong to `zip`,
 //! not a second parser here. Only requested entries are inflated, never extracted.
+use std::borrow::Cow;
 use std::io::{Cursor, Read};
 use std::path::Path;
 
@@ -93,18 +94,18 @@ impl<'a> ZipArchive<'a> {
             if file.size() > limits.entry {
                 bail!(
                     "ZIP entry {} exceeds limit of {} bytes",
-                    file.name(),
+                    file.name().context("invalid ZIP entry name")?,
                     limits.entry
                 );
             }
             total = total
                 .checked_add(file.size())
-                .ok_or_else(|| anyhow!("ZIP declared size overflow at {}", file.name()))?;
+                .ok_or_else(|| anyhow!("ZIP declared size overflow at entry {i}"))?;
             if total > limits.total {
                 bail!(
                     "ZIP declared total exceeds limit of {} bytes at {}",
                     limits.total,
-                    file.name()
+                    file.name().context("invalid ZIP entry name")?
                 );
             }
         }
@@ -114,8 +115,12 @@ impl<'a> ZipArchive<'a> {
             consumed: 0,
         })
     }
-    pub fn entry_names(&self) -> impl Iterator<Item = &str> {
-        (0..self.inner.len()).filter_map(|i| self.inner.name_for_index(i))
+    pub fn entry_names(&self) -> impl Iterator<Item = Result<Cow<'_, str>>> {
+        // ZIP 9 decodes names lazily. Propagate decoding errors so checkpoint
+        // discovery cannot silently skip an invalid entry and pick another one.
+        (0..self.inner.len())
+            .filter_map(|i| self.inner.name_for_index(i))
+            .map(|name| name.context("invalid ZIP entry name"))
     }
     pub fn has_entry(&self, name: &str) -> bool {
         self.inner.index_for_name(name).is_some()
@@ -229,7 +234,7 @@ mod tests {
                 }
                 let mut archive = ZipArchive::with_limits(&data, small(&data)).unwrap();
                 assert_eq!(
-                    archive.entry_names().collect::<Vec<_>>(),
+                    archive.entry_names().collect::<Result<Vec<_>>>().unwrap(),
                     ["archive/data.pkl", "archive/data/0"]
                 );
                 assert!(archive.has_entry("archive/data/0"));

@@ -100,11 +100,12 @@ pub fn parse_pth(bytes: &[u8]) -> Result<ParsedCheckpoint> {
 
     // Locate the pickle (usually "archive/data.pkl") and derive the tensor
     // data prefix ("archive/data/").
-    let pickle_name = archive
-        .entry_names()
+    let entry_names = archive.entry_names().collect::<Result<Vec<_>>>()?;
+    let pickle_name = entry_names
+        .iter()
         .find(|n| n.ends_with("data.pkl"))
-        .or_else(|| archive.entry_names().find(|n| n.ends_with(".pkl")))
-        .map(str::to_owned)
+        .or_else(|| entry_names.iter().find(|n| n.ends_with(".pkl")))
+        .map(|name| name.to_string())
         .ok_or_else(|| anyhow!("no pickle file found in .pth archive"))?;
     let dir = &pickle_name[..pickle_name.rfind('/').map_or(0, |i| i + 1)];
     let data_prefix = format!("{dir}data/");

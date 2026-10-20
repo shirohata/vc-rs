@@ -45,7 +45,7 @@ rtrb = "0.4"
 thread-priority = "3.0.0"
 
 [target.'cfg(windows)'.dependencies]
-wasapi = "0.23"
+wasapi = "0.25"
 
 [dev-dependencies]
 approx = "0.5"

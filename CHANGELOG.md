@@ -11,6 +11,48 @@ Version numbers come from `[workspace.package].version` in the root
 release archives. See [`docs/distribution.md`](docs/distribution.md) for the full
 versioning and publishing procedure.
 
+## [0.5.4] - 2026-10-20
+
+### Added
+
+- Phase-vocoder chunk joining in the shared conversion pipeline, selectable
+  in the GUI and VST3 settings or with `--smoother phase-vocoder` in the CLI.
+- Smoother timing in WAV performance reports and a comparison workflow for
+  listening to and measuring SOLA, PSOLA, and phase-vocoder output.
+
+### Changed
+
+- Phase-vocoder joining is now the default for CLI realtime/WAV conversion
+  and for GUI/VST3 settings without a saved `smoother` value. Existing SOLA,
+  PSOLA, and phase-vocoder settings are preserved; all three methods remain
+  selectable.
+- Optimized phase-vocoder crossfades with FFT-based synthesis while retaining
+  the same nominal content latency for matched timing settings.
+
+### Fixed
+
+- Identified custom feature-extractor models as Embedder in setup and load
+  progress instead of calling them ContentVec. Standard ContentVec downloads
+  retain their model name.
+- Interpolated RMS envelopes on their actual sample grid so overlapping model
+  candidates use consistent gain timing.
+- Clamped RVC output after RMS mixing and passthrough output after resampling
+  even at unity output gain, preventing full-scale overshoot.
+- Measured output RMS after chunk joining and resampling, including standalone
+  output gain, so the output meter reflects the samples sent for playback.
+
+### Security
+
+- Updated WASAPI and ZIP dependencies to address RUSTSEC-2026-0332 and
+  RUSTSEC-2026-0367 / 0368 / 0369.
+
+### Distribution notes
+
+- Phase-vocoder joining can increase worker processing time; check processing
+  headroom with the models and chunk settings used for realtime conversion.
+- Windows binaries are not code-signed; Windows may display a security warning
+  when downloading or running them.
+
 ## [0.5.3] - 2026-10-04
 
 ### Changed
@@ -276,6 +318,7 @@ Initial release.
 - One-shot distribution packaging scripts for all four Windows x64 variants.
 - Auto-generated bundled third-party license notices during packaging.
 
+[0.5.4]: https://github.com/shirohata/vc-rs/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/shirohata/vc-rs/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/shirohata/vc-rs/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/shirohata/vc-rs/compare/v0.5.0...v0.5.1
