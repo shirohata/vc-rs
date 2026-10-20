@@ -56,7 +56,9 @@ pub struct PluginConfig {
     pub sola_search_ms: u32,
     pub rvc_output_tail_discard_ms: u32,
     pub extra_convert_ms: u32,
-    /// "sola" | "psola" | "phase-vocoder". Applied on Load / Reload.
+    /// Config-only advanced choice: "sola" | "psola" | "phase-vocoder".
+    /// Keep it in persisted state so older project/preset choices survive even
+    /// though the editor has no selector. Applied on Load / Reload.
     pub smoother: String,
     pub volume_envelope: bool,
     pub rms_mix_rate: f32,

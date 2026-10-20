@@ -138,8 +138,13 @@ lower `--chunk-ms`** to reduce latency.
 
 `--smoother sola|psola|phase-vocoder` selects the shared chunk joiner for `run`
 and `wav` (default: `phase-vocoder`), including quality comparisons and diagnostics.
-GUI and VST3 also offer all three joiners. They default to `phase-vocoder` when
-`smoother` is absent and honor explicit saved settings. Phase vocoder uses
+GUI and VST3 keep this advanced selection in configuration files. They default
+to `phase-vocoder` when `smoother` is absent and honor explicit saved settings,
+including selections saved in v0.5.4. For the GUI, close the app, edit `smoother`
+in `%APPDATA%/vc-rs/gui.toml`, then reopen it. VST3 configuration seeds fresh
+instances; saved project/preset state takes precedence (see the
+[plugin configuration guide](../crates/vc-vst3/README.md#optional-headless-config-seed)).
+Phase vocoder uses
 SOLA alignment followed by phase-interpolated crossfading and may increase
 processing time.
 

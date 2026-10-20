@@ -587,9 +587,13 @@ This deliberately retains vc-rs's correlation weighting and native model sample
 rate rather than reproducing Applio's entire 48 kHz output path. No model or F0
 change is needed. The shared standalone runtime and CLI (`run` and `wav`)
 default to phase vocoder, as do GUI and VST3 when no `smoother` setting is saved.
-All front-ends allow SOLA, PSOLA, and phase-vocoder selection. GUI settings and
-VST3 project/config state preserve explicit saved choices; changes apply on
-Start / Restart or Load / Reload respectively.
+SOLA, PSOLA, and phase-vocoder remain configurable through the CLI and config
+files. GUI and VST3 keep this advanced choice out of their graphical controls.
+GUI settings and VST3 project/config state preserve explicit saved choices,
+including choices saved from the v0.5.4 selectors. GUI config changes apply after
+reopening the app and starting conversion. VST3 config files seed fresh
+instances; restored project/preset state takes precedence, and the worker uses
+that saved choice on Load / Reload.
 
 The overlap uses sin² fade-in, complementary fade-out, and the square root of
 their product as an FFT analysis/synthesis window. Each real-FFT bin's wrapped

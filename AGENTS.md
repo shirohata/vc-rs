@@ -49,6 +49,20 @@ Windows, CUDA 13.3 Update 1 / TensorRT 11.2.1. Day-to-day:
 - If it passes outside, record the sandbox limitation and continue release work;
   otherwise investigate the failure. CPU-only tests do not replace Windows ML validation.
 
+## GUI and VST3 settings policy
+
+- Expose controls needed for ordinary voice conversion. Keep algorithm choices
+  and tuning settings that users do not need to adjust routinely in config
+  files or the CLI. A config option does not imply a graphical control.
+- Smoother selection (SOLA / PSOLA / phase vocoder) is an advanced config
+  setting in GUI and VST3; do not add a smoother selector to either editor.
+- Hiding a control must preserve its config key, serialization, and saved
+  project/preset values. Apply defaults only when the setting is absent so
+  simplifying the UI does not silently change existing users' audio.
+- Document the advanced configuration path and when changes take effect,
+  including VST3's distinction between fresh-instance config seeds and saved
+  project state.
+
 ## Real-time audio constraints
 - Avoid heap allocation, blocking I/O, and locks on the real-time audio callback path.
 - Do not perform logging directly inside the audio callback unless already proven safe.

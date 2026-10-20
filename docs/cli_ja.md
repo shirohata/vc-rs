@@ -126,8 +126,13 @@ GUI にはない機能です。バッチ処理や、設定変更の決定的な�
   モデル出力の音量を保持（デフォルト: 0.0）。
 
 `--smoother sola|psola|phase-vocoder` で接続方式を選べます。`run` / `wav` は
-`phase-vocoder` が既定です。GUIとVST3でも3方式を選べます。保存済みの
-`smoother` 指定があればその設定に従い、未指定の場合だけ `phase-vocoder` を使います。
+`phase-vocoder` が既定です。GUIとVST3では詳細設定として設定ファイルから指定します。
+v0.5.4の選択UIで保存した値も含め、`smoother` が設定済みならその値に従い、
+未指定の場合だけ `phase-vocoder` を使います。GUIは終了後に
+`%APPDATA%/vc-rs/gui.toml` の `smoother` を編集し、再度起動してください。
+VST3の設定ファイルは新規インスタンスの初期値に使われ、保存済みプロジェクト・
+プリセットの値が優先されます。詳しくは
+[プラグインの設定方法](../crates/vc-vst3/README.md#optional-headless-config-seed)を参照してください。
 
 その他に `--sola-search-ms`、`--crossfade-ms`、
 `--rvc-output-tail-discard-ms`、`--gpu-priority normal|high`、

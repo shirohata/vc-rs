@@ -56,27 +56,32 @@ fn ui_normal_screen_and_start_do_not_spawn_model_validation() {
 }
 
 #[test]
-fn ui_smoother_selection_is_staged_and_used_on_start() {
+fn ui_hides_smoother_and_preserves_saved_choice_through_start() {
     for lang in [text::Language::English, text::Language::Japanese] {
-        for (value, label, expected) in [
-            ("sola", "SOLA", Smoother::Sola),
-            ("psola", "PSOLA", Smoother::Psola),
-            ("phase-vocoder", "Phase vocoder", Smoother::PhaseVocoder),
+        for (value, expected) in [
+            ("sola", Smoother::Sola),
+            ("psola", Smoother::Psola),
+            ("phase-vocoder", Smoother::PhaseVocoder),
         ] {
             let mut fixture = ready_main_fixture(lang);
-            // Start from a different choice so each case exercises an edit.
-            fixture.app.settings.smoother = if value == "sola" { "psola" } else { "sola" }.into();
+            fixture.app.settings.smoother = value.into();
             let mut h = harness(fixture);
             h.get_by_label(lang.text("Backend Details")).scroll_to_me();
             h.run_steps(8);
             h.get_by_label(lang.text("Backend Details")).click();
             h.run_steps(4);
-            h.get_by_label(lang.text("Smoother")).scroll_to_me();
-            h.run_steps(8);
-            h.get_by_label(lang.text("Smoother")).click();
-            h.run_steps(4);
-            h.get_by_label(label).click();
-            h.run_steps(4);
+            for label in [
+                "Smoother",
+                "チャンク接続方式",
+                "SOLA",
+                "PSOLA",
+                "Phase vocoder",
+            ] {
+                assert!(
+                    h.query_by_label(label).is_none(),
+                    "unexpected control: {label}"
+                );
+            }
             assert_eq!(h.state().app.settings.smoother, value);
             let saved = toml::to_string(&h.state().app.settings).unwrap();
             let restored: GuiSettings = toml::from_str(&saved).unwrap();

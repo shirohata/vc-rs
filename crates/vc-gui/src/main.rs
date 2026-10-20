@@ -171,6 +171,8 @@ struct GuiSettings {
     sola_search_ms: u32,
     rvc_output_tail_discard_ms: u32,
     extra_convert_ms: u32,
+    // Config-only advanced choice. Keep it serialized so hiding the control
+    // preserves explicit choices made by older GUI versions.
     smoother: String,
     f0_threshold: f32,
     silence_threshold: f32,

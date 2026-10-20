@@ -74,19 +74,12 @@ unset, and initially closed for configured instances.
   CPU options, and EP choices from this PC's Windows ML catalog; the TensorRT
   package offers `tensorrt`. Catalog presence does not establish model compatibility
 - set the **chunk size** (ms) — larger means more latency but more context
-- choose the **smoother**: SOLA, PSOLA, or Phase vocoder, as in the standalone
-  GUI. Phase vocoder is the default when `smoother` is absent; explicit saved
-  choices in projects/configs are preserved. Phase vocoder may increase worker
-  processing time; matched timing settings retain the same reported content
-  latency. Use the CLI
-  [comparison workflow](../../docs/cli.md#compare-smoother-quality-and-processing-time)
-  to compare SOLA, PSOLA, and phase-vocoder output through the shared pipeline
 - hit **Load / Reload** to apply model / backend / chunk edits
 - watch the **status** line (`no models configured` / `models configured; click
   Load / Reload` / `loading…` / `running (cuda)` / `load failed: …`)
 - adjust the live parameters (Pitch / Speaker / Input · Output gain)
 
-Model/backend/chunk, Extra convert, smoother, and gate attack/release/floor edits are
+Model/backend/chunk, Extra convert, and gate attack/release/floor edits are
 **staged**: they only take effect when you press
 **Load / Reload** (shown by an "unapplied" indicator). Live parameters apply
 immediately. Changing the chunk size also re-reports the plugin latency to the
@@ -113,6 +106,16 @@ has saved its settings, the state wins and the config file is ignored.
 Model / backend / `chunk_ms` / `extra_convert_ms` apply on Load / Reload from the GUI.
 The remaining latency settings (`crossfade_ms`, `sola_search_ms`, …) come
 from the config and apply on (re)instantiation.
+
+Chunk joining is an advanced config setting: `smoother = "sola"`, `"psola"`, or
+`"phase-vocoder"`. The editor keeps this choice out of the ordinary controls.
+Missing keys default to phase vocoder. Choices already saved in project/preset
+state, including from v0.5.4, remain honored and persisted. Changing the seed file
+does not override an existing project's choice. Phase vocoder can increase
+worker processing time; matched timing settings retain the same reported content
+latency. Use the CLI
+[comparison workflow](../../docs/cli.md#compare-smoother-quality-and-processing-time)
+to compare the three methods.
 
 ## Build
 
