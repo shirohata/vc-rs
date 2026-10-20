@@ -481,13 +481,13 @@ impl VcGui {
                     .support_check
                     .as_ref()
                     .and_then(|(_, result)| result.lock().unwrap().clone());
-                for (i, name) in ["ContentVec", "RMVPE"].iter().enumerate() {
+                for (i, name) in ["Embedder", "F0 model"].iter().enumerate() {
                     let state = match checked.as_ref().map(|results| &results[i]) {
                         Some(Ok(())) => "Ready",
                         Some(Err(_)) => "Download required",
                         None => text::CHECKING,
                     };
-                    ui.label(format!("{name}: {}", lang.text(state)));
+                    ui.label(format!("{}: {}", lang.text(name), lang.text(state)));
                 }
                 if matches!(support_result, Some(Ok(()))) {
                     ui.label(lang.text(text::SUPPORT_READY));
@@ -507,7 +507,7 @@ impl VcGui {
                             lang.text(text::SOURCE),
                             "https://huggingface.co/wok000/weights_gpl",
                         );
-                        if ui.button(lang.text("Choose ContentVec…")).clicked() {
+                        if ui.button(lang.text("Choose embedder…")).clicked() {
                             self.browse_into(ModelKind::Embedder);
                         }
                         if ui.button(lang.text("Choose RMVPE…")).clicked() {

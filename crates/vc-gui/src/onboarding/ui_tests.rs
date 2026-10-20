@@ -738,8 +738,19 @@ fn ui_prepared_voice_waits_for_continue_on_preparation() {
         h.get_by_label(language.text(text::NEXT)).click();
         h.run_steps(4);
         assert_eq!(h.state().app.onboarding.step, Some(Step::Prepare));
-        h.get_by_label(&format!("ContentVec: {}", language.text("Ready")));
-        h.get_by_label(&format!("RMVPE: {}", language.text("Ready")));
+        h.get_by_label(&format!(
+            "{}: {}",
+            language.text("Embedder"),
+            language.text("Ready")
+        ));
+        h.get_by_label(&format!(
+            "{}: {}",
+            language.text("F0 model"),
+            language.text("Ready")
+        ));
+        assert!(h
+            .query_by_label(&format!("ContentVec: {}", language.text("Ready")))
+            .is_none());
         assert_eq!(h.state().app.onboarding.effects.download_requests, 0);
         h.get_by_label(language.text(text::OPEN_MAIN)).click();
         h.run_steps(4);
@@ -940,7 +951,7 @@ fn ui_start_with_missing_models_reports_validation_error() {
     h.run_steps(4);
     assert_eq!(
         h.state().app.ui_error.as_deref(),
-        Some("Choose a voice model and prepare ContentVec / RMVPE in Setup.")
+        Some("Choose a voice model and prepare the embedder / F0 model in Setup.")
     );
     assert!(h.state().app.applied_chunk_ms.is_none());
 }

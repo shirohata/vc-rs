@@ -279,6 +279,10 @@ This lifecycle preserves three invariants:
 
 ## RVC Pipeline
 
+Model selectors and loading/building progress identify the feature-extractor
+role as **Embedder**, including for custom models. **ContentVec** identifies
+the standard reference download; it is not inferred from a custom file path.
+
 ```mermaid
 flowchart TD
     input["Device-rate mono chunk"] --> denoise["Off / Gate / RNNoise<br/>(device rate)"]

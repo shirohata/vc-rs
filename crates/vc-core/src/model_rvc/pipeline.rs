@@ -322,6 +322,8 @@ pub struct RvcPipelineConfig<'a> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LoadModelRole {
+    /// Historical name for the feature-extractor role; compatible custom
+    /// embedders are not necessarily ContentVec models.
     ContentVec,
     Rmvpe,
     Rvc,
@@ -331,7 +333,7 @@ pub enum LoadModelRole {
 impl LoadModelRole {
     pub fn label(self) -> &'static str {
         match self {
-            Self::ContentVec => "ContentVec",
+            Self::ContentVec => "Embedder",
             Self::Rmvpe => "RMVPE",
             Self::Rvc => "RVC",
             Self::Gtcrn => "GTCRN",

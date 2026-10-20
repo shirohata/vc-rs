@@ -345,7 +345,7 @@ impl VcGui {
                     .into_owned()
             })
             .unwrap_or_default();
-        let name = if index == 0 { "ContentVec" } else { "RMVPE" };
+        let name = model_setup::MODELS[index].name;
         let mut custom = match self.settings.support_custom_mode[index].as_str() {
             "custom" => true,
             "downloaded" => false,

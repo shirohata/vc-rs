@@ -706,7 +706,7 @@ impl VcGui {
                 || !model_setup::available(&self.settings.f0_model))
         {
             self.ui_error =
-                Some("Choose a voice model and prepare ContentVec / RMVPE in Setup.".into());
+                Some("Choose a voice model and prepare the embedder / F0 model in Setup.".into());
             return;
         }
         self.controller.set_live_params(self.settings.live());

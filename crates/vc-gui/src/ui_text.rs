@@ -44,13 +44,17 @@ pub fn engine_message(language: Language, message: &str) -> String {
         .strip_prefix("Loading ")
         .and_then(|s| s.strip_suffix(" model"))
     {
-        return format!("{role}モデルを読み込み中");
+        return if role == "Embedder" {
+            format!("{}を読み込み中", language.text(role))
+        } else {
+            format!("{role}モデルを読み込み中")
+        };
     }
     if let Some(role) = message
         .strip_prefix("Building ")
         .and_then(|s| s.strip_suffix(" TensorRT engine"))
     {
-        return format!("{role}のTensorRTエンジンを構築中");
+        return format!("{}のTensorRTエンジンを構築中", language.text(role));
     }
     if let Some(devices) = message.strip_prefix("Running (in: ") {
         return format!(
@@ -268,7 +272,7 @@ pub const TRANSLATIONS: &[(&str, &str)] = &[
     ("Use Next or Back to move through setup.", "「次へ」「戻る」でセットアップを進めます。"),
     ("Processing backend", "処理方式"),
     ("Windows App SDK runtime installation", "Windows App SDKランタイムのインストール"),
-    ("Choose ContentVec…", "ContentVecを選ぶ…"), ("Choose RMVPE…", "RMVPEを選ぶ…"),
+    ("Choose embedder…", "特徴抽出モデルを選ぶ…"), ("Choose RMVPE…", "RMVPEを選ぶ…"),
     ("Voice conversion", "音声変換"),
     ("Models are missing. Open Setup to select or download them.", "モデルが不足しています。セットアップで選択または取得してください。"),
     ("Convert .pth to ONNX", ".pthをONNXへ変換"),
@@ -279,13 +283,13 @@ pub const TRANSLATIONS: &[(&str, &str)] = &[
     ("Streaming exports carry NSF phase across chunks for the realtime engine.", "ストリーミング形式では、リアルタイム変換のチャンク間でNSF位相を引き継ぎます。"),
     ("Convert", "変換"), ("Retry", "再試行"), ("Close", "閉じる"),
     ("RVC model", "RVCモデル"), ("ONNX model", "ONNXモデル"), ("PyTorch checkpoint", "PyTorchチェックポイント"),
-    ("Choose a voice model and prepare ContentVec / RMVPE in Setup.", "セットアップで声のモデルを選び、ContentVec / RMVPEを用意してください。"),
+    ("Choose a voice model and prepare the embedder / F0 model in Setup.", "セットアップで声のモデル・特徴抽出モデル・F0推定モデルを用意してください。"),
     ("Status", "動作状況"), ("Stopped", "停止中"), ("Starting", "準備中"), ("Running", "実行中"), ("Stopping", "停止処理中"), ("Error", "エラー"),
     ("Error details", "エラー詳細（技術情報は原文）"),
     ("Apply / Start", "開始 / 再起動"), ("Passthrough", "元の声をそのまま出力"),
     ("Live passthrough switching requires all three models; Apply / Start after selecting them.", "実行中のパススルー切り替えには3種類のモデルが必要です。モデルを選んで「開始」または「再起動」を押してください。"),
     ("Models", "モデル"), ("PyTorch checkpoints must be converted to ONNX first.", "PyTorchチェックポイントは先にONNXへ変換してください。"),
-    ("Embedder", "埋め込みモデル"), ("F0 model", "F0推定モデル"),
+    ("Embedder", "特徴抽出モデル"), ("F0 model", "F0推定モデル"),
     ("Provider", "処理方式"), ("OpenVINO Device", "OpenVINOデバイス"), ("Default", "既定"), ("GPU Priority", "GPU優先度"), ("high", "高"), ("normal", "通常"),
     ("Audio", "音声入出力"), ("Input backend", "入力方式"), ("Output backend", "出力方式"),
     ("ASIO uses one driver for both directions; pick the same device for input and output.", "ASIOは入出力で1つのドライバを使います。同じデバイスを選んでください。"),
@@ -352,6 +356,22 @@ mod tests {
     }
     #[test]
     fn diagnostics_and_names_are_not_rewritten_as_ui_tokens() {
+        let embedder_role = vc_core::model_rvc::LoadModelRole::ContentVec.label();
+        assert_eq!(embedder_role, "Embedder");
+        let loading = format!("Loading {embedder_role} model");
+        let building = format!("Building {embedder_role} TensorRT engine");
+        assert_eq!(
+            engine_message(Language::English, &loading),
+            "Loading Embedder model"
+        );
+        assert_eq!(
+            engine_message(Language::Japanese, &loading),
+            "特徴抽出モデルを読み込み中"
+        );
+        assert_eq!(
+            engine_message(Language::Japanese, &building),
+            "特徴抽出モデルのTensorRTエンジンを構築中"
+        );
         assert_eq!(
             Language::Japanese.text("C:/models/voice.onnx"),
             "C:/models/voice.onnx"
