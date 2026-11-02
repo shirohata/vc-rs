@@ -1483,6 +1483,7 @@ impl VoiceModel for RvcPipeline {
             &mut self.nsf_scratch,
         );
         let nsf_noise = has_nsf.then_some(self.nsf_scratch.as_slice());
+        self.stream_state.time_state.prepare_phase(pitchf);
         let phase_in = self.stream_state.time_state.phase_in();
         if let Some(phase) = phase_in {
             let (abs_frame, abs_sample) = self.stream_state.time_state.absolute_position();
@@ -1508,7 +1509,7 @@ impl VoiceModel for RvcPipeline {
             self.speaker_id,
             rnd,
             nsf_noise,
-            phase_in,
+            self.stream_state.time_state.phase_inputs(),
             phase_out,
             out_audio,
         )?;
@@ -1625,19 +1626,28 @@ fn validate_process_timing(
 
 /// Derive the streaming NSF time base from inspected metadata, validating the
 /// format version we implement. `None` for conventional (non-streaming) exports.
-fn stream_params_from_info(info: &super::inspect::RvcModelInfo) -> Result<Option<StreamParams>> {
+pub(super) fn stream_params_from_info(
+    info: &super::inspect::RvcModelInfo,
+) -> Result<Option<StreamParams>> {
     let Some(stream) = info.stream else {
         return Ok(None);
     };
-    if stream.version != 1 {
+    if !matches!(stream.version, 1 | 2) {
         bail!(
-            "unsupported RVC stream_format_version {}; this build implements version 1",
+            "unsupported RVC stream_format_version {}; this build implements versions 1 and 2",
             stream.version
         );
     }
     Ok(Some(StreamParams {
         frame_hop: stream.frame_hop,
         sample_rate: stream.sample_rate,
+        noise_frame_hop: if stream.version == 2 {
+            stream.noise_frame_hop
+        } else {
+            0
+        },
+        phase_channels: stream.phase_channels,
+        linear_f0: stream.linear_f0,
     }))
 }
 

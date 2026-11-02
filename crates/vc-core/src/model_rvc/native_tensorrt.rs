@@ -71,12 +71,13 @@ mod ffi {
             // Optional streaming NSF inputs. `nsf_name`/`nsf` are null and `nsf_len`
             // is 0 (and `phase_name`/`phase` null) for conventional exports; for a
             // streaming export they bind the per-sample source noise and the
-            // single-element window-start phase under the model's input names.
+            // per-harmonic window-start phase under the model's input names.
             nsf_name: *const c_char,
             nsf: *const f32,
             nsf_len: usize,
             phase_name: *const c_char,
             phase: *const f32,
+            phase_len: usize,
             // Optional per-sample phase output copied back to the host
             // (`streaming_nsf_phase`). Null/0 to skip the copy.
             phase_out_name: *const c_char,
@@ -178,6 +179,8 @@ struct NativeRvcStream {
     // copied back so the host can pick the next window's `phase_in`.
     phase_out_name: Option<CString>,
     audio_len: NonZeroUsize,
+    noise_len: NonZeroUsize,
+    phase_channels: usize,
 }
 
 #[cfg_attr(not(native_tensorrt), allow(dead_code))]
@@ -463,8 +466,9 @@ impl NativeRvcEngine {
             (names.p_len.as_str(), &[1usize][..]),
             (names.sid.as_str(), &[1usize][..]),
         ];
+        let phase_shape = [1usize, 1, names.phase_channels()];
         if let Some(phase_in) = names.phase_in.as_deref() {
-            scalars.push((phase_in, &[1usize, 1, 1][..]));
+            scalars.push((phase_in, &phase_shape[..]));
         }
         let load_profile = profile_with_scalars(profile, &scalars);
         // Build with the full input profile (including p_len/sid, and phase_in for
@@ -532,7 +536,7 @@ impl NativeRvcEngine {
         // Streaming exports: per-output-sample NSF source noise `[1, audio_len, 1]`
         // and the window-start NSF phase. `None` for conventional exports.
         nsf_noise: Option<&[f32]>,
-        phase_in: Option<f32>,
+        phase_in: Option<&[f32]>,
         // Filled (when streaming) with the model's per-sample `streaming_nsf_phase`
         // output so the caller can pick the next window's `phase_in`.
         phase_out: Option<&mut Vec<f32>>,
@@ -1247,8 +1251,8 @@ fn native_rvc_stream(
         (None, None) => return Ok(None),
         _ => bail!("native TensorRT streaming RVC requires both nsf_noise and phase_in inputs"),
     };
-    // `nsf_noise` is `[1, audio_len, 1]`; its middle axis is the validated length.
-    // `streaming_nsf_phase` shares that length ([1, audio_len, 1]).
+    // V2 packs multiple noise domains per feature frame. Its phase trace uses
+    // the audio grid instead; keep both lengths separate from profile creation.
     let audio_len = profile
         .fixed_input_dims(nsf)?
         .get(1)
@@ -1275,7 +1279,12 @@ fn native_rvc_stream(
         nsf_name,
         phase_name,
         phase_out_name,
-        audio_len,
+        noise_len: audio_len,
+        audio_len: NonZeroUsize::new(names.stream_layout.as_deref().map_or(audio_len.get(), |s| {
+            audio_len.get() / s.noise_frame_hop * s.frame_hop
+        }))
+        .context("empty phase trace")?,
+        phase_channels: names.phase_channels(),
     }))
 }
 
@@ -1289,7 +1298,7 @@ fn infer_rvc(
     speaker_id: i64,
     rnd: Option<&[f32]>,
     nsf_noise: Option<&[f32]>,
-    phase_in: Option<f32>,
+    phase_in: Option<&[f32]>,
     mut phase_out: Option<&mut Vec<f32>>,
 ) -> Result<Vec<f32>> {
     let mut output = vec![0.0f32; engine.output_len.get()];
@@ -1320,22 +1329,22 @@ fn infer_rvc(
         None => (std::ptr::null(), std::ptr::null(), 0usize),
     };
     // Streaming NSF inputs, bound the same way: validate the caller's `nsf_noise`
-    // length against the engine's fixed `audio_len`, and pass `phase_in` as a
-    // single-element tensor. `phase_value` must outlive the FFI call.
-    let phase_value = [phase_in.unwrap_or(0.0)];
+    // length against its fixed packed-noise length; phases may have 1 or 9
+    // elements. Preserve their actual length across the FFI as well.
+    let phase_value = phase_in.unwrap_or(&[0.0]);
     let (nsf_name_ptr, nsf_ptr, nsf_len, phase_name_ptr, phase_ptr) = match engine.stream.as_ref() {
         Some(stream) => {
             let data = nsf_noise.ok_or_else(|| {
                 anyhow!("native TensorRT RVC model is streaming but no nsf_noise was provided")
             })?;
-            if data.len() != stream.audio_len.get() {
+            if data.len() != stream.noise_len.get() {
                 bail!(
-                    "native TensorRT RVC nsf_noise length {} does not match audio_len {}",
+                    "native TensorRT RVC nsf_noise length {} does not match expected packed-noise length {}",
                     data.len(),
-                    stream.audio_len.get()
+                    stream.noise_len.get()
                 );
             }
-            if phase_in.is_none() {
+            if phase_in.is_none() || phase_value.len() != stream.phase_channels {
                 bail!("native TensorRT RVC model is streaming but no phase_in was provided");
             }
             (
@@ -1369,7 +1378,7 @@ fn infer_rvc(
                 .and_then(|stream| stream.phase_out_name.as_ref().map(|name| (stream, name)))
             {
                 Some((stream, name)) => {
-                    buf.resize(stream.audio_len.get(), 0.0);
+                    buf.resize(stream.audio_len.get() * stream.phase_channels, 0.0);
                     (name.as_ptr(), buf.as_mut_ptr(), buf.len())
                 }
                 None => (std::ptr::null(), std::ptr::null_mut(), 0usize),
@@ -1394,6 +1403,7 @@ fn infer_rvc(
             nsf_len,
             phase_name_ptr,
             phase_ptr,
+            phase_in.map_or(0, <[f32]>::len),
             phase_out_name_ptr,
             phase_out_ptr,
             phase_out_len,
@@ -1444,7 +1454,7 @@ fn infer_rvc(
     _speaker_id: i64,
     _rnd: Option<&[f32]>,
     _nsf_noise: Option<&[f32]>,
-    _phase_in: Option<f32>,
+    _phase_in: Option<&[f32]>,
     _phase_out: Option<&mut Vec<f32>>,
 ) -> Result<Vec<f32>> {
     bail!("native TensorRT RVC inference is unavailable in this binary")
@@ -1647,6 +1657,7 @@ mod tests {
                         0,
                         std::ptr::null(),
                         std::ptr::null(),
+                        0,
                         std::ptr::null(),
                         std::ptr::null_mut(),
                         0,
@@ -1687,7 +1698,7 @@ mod tests {
                         0,
                         Some(&rnd),
                         Some(&noise),
-                        Some(phase_in),
+                        Some(&[phase_in]),
                         Some(&mut phase),
                     )
                     .unwrap();
@@ -1735,6 +1746,8 @@ mod streaming_input_tests {
             assert_eq!(stream.nsf_name.to_str().unwrap(), "nsf_noise");
             assert_eq!(stream.phase_name.to_str().unwrap(), "phase_in");
             assert_eq!(stream.audio_len.get(), 1600);
+            assert_eq!(stream.noise_len.get(), 1600);
+            assert_eq!(stream.phase_channels, 1);
             assert_eq!(
                 stream
                     .phase_out_name
@@ -1761,6 +1774,7 @@ mod streaming_input_tests {
             Some(StreamParams {
                 frame_hop: 400,
                 sample_rate: 40_000,
+                ..StreamParams::default()
             }),
         );
         let mut trace = vec![f32::NAN; 1600];

@@ -160,7 +160,16 @@ impl TensorRtSessionProfile {
         if let (Some(frame_hop), Some(nsf_noise)) = (stream_frame_hop, names.nsf_noise.as_ref()) {
             inputs.push(TensorRtInputShape {
                 name: nsf_noise.clone(),
-                dims: vec![1, frames.saturating_mul(frame_hop), 1],
+                dims: vec![
+                    1,
+                    frames.saturating_mul(
+                        names
+                            .stream_layout
+                            .as_deref()
+                            .map_or(frame_hop, |s| s.noise_frame_hop),
+                    ),
+                    1,
+                ],
             });
         }
         Self::new(ModelRole::Rvc, inputs)
@@ -624,13 +633,20 @@ impl RvcTensorRtPinnedBinding {
                 }
                 let nsf_noise = Tensor::<f32>::new(&input_allocator, vec![1, audio_len, 1])
                     .context("failed to allocate TensorRT RVC input 'nsf_noise'")?;
-                let phase_in = Tensor::<f32>::new(&input_allocator, vec![1usize, 1, 1])
-                    .context("failed to allocate TensorRT RVC input 'phase_in'")?;
+                let phase_in =
+                    Tensor::<f32>::new(&input_allocator, vec![1usize, 1, names.phase_channels()])
+                        .context("failed to allocate TensorRT RVC input 'phase_in'")?;
                 let phase_out = match names.per_sample_phase_out() {
                     Some(_) => Some(
-                        Tensor::<f32>::new(&output_allocator, vec![1, audio_len, 1]).context(
-                            "failed to allocate TensorRT RVC output 'streaming_nsf_phase'",
-                        )?,
+                        Tensor::<f32>::new(
+                            &output_allocator,
+                            vec![
+                                1,
+                                output_shape.iter().product::<usize>(),
+                                names.phase_channels(),
+                            ],
+                        )
+                        .context("failed to allocate TensorRT RVC output 'streaming_nsf_phase'")?,
                     ),
                     None => None,
                 };

@@ -96,7 +96,7 @@ pub(crate) fn build_decoder(
     }
 
     let x_act_final = b.unique("dec_x_act_final");
-    b.leaky_relu(&x, &x_act_final, 0.1);
+    b.leaky_relu(&x, &x_act_final, 0.01);
     let conv_post_w = b.add_weight(&format!("{prefix}conv_post.weight"))?;
     let audio = b.unique("audio_raw");
     // conv_post has bias=False in RVC
@@ -236,7 +236,9 @@ fn build_generator_nsf(
     }
 
     let x_act_final = b.unique("nsf_x_act_final");
-    b.leaky_relu(&x, &x_act_final, 0.1);
+    // Both RVC and Applio use functional.leaky_relu's default here (0.01),
+    // unlike the 0.1 activations inside the upsampling/residual stack.
+    b.leaky_relu(&x, &x_act_final, 0.01);
     let conv_post_w = b.add_weight(&format!("{prefix}conv_post.weight"))?;
     let audio = b.unique("nsf_audio_raw");
     b.conv1d(&x_act_final, &conv_post_w, None, &audio, 7, 1, 3, 1);

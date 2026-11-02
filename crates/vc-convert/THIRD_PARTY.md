@@ -1,4 +1,14 @@
-# Third-party notice: rvc-onnx-web
+# Third-party source notices
+
+`src/graph/applio.rs` implements Applio's MRF HiFi-GAN and RefineGAN decoder
+algorithms from [IAHispano/Applio](https://github.com/IAHispano/Applio/tree/5171e1dcf31a33d1afeb14ef7c6aac6dadae5dc1),
+Copyright (c) 2026 AI Hispano, MIT. See [LICENSE-Applio.txt](LICENSE-Applio.txt).
+The integer Kaiser sinc kernel follows torchaudio 2.7.1's resampling algorithm,
+Copyright (c) 2017 Facebook Inc. (Soumith Chintala), BSD-2-Clause; see
+[LICENSE-torchaudio.txt](LICENSE-torchaudio.txt). These source notices must
+accompany distributions containing the converter; no Python runtime is shipped.
+
+## rvc-onnx-web
 
 The `vc-convert` crate is a Rust port of
 [rvc-onnx-web](https://github.com/visgotti/rvc-onnx-web) by Joseph Viscardi

@@ -5,6 +5,7 @@
 //! `initializers`, `addWeight`, `addInt64Const`… through every function,
 //! this port centralizes that state in [`GraphBuilder`].
 
+pub(crate) mod applio;
 pub(crate) mod decoder;
 pub(crate) mod flow;
 pub(crate) mod nsf;

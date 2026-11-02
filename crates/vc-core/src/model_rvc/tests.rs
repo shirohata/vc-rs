@@ -960,6 +960,7 @@ fn check_legacy_streaming_session(provider: Provider, pinned: bool) {
                     Some(StreamParams {
                         frame_hop: HOP,
                         sample_rate: 40_000,
+                        ..StreamParams::default()
                     }),
                 );
                 let pitch = vec![100_i64; FRAMES];
@@ -988,7 +989,7 @@ fn check_legacy_streaming_session(provider: Provider, pinned: bool) {
                             0,
                             Some(&rnd),
                             Some(&noise),
-                            phase_in,
+                            state.phase_inputs(),
                             Some(&mut phase),
                             &mut audio,
                         )
@@ -1259,6 +1260,7 @@ mod vc_convert_ort {
             Some(StreamParams {
                 frame_hop: HOP,
                 sample_rate: 40_000,
+                ..StreamParams::default()
             }),
         );
         let (_, mut previous) = run(&mut session, frames, state.phase_in().unwrap());
@@ -1423,6 +1425,252 @@ fn vc_convert_real_model_matches_reference() {
             "converted audio diverges from rvc-onnx-web reference by {max_diff}"
         );
     }
+}
+
+/// Synthetic topology/streaming validation, deliberately separate from trained
+/// model audio qualification. All front-ends use this exact session/state path.
+#[cfg(any(feature = "ort", native_tensorrt))]
+fn check_applio_backend(provider: Provider, pinned: bool) {
+    use super::inspect::inspect_rvc_model;
+    use super::sessions::RvcModelSession;
+    use super::tensorrt::TensorRtSessionPurpose;
+    use super::time_state::RvcTimeState;
+    const FRAMES: usize = 8;
+    for (label, pth) in [
+        ("mrf", vc_convert::test_fixtures::tiny_applio_mrf_pth()),
+        (
+            "refine",
+            vc_convert::test_fixtures::tiny_applio_refine_pth(),
+        ),
+    ] {
+        let converted =
+            vc_convert::pth_to_onnx(pth, &vc_convert::ConvertOptions::default(), &mut |_| {})
+                .unwrap();
+        with_temp_model(label, &converted.onnx_bytes, |path| {
+            let info = inspect_rvc_model(path).unwrap();
+            let stream = info.stream.unwrap();
+            let advance_samples = 2 * stream.frame_hop;
+            assert_eq!(stream.version, 2);
+            let params = super::pipeline::stream_params_from_info(&info).unwrap();
+            let names = info.io_names.clone();
+            let profile = (provider.is_tensorrt() || pinned).then(|| {
+                TensorRtSessionProfile::rvc(FRAMES, 768, &names, Some(stream.frame_hop))
+                    .with_model_cache_key(tensor_rt_model_cache_key(path).unwrap())
+            });
+            let mut session = RvcModelSession::load(
+                path,
+                provider,
+                profile,
+                Some(768),
+                TensorRtRunMode::PinnedCpu,
+                TensorRtSessionPurpose::Main,
+                names.clone(),
+            )
+            .unwrap();
+            #[cfg(feature = "ort")]
+            if pinned {
+                use super::tensorrt::{RvcTensorRtBinding, RvcTensorRtPinnedBinding};
+                let shape = session.warmup_output_shape(FRAMES, 768, 0).unwrap();
+                let shape: Vec<usize> = shape.iter().map(|&x| x as usize).collect();
+                session.tensor_rt_binding = Some(RvcTensorRtBinding::Pinned(
+                    RvcTensorRtPinnedBinding::new_with_allocators(
+                        session.session.as_ref().unwrap(),
+                        &[1, FRAMES, 768],
+                        &[1, FRAMES],
+                        &shape,
+                        FRAMES as i64,
+                        0,
+                        &names,
+                        Some(FRAMES * stream.noise_frame_hop),
+                        ort::memory::Allocator::default(),
+                        ort::memory::Allocator::default(),
+                    )
+                    .unwrap(),
+                ));
+            }
+            let mut state = RvcTimeState::new(Some(8), params);
+            let phone: Vec<f32> = (0..FRAMES * 768)
+                .map(|i| (i as f32 * 0.13).sin() * 0.2)
+                .collect();
+            let pitch = [100_i64; FRAMES];
+            let f0 = [113_f32; FRAMES];
+            let mut rnd = Vec::new();
+            let mut noise = Vec::new();
+            let mut audio = Vec::new();
+            let mut phase = Vec::new();
+            let mut first = Vec::new();
+            for call in 0..4 {
+                if call == 3 {
+                    state.reset();
+                }
+                state.roll(2, FRAMES);
+                state.rnd_window_into(FRAMES, FRAMES, &mut rnd);
+                state.nsf_noise_window_into(FRAMES, FRAMES, &mut noise);
+                state.prepare_phase(&f0);
+                let initial = state.phase_inputs().unwrap().to_vec();
+                session
+                    .infer(
+                        &phone,
+                        &[1, FRAMES as i64, 768],
+                        FRAMES,
+                        &pitch,
+                        &f0,
+                        0,
+                        Some(&rnd),
+                        Some(&noise),
+                        state.phase_inputs(),
+                        Some(&mut phase),
+                        &mut audio,
+                    )
+                    .unwrap();
+                assert_eq!(audio.len(), FRAMES * stream.frame_hop);
+                assert!(audio.iter().all(|v| v.is_finite()));
+                if !phase.is_empty() {
+                    assert_eq!(
+                        phase.len(),
+                        FRAMES * stream.frame_hop * stream.phase_channels
+                    );
+                    if stream.linear_f0 {
+                        // Trained RefineGAN amplifies small scan drift that a
+                        // boundary-only phase check misses. Check the full trace
+                        // against analytic constant-F0 phase on every backend.
+                        for (sample, &actual) in phase.iter().enumerate() {
+                            let expected = (f64::from(initial[0])
+                                + 113. * (sample + 1) as f64 / f64::from(stream.sample_rate))
+                            .rem_euclid(1.) as f32;
+                            let distance = (expected - actual).abs().rem_euclid(1.);
+                            assert!(
+                                distance.min(1. - distance) < 5e-6,
+                                "{label} {provider:?} sample {sample}: {actual} vs {expected}"
+                            );
+                        }
+                    }
+                    for h in 0..stream.phase_channels {
+                        let expected = (initial[h]
+                            + 113. * (h + 1) as f32 * advance_samples as f32
+                                / stream.sample_rate as f32)
+                            .rem_euclid(1.);
+                        let actual = phase[(advance_samples - 1) * stream.phase_channels + h];
+                        let distance = (expected - actual).abs().rem_euclid(1.);
+                        assert!(
+                            distance.min(1. - distance) < 2e-4,
+                            "{label} {provider:?} harmonic {h}: {actual} vs {expected}"
+                        );
+                    }
+                }
+                if !state.set_phase_from_output(&phase) {
+                    state.advance_phase(&f0);
+                }
+                for (h, actual) in state.phase_inputs().unwrap().iter().enumerate() {
+                    let anchor = if stream.linear_f0 {
+                        stream.frame_hop / 2
+                    } else {
+                        0
+                    };
+                    let expected = (initial[h]
+                        + 113. * (h + 1) as f32 * (advance_samples + anchor) as f32
+                            / stream.sample_rate as f32)
+                        .rem_euclid(1.);
+                    let distance = (expected - actual).abs().rem_euclid(1.);
+                    assert!(
+                        distance.min(1. - distance) < 2e-4,
+                        "{label} phase carry {h}: {actual} vs {expected}"
+                    );
+                }
+                if call == 0 {
+                    first.clone_from(&audio);
+                }
+                if call == 3 {
+                    assert!(first.iter().zip(&audio).all(|(a, b)| (a - b).abs() < 1e-6));
+                }
+                if let Some(dir) = std::env::var_os("VC_RS_APPLIO_DUMP") {
+                    let dir = std::path::PathBuf::from(dir);
+                    fs::create_dir_all(&dir).unwrap();
+                    fs::write(
+                        dir.join(format!("{label}-{call}.f32")),
+                        audio
+                            .iter()
+                            .flat_map(|x| x.to_le_bytes())
+                            .collect::<Vec<_>>(),
+                    )
+                    .unwrap();
+                }
+            }
+            // A rising F0 exposes the half_pixel edge clamp: the next window's
+            // leading half-frame differs, but the shared interior must retain
+            // its phase. Exercise both model-trace and CPU-fallback carries.
+            for fallback in [false, true] {
+                state.reset();
+                let mut previous: Vec<f32> = Vec::new();
+                for window in 0..2 {
+                    let f0: Vec<f32> = (0..FRAMES)
+                        .map(|f| 100. + (f + window * 2) as f32 * 30.)
+                        .collect();
+                    state.roll(2, FRAMES);
+                    state.rnd_window_into(FRAMES, FRAMES, &mut rnd);
+                    state.nsf_noise_window_into(FRAMES, FRAMES, &mut noise);
+                    state.prepare_phase(&f0);
+                    session
+                        .infer(
+                            &phone,
+                            &[1, FRAMES as i64, 768],
+                            FRAMES,
+                            &pitch,
+                            &f0,
+                            0,
+                            Some(&rnd),
+                            Some(&noise),
+                            state.phase_inputs(),
+                            Some(&mut phase),
+                            &mut audio,
+                        )
+                        .unwrap();
+                    if window == 1 {
+                        let edge = if stream.linear_f0 {
+                            stream.frame_hop / 2
+                        } else {
+                            0
+                        };
+                        for sample in edge..(FRAMES - 2) * stream.frame_hop - edge {
+                            for h in 0..stream.phase_channels {
+                                let a = previous
+                                    [(sample + advance_samples) * stream.phase_channels + h];
+                                let b = phase[sample * stream.phase_channels + h];
+                                let distance = (a - b).abs().rem_euclid(1.);
+                                assert!(distance.min(1. - distance) < 2e-4,
+                                    "{label} {provider:?} glide fallback={fallback} sample={sample}: {a} vs {b}");
+                            }
+                        }
+                    }
+                    previous.clone_from(&phase);
+                    if fallback || !state.set_phase_from_output(&phase) {
+                        state.advance_phase(&f0);
+                    }
+                }
+            }
+        });
+    }
+}
+
+#[cfg(feature = "ort")]
+#[test]
+fn applio_cpu_streaming_and_pinned_bindings() {
+    check_applio_backend(Provider::Cpu, false);
+    check_applio_backend(Provider::Cpu, true);
+}
+
+#[cfg(all(windows, feature = "windowsml"))]
+#[test]
+#[ignore = "requires Windows ML DirectML device"]
+fn applio_directml_streaming() {
+    check_applio_backend(Provider::WindowsMlDirectMl, false);
+}
+
+#[cfg(native_tensorrt)]
+#[test]
+#[ignore = "requires native TensorRT SDK/device"]
+fn applio_native_tensorrt_streaming() {
+    check_applio_backend(Provider::TensorRt, false);
 }
 
 /// Best-effort rnd channel count from the converted model's own metadata

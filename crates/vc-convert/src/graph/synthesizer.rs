@@ -12,6 +12,7 @@ use crate::checkpoint::{ParsedCheckpoint, RvcVersion};
 use crate::onnx::{DataType, Graph, Model};
 use crate::{ConvertOptions, ExportMode};
 
+use super::applio::{self, Vocoder};
 use super::nsf::DecoderOptions;
 use super::{decoder, flow, text_encoder, Fixed, GraphBuilder, Sym};
 
@@ -29,14 +30,43 @@ pub(crate) fn validate_checkpoint(checkpoint: &ParsedCheckpoint) -> Result<()> {
     if !checkpoint.use_f0 {
         bail!("only F0-enabled RVC checkpoints are supported (this file reports f0=0)");
     }
-    if !checkpoint
-        .weights
-        .contains_key("dec.m_source.l_linear.weight")
+    let vocoder = Vocoder::of(checkpoint)?;
+    let config = &checkpoint.config;
+    let frame_hop = config
+        .upsample_rates
+        .iter()
+        .try_fold(1usize, |a, &b| a.checked_mul(b));
+    if config.upsample_rates.is_empty()
+        || config.upsample_rates.len() > 8
+        || config.upsample_rates.len() != config.upsample_kernel_sizes.len()
+        || config.upsample_rates.iter().any(|&r| r == 0 || r > 64)
+        || config
+            .upsample_rates
+            .iter()
+            .zip(&config.upsample_kernel_sizes)
+            .any(|(&u, &k)| k < u || k > 256)
+        || config.sr == 0
+        || frame_hop.and_then(|h| h.checked_mul(100)) != Some(config.sr as usize)
+    {
+        bail!("invalid decoder configuration: upsampling must match the 10 ms sample-rate grid");
+    }
+    if config.resblock != "1"
+        || config.resblock_kernel_sizes.len() != config.resblock_dilation_sizes.len()
+    {
+        bail!("unsupported decoder residual-block configuration");
+    }
+    if vocoder != Vocoder::Refine
+        && !checkpoint
+            .weights
+            .contains_key("dec.m_source.l_linear.weight")
     {
         bail!(
             "unsupported decoder: the checkpoint lacks the standard NSF HiFi-GAN \
              source module (dec.m_source.l_linear.weight)"
         );
+    }
+    if vocoder != Vocoder::Hifi {
+        applio::noise_hop(checkpoint, vocoder)?;
     }
     Ok(())
 }
@@ -56,6 +86,8 @@ pub(crate) fn build_model(
     let config = &checkpoint.config;
     let use_f0 = checkpoint.use_f0;
     let hidden_dim = checkpoint.version.hidden_dim();
+    let vocoder = Vocoder::of(checkpoint)?;
+    let noise_hop = applio::noise_hop(checkpoint, vocoder)?;
 
     let mut b = GraphBuilder::new(&checkpoint.weights);
 
@@ -100,12 +132,20 @@ pub(crate) fn build_model(
         b.inputs.push(GraphBuilder::value_info(
             "nsf_noise",
             DataType::Float,
-            &[Fixed(1), Sym("audio_len"), Fixed(1)],
+            &[
+                Fixed(1),
+                Sym(if vocoder == Vocoder::Hifi {
+                    "audio_len"
+                } else {
+                    "noise_len"
+                }),
+                Fixed(1),
+            ],
         ));
         b.inputs.push(GraphBuilder::value_info(
             "phase_in",
             DataType::Float,
-            &[Fixed(1), Fixed(1), Fixed(1)],
+            &[Fixed(1), Fixed(1), Fixed(vocoder.phases() as i64)],
         ));
     }
 
@@ -138,15 +178,19 @@ pub(crate) fn build_model(
         nsf_noise_input: streaming.then_some("nsf_noise"),
         phase_input: streaming.then_some("phase_in"),
     };
-    let dec = decoder::build_decoder(
-        &mut b,
-        config,
-        &z_masked,
-        use_f0.then_some("pitchf"),
-        &g,
-        use_f0,
-        &decoder_options,
-    )?;
+    let dec = if vocoder == Vocoder::Hifi {
+        decoder::build_decoder(
+            &mut b,
+            config,
+            &z_masked,
+            use_f0.then_some("pitchf"),
+            &g,
+            use_f0,
+            &decoder_options,
+        )?
+    } else {
+        applio::build(&mut b, checkpoint, vocoder, &z_masked, &g, streaming)?
+    };
 
     // ---- outputs -----------------------------------------------------------
     b.outputs.push(GraphBuilder::value_info(
@@ -162,13 +206,13 @@ pub(crate) fn build_model(
         let Some(phase_trace) = &dec.phase_trace else {
             bail!("streaming export requires an NSF phase trace output");
         };
-        if !b.rename_node_output(phase_trace, "streaming_nsf_phase") {
+        if phase_trace != "streaming_nsf_phase" {
             b.unary("Identity", phase_trace, "streaming_nsf_phase");
         }
         b.outputs.push(GraphBuilder::value_info(
             "streaming_nsf_phase",
             DataType::Float,
-            &[Fixed(1), Sym("audio_len"), Fixed(1)],
+            &[Fixed(1), Sym("audio_len"), Fixed(vocoder.phases() as i64)],
         ));
     }
 
@@ -178,6 +222,37 @@ pub(crate) fn build_model(
     let mut metadata_props = crate::metadata::export(checkpoint, options);
     if streaming {
         metadata_props.extend(streaming_metadata(checkpoint));
+        if vocoder != Vocoder::Hifi {
+            // V1's scalar phase/audio-rate noise remains unchanged for existing
+            // models. V2 packs Gaussian domains per feature frame, with all
+            // harmonic phases carried independently.
+            for (key, value) in &mut metadata_props {
+                if key == "rvc.stream_format_version" {
+                    *value = "2".into();
+                }
+            }
+            metadata_props.extend([
+                ("rvc.noise_frame_hop".into(), noise_hop.to_string()),
+                ("rvc.phase_channels".into(), vocoder.phases().to_string()),
+                ("rvc.vocoder".into(), checkpoint.vocoder.clone()),
+            ]);
+            metadata_props.retain(|(key, _)| {
+                !matches!(
+                    key.as_str(),
+                    "rvc.streaming.inputs" | "rvc.streaming.outputs" | "rvc.streaming.limitations"
+                )
+            });
+            for (key, value) in &mut metadata_props {
+                if key == "rvc.streaming.phase_contract" {
+                    *value = if vocoder == applio::Vocoder::Refine {
+                        "absolute_window_start; carry trace[advance_frames*frame_hop+floor(frame_hop/2)-1], then subtract next_window_f0[0]*floor(frame_hop/2)/sample_rate to compensate half_pixel interpolation's clamped prefix"
+                    } else {
+                        "absolute_window_start; one normalized phase per harmonic, preceding the first sample increment; carry trace[(advance_frames*frame_hop)-1] into the next overlapping window"
+                    }.into();
+                }
+            }
+            metadata_props.push(("rvc.streaming.layout".into(), "feature-major Gaussian domains: source(sample,harmonic), then each stage/branch AdaIN before/after(sample,channel); phase_in and phase trace carry every harmonic; convolution caches are not exported".into()));
+        }
     }
 
     Ok(Model {

@@ -1038,7 +1038,10 @@ impl RvcModelSession {
                         nsf_name,
                         Tensor::from_array(([1usize, audio_len, 1usize], vec![0.0f32; audio_len]))?,
                         phase_name,
-                        Tensor::from_array(([1usize, 1, 1], vec![0.0f32]))?,
+                        Tensor::from_array((
+                            [1usize, 1, self.io_names.phase_channels()],
+                            vec![0.0f32; self.io_names.phase_channels()],
+                        ))?,
                     ))
                 }
                 _ => None,
@@ -1252,7 +1255,7 @@ impl RvcModelSession {
         // session-run path and the native TensorRT path; the ORT fixed-shape
         // IoBinding paths reject streaming at load.
         nsf_noise: Option<&[f32]>,
-        phase_in: Option<f32>,
+        phase_in: Option<&[f32]>,
         // Filled (when streaming) with the model's per-sample `streaming_nsf_phase`
         // output, from which the caller picks the next chunk's `phase_in`.
         phase_out: Option<&mut Vec<f32>>,
@@ -1370,13 +1373,13 @@ impl RvcModelSession {
         pitch_shape: &[usize; 2],
         rnd: Option<&[f32]>,
         nsf_noise: Option<&[f32]>,
-        phase_in: Option<f32>,
+        phase_in: Option<&[f32]>,
         phase_out: Option<&mut Vec<f32>>,
         out: &mut Vec<f32>,
     ) -> Result<()> {
         let p_len_value = [frame_len as i64];
         let sid_value = [speaker_id];
-        let phase_value = [phase_in.unwrap_or(0.0)];
+        let phase_value = phase_in.unwrap_or(&[0.0]);
         let feats = TensorRef::from_array_view((feats_shape, feats))?;
         let p_len = TensorRef::from_array_view(([1usize], p_len_value.as_slice()))?;
         let pitch = TensorRef::from_array_view((*pitch_shape, pitch))?;
@@ -1387,7 +1390,12 @@ impl RvcModelSession {
         // Streaming NSF inputs: resolve name + data here (validation), build the
         // tensor views after taking the session borrow below.
         let nsf = resolve_optional_input(names.nsf_noise.as_deref(), nsf_noise, "nsf_noise")?;
-        let stream_audio_len = nsf.as_ref().map(|(_, data)| data.len());
+        let stream_audio_len = nsf.as_ref().map(|(_, data)| {
+            names
+                .stream_layout
+                .as_deref()
+                .map_or(data.len(), |s| frame_len * s.frame_hop)
+        });
         let phase = match (names.phase_in.as_deref(), phase_in) {
             (Some(name), Some(_)) => Some(name),
             (Some(name), None) => {
@@ -1413,7 +1421,7 @@ impl RvcModelSession {
         let phase = match phase {
             Some(name) => Some((
                 name,
-                TensorRef::from_array_view(([1usize, 1, 1], phase_value.as_slice()))?,
+                TensorRef::from_array_view(([1usize, 1, names.phase_channels()], phase_value))?,
             )),
             None => None,
         };
@@ -1472,8 +1480,8 @@ impl RvcModelSession {
                     let (shape, data) = value.try_extract_tensor::<f32>()?;
                     let audio_len =
                         stream_audio_len.context("RVC phase output requires NSF noise")?;
-                    if shape.as_ref() != [1, audio_len as i64, 1] {
-                        bail!("RVC phase output '{phase_out_name}' must be [1, {audio_len}, 1], got {shape}");
+                    if shape.as_ref() != [1, audio_len as i64, names.phase_channels() as i64] {
+                        bail!("RVC phase output '{phase_out_name}' must be [1, {audio_len}, {}], got {shape}", names.phase_channels());
                     }
                     phase_out.extend_from_slice(data);
                 }
@@ -1608,7 +1616,7 @@ impl RvcModelSession {
         // Streaming-export NSF source noise `[1, audio_len, 1]` and window-start
         // phase; bound by the pinned-CPU path, rejected by the CUDA-graph path.
         nsf_noise: Option<&[f32]>,
-        phase_in: Option<f32>,
+        phase_in: Option<&[f32]>,
         // Filled (when streaming) with the model's per-sample `streaming_nsf_phase`
         // output for the caller to pick the next chunk's `phase_in`.
         phase_out: Option<&mut Vec<f32>>,
@@ -1681,7 +1689,11 @@ impl RvcModelSession {
                     let phase_name = binding.names.phase_in.as_deref().ok_or_else(|| {
                         anyhow!("RVC streaming binding is missing its 'phase_in' input name")
                     })?;
-                    copy_f32_tensor(phase_tensor, &[phase_in.unwrap_or(0.0)], "phase_in")?;
+                    copy_f32_tensor(
+                        phase_tensor,
+                        phase_in.context("missing phase_in")?,
+                        "phase_in",
+                    )?;
                     binding
                         .binding
                         .bind_input(phase_name, phase_tensor)

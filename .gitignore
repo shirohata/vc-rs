@@ -30,6 +30,9 @@ Thumbs.db
 !crates/vc-convert/tests/fixtures/tiny_v1.pth
 !crates/vc-convert/tests/fixtures/tiny_v2_f0.pth
 !crates/vc-convert/tests/fixtures/tiny_v2_nof0.pth
+!crates/vc-convert/tests/fixtures/tiny_applio_mrf.pth
+!crates/vc-convert/tests/fixtures/tiny_applio_refine.pth
+__pycache__/
 *.pt
 models/
 

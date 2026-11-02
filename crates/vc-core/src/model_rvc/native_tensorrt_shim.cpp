@@ -691,13 +691,14 @@ extern "C" int vc_rs_trt_rvc_infer(
     std::size_t rnd_len,
     // Optional streaming NSF inputs: nsf_name/nsf are null (nsf_len 0) and
     // phase_name/phase null for conventional exports; non-null binds the
-    // per-output-sample source noise [1, audio_len, 1] and the single-element
-    // window-start phase [1, 1, 1] under this engine's streaming input names.
+    // packed Gaussian noise [1, noise_len, 1] and the window-start phase
+    // [1, 1, harmonics] under this engine's streaming input names.
     char const* nsf_name,
     float const* nsf,
     std::size_t nsf_len,
     char const* phase_name,
     float const* phase,
+    std::size_t phase_len,
     // Optional per-sample phase output (`streaming_nsf_phase`) copied back to the
     // host after inference; null/0 skips the copy.
     char const* phase_out_name,
@@ -768,12 +769,15 @@ extern "C" int vc_rs_trt_rvc_infer(
         return 1;
     }
     // Streaming NSF source noise and window-start phase, when present. The phase
-    // tensor is a single float ([1, 1, 1]). Legacy exports use CPU phase carry;
+    // tensor has one float per harmonic. Legacy exports use CPU phase carry;
     // current exports return a per-sample phase output copied back below.
     if (nsf != nullptr && !copy_to_device(*native, nsf_name, nsf, nsf_len * sizeof(float), msg)) {
         return 1;
     }
-    if (phase != nullptr && !copy_to_device(*native, phase_name, phase, sizeof(float), msg)) {
+    // Keep the caller's actual element count across the FFI: using the engine's
+    // expected byte count here could read past a short phase slice.
+    if (phase != nullptr && !copy_to_device(*native, phase_name, phase,
+            phase_len * sizeof(float), msg)) {
         return 1;
     }
     if ((phase_out_name == nullptr) != (phase_out == nullptr)) {

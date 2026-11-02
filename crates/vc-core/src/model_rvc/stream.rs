@@ -351,6 +351,7 @@ mod timeline_tests {
                 Some(StreamParams {
                     frame_hop: 480,
                     sample_rate: 48_000,
+                    ..StreamParams::default()
                 }),
                 44_100,
                 chunk_samples,

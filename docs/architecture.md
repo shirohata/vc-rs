@@ -163,6 +163,12 @@ unaffected stages.
 
 ## Realtime Topology
 
+Applio MRF HiFi-GAN and RefineGAN exports extend the shared model session with
+stream format v2: packed per-feature-frame multi-scale Gaussian domains and
+per-harmonic phase carry. Standard HiFi-GAN keeps v1. Conversion, random state,
+backend binding and resets remain shared; no front-end-specific inference path
+is introduced. See [Applio model contracts and validation](applio_ja.md).
+
 ```mermaid
 flowchart LR
     mic["Input device"] --> in_cb["Input audio callback"]

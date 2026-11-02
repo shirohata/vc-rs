@@ -20,6 +20,8 @@ input or WAV files into another voice using an ONNX-format RVC model.
   use VST3 with pitch/gain automation and settings saved in your DAW project.
 - **No Python setup; bring your existing models** — prebuilt apps are available.
   The GUI converts supported RVC v2 / F0 PTH models to ONNX and downloads support models.
+  [Applio MRF HiFi-GAN / RefineGAN support](docs/applio_ja.md) is experimental;
+  trained-model audio and performance qualification is separate from synthetic tests.
 - **Audio callbacks do not wait for inference** — workers perform inference;
   callbacks move audio through lock-free ring buffers. Overload can still cause
   drops or silence, so tune the chunk size for your environment.

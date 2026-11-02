@@ -28,6 +28,12 @@ copyright and license notices with that code.
 - License: MIT
 - Upstream license copyright notices include AI Hispano.
 
+`vc-convert/src/graph/applio.rs` translates the MRF HiFi-GAN and RefineGAN
+decoder algorithms at commit `5171e1dcf31a33d1afeb14ef7c6aac6dadae5dc1`.
+The full MIT notice is in `crates/vc-convert/LICENSE-Applio.txt`. Its Kaiser
+sinc resampler follows torchaudio 2.7.1; the BSD-2-Clause notice is in
+`crates/vc-convert/LICENSE-torchaudio.txt`.
+
 ## External Model Weights
 
 Pretrained model weights are not included in this repository. The optional

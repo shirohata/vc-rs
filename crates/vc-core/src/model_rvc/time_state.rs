@@ -145,12 +145,17 @@ impl RndRollingBuffer {
 
 /// Time base for a streaming export's NSF phase / `nsf_noise`, from the model's
 /// `rvc.frame_hop` / `rvc.sample_rate` metadata.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub(super) struct StreamParams {
     /// Output samples per feature frame (`audio_len == feature_frames * frame_hop`).
     pub(super) frame_hop: usize,
     /// Output sample rate — the phase advance time base (`f0 / sample_rate`).
     pub(super) sample_rate: u32,
+    /// Zero selects legacy V1's sample-major scalar noise. V2 packs independent
+    /// multi-scale noise domains per feature frame; crop whole frames first.
+    pub(super) noise_frame_hop: usize,
+    pub(super) phase_channels: usize,
+    pub(super) linear_f0: bool,
 }
 
 /// NSF fundamental-phase carry for a streaming export.
@@ -163,22 +168,31 @@ pub(super) struct StreamParams {
 ///
 /// vc-rs feeds *overlapping* windows, so the exporter's "carry phase_out only to
 /// an immediately adjacent next window" rule does not apply — successive windows
-/// are not adjacent. Instead we carry the phase at the window start and advance it
-/// by exactly the frames the window scrolls past each chunk. Because the chunk
-/// size is fixed, the window advances by a constant `advance_frames` and those are
-/// the first `advance_frames` frames of the current window's `pitchf` (which is
-/// tail-aligned), so the advance reproduces the model's per-frame phase step
-/// `f0 / sample_rate * frame_hop` exactly, on the CPU.
+/// are not adjacent. Advance by the frames the window scrolls past. Nearest F0
+/// integrates `f0 / sample_rate * frame_hop` per frame; RefineGAN integrates the
+/// interpolated sample grid and resolves its first-frame-center anchor against
+/// the next window's clamped prefix in `prepare_phase`.
 struct PhaseState {
     /// Normalized phase (fraction of a cycle, `[0, 1)`) at the current window's
-    /// start before its first sample increment — fed straight to `phase_in`.
+    /// start before its first sample increment, or at the pending center anchor.
     window_start_phase: f64,
+    values: Vec<f32>,
+    /// Linear F0 clamps each window's leading half-frame. Carry at the first
+    /// frame center, then remove the next window's own clamped prefix.
+    anchor_pending: bool,
 }
 
 impl PhaseState {
-    fn new() -> Self {
+    fn new(channels: usize) -> Self {
+        let mut rng = GaussianNoise::new(0x5048_4153_4553);
+        let mut values = vec![0.; channels.max(1)];
+        for v in &mut values[1..] {
+            *v = rng.next_unit() as f32;
+        }
         Self {
             window_start_phase: 0.0,
+            values,
+            anchor_pending: false,
         }
     }
 
@@ -186,6 +200,39 @@ impl PhaseState {
     /// their `pitchf` (the same `nsff0` the model consumes), reproducing the
     /// model's per-frame step `f0 / sample_rate * frame_hop`.
     fn advance(&mut self, pitchf: &[f32], advance_frames: usize, params: StreamParams) {
+        if params.noise_frame_hop != 0 {
+            if advance_frames == 0 {
+                return;
+            }
+            let mut cycles = 0.0_f64;
+            let anchor = if params.linear_f0 {
+                params.frame_hop / 2
+            } else {
+                0
+            };
+            for sample in 0..advance_frames * params.frame_hop + anchor {
+                let position = if params.linear_f0 {
+                    (sample as f64 + 0.5) / params.frame_hop as f64 - 0.5
+                } else {
+                    (sample / params.frame_hop) as f64
+                };
+                let position = position.clamp(0., pitchf.len().saturating_sub(1) as f64);
+                let left = position.floor() as usize;
+                let a = f64::from(*pitchf.get(left).unwrap_or(&0.));
+                let z = f64::from(
+                    *pitchf
+                        .get(left + 1)
+                        .unwrap_or_else(|| pitchf.get(left).unwrap_or(&0.)),
+                );
+                cycles += (a + (z - a) * (position - left as f64)) / params.sample_rate as f64;
+            }
+            for (harmonic, value) in self.values.iter_mut().enumerate() {
+                *value = (f64::from(*value) + cycles * (harmonic + 1) as f64).rem_euclid(1.) as f32;
+            }
+            self.window_start_phase = f64::from(self.values[0]);
+            self.anchor_pending = params.linear_f0;
+            return;
+        }
         let n = advance_frames.min(pitchf.len());
         let mut acc = self.window_start_phase;
         let hop = params.frame_hop as f64;
@@ -197,6 +244,7 @@ impl PhaseState {
         // matters, and keeping it bounded avoids f64 precision loss over a long
         // stream.
         self.window_start_phase = acc.rem_euclid(1.0);
+        self.values[0] = self.window_start_phase as f32;
     }
 }
 
@@ -232,8 +280,9 @@ impl RvcTimeState {
     pub(super) fn new(rnd_channels: Option<usize>, stream: Option<StreamParams>) -> Self {
         Self {
             rnd: rnd_channels.map(|channels| RndRollingBuffer::with_seed(channels, RVC_RND_SEED)),
-            nsf: stream.map(|_| RndRollingBuffer::with_seed(1, NSF_NOISE_SEED)),
-            phase: stream.map(|_| PhaseState::new()),
+            nsf: stream
+                .map(|s| RndRollingBuffer::with_seed(s.noise_frame_hop.max(1), NSF_NOISE_SEED)),
+            phase: stream.map(|s| PhaseState::new(s.phase_channels)),
             stream,
             last_advance_frames: 0,
             abs_frame: 0,
@@ -250,10 +299,14 @@ impl RvcTimeState {
             rnd.roll(new_frames, total_frames);
         }
         if let (Some(nsf), Some(params)) = (self.nsf.as_mut(), self.stream) {
-            nsf.roll(
-                new_frames * params.frame_hop,
-                total_frames * params.frame_hop,
-            );
+            if params.noise_frame_hop == 0 {
+                nsf.roll(
+                    new_frames * params.frame_hop,
+                    total_frames * params.frame_hop,
+                );
+            } else {
+                nsf.roll(new_frames, total_frames);
+            }
             self.abs_sample = self
                 .abs_sample
                 .saturating_add((new_frames * params.frame_hop) as u64);
@@ -292,6 +345,25 @@ impl RvcTimeState {
     ) -> bool {
         match (self.nsf.as_mut(), self.stream) {
             (Some(nsf), Some(params)) => {
+                if params.noise_frame_hop != 0 {
+                    // Unlike V1's scalar audio grid, crop V2 on WHOLE feature
+                    // frames before unpacking its different sample-rate domains.
+                    center_crop_frames(
+                        &nsf.buffer,
+                        nsf.channels,
+                        nsf.buffer.len() / nsf.channels,
+                        feature_len_before_trim,
+                        &mut nsf.crop_scratch,
+                    );
+                    align_tail_frames(
+                        &nsf.crop_scratch,
+                        nsf.channels,
+                        feature_len_before_trim,
+                        feature_len,
+                        out,
+                    );
+                    return true;
+                }
                 nsf.window_into(
                     feature_len_before_trim * params.frame_hop,
                     feature_len * params.frame_hop,
@@ -308,6 +380,9 @@ impl RvcTimeState {
     pub(super) fn phase_in(&self) -> Option<f32> {
         self.phase.as_ref().map(|p| p.window_start_phase as f32)
     }
+    pub(super) fn phase_inputs(&self) -> Option<&[f32]> {
+        self.phase.as_ref().map(|p| p.values.as_slice())
+    }
 
     /// Absolute (feature-frame, output-sample) position of the rolling window
     /// tail. Advances every chunk and resets to `(0, 0)`; exposed for diagnostics
@@ -319,9 +394,10 @@ impl RvcTimeState {
     /// Set the next chunk's window-start phase directly from the model's
     /// per-sample phase output (`streaming_nsf_phase`). Each output includes that
     /// sample's phase increment, whereas `phase_in` precedes the first increment.
-    /// Therefore a window advancing N samples carries output[N - 1], not output[N];
-    /// the latter would add one extra increment on every chunk. Keep the overlapping
-    /// model-window regression in tests.rs aligned with this boundary convention.
+    /// A nearest-F0 window advancing N samples carries output[N - 1]. Linear F0
+    /// instead anchors half a frame later; `prepare_phase` removes the next
+    /// window's clamped prefix. Keep tests.rs's overlapping-window regression
+    /// aligned with this boundary convention.
     ///
     /// Returns `false` (leaving the phase unchanged) for non-streaming exports or
     /// when the output is too short to contain that sample — the caller then falls
@@ -336,14 +412,47 @@ impl RvcTimeState {
             return false;
         };
         // A stationary window keeps its phase even when no output is available.
-        let Some(index) = advance_samples.checked_sub(1) else {
+        if advance_samples == 0 {
             return true;
+        }
+        let anchor = if params.linear_f0 {
+            params.frame_hop / 2
+        } else {
+            0
         };
-        let Some(&value) = phase_samples.get(index) else {
+        let index = advance_samples + anchor - 1;
+        let channels = phase.values.len();
+        let Some(values) = phase_samples.get(index * channels..(index + 1) * channels) else {
             return false;
         };
-        phase.window_start_phase = (value as f64).rem_euclid(1.0);
+        if values.iter().any(|v| !v.is_finite()) {
+            return false;
+        }
+        for (out, value) in phase.values.iter_mut().zip(values) {
+            *out = value.rem_euclid(1.);
+        }
+        phase.window_start_phase = f64::from(phase.values[0]);
+        phase.anchor_pending = params.linear_f0;
         true
+    }
+
+    /// Resolve RefineGAN's first-frame-center anchor using the final F0 of this
+    /// window, after feature/pitch alignment. The interpolation's clamped prefix
+    /// differs between overlapping windows when F0 changes; carrying just the
+    /// sample-boundary phase would introduce a permanent source-phase offset.
+    pub(super) fn prepare_phase(&mut self, pitchf: &[f32]) {
+        if let (Some(phase), Some(params)) = (self.phase.as_mut(), self.stream) {
+            if !phase.anchor_pending {
+                return;
+            }
+            let prefix = f64::from(*pitchf.first().unwrap_or(&0.)) * (params.frame_hop / 2) as f64
+                / params.sample_rate as f64;
+            for (h, value) in phase.values.iter_mut().enumerate() {
+                *value = (f64::from(*value) - prefix * (h + 1) as f64).rem_euclid(1.) as f32;
+            }
+            phase.window_start_phase = f64::from(phase.values[0]);
+            phase.anchor_pending = false;
+        }
     }
 
     /// Advance the carried NSF phase past this chunk's window advance, using the
@@ -367,7 +476,7 @@ impl RvcTimeState {
             nsf.reset();
         }
         if let Some(phase) = self.phase.as_mut() {
-            *phase = PhaseState::new();
+            *phase = PhaseState::new(phase.values.len());
         }
         self.last_advance_frames = 0;
         self.abs_frame = 0;
@@ -419,6 +528,59 @@ fn align_tail_frames(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn packed_domains_crop_on_whole_frames_and_survive_overlap_and_reset() {
+        let params = StreamParams {
+            frame_hop: 4,
+            sample_rate: 400,
+            noise_frame_hop: 23,
+            phase_channels: 9,
+            linear_f0: false,
+        };
+        let mut state = RvcTimeState::new(Some(2), Some(params));
+        state.roll(8, 8);
+        let mut a = Vec::new();
+        state.nsf_noise_window_into(7, 5, &mut a);
+        // 8 -> 7 drops zero whole frames, then 7 -> 5 keeps frames 2..7.
+        assert_eq!(a, state.nsf.as_ref().unwrap().buffer[2 * 23..7 * 23]);
+        let initial = state.phase_inputs().unwrap().to_vec();
+        assert_eq!(initial[0], 0.);
+        assert!(initial[1..].iter().any(|&v| v != 0.));
+        let mut full = Vec::new();
+        state.nsf_noise_window_into(8, 8, &mut full);
+        state.roll(2, 8);
+        let mut next = Vec::new();
+        state.nsf_noise_window_into(8, 8, &mut next);
+        assert_eq!(&full[2 * 23..], &next[..6 * 23]);
+        let trace: Vec<f32> = (0..8 * 4)
+            .flat_map(|s| (0..9).map(move |h| ((s + 1) * (h + 1)) as f32 / 1000.))
+            .collect();
+        assert!(state.set_phase_from_output(&trace));
+        for h in 0..9 {
+            assert!((state.phase_inputs().unwrap()[h] - 8. * (h + 1) as f32 / 1000.).abs() < 1e-6);
+        }
+        state.reset();
+        assert_eq!(state.phase_inputs().unwrap(), initial);
+    }
+
+    #[test]
+    fn interpolated_phase_fallback_integrates_sample_grid() {
+        let params = StreamParams {
+            frame_hop: 4,
+            sample_rate: 400,
+            noise_frame_hop: 20,
+            phase_channels: 1,
+            linear_f0: true,
+        };
+        let mut state = RvcTimeState::new(None, Some(params));
+        state.roll(1, 2);
+        state.advance_phase(&[10., 30.]);
+        // Anchor integrates 10, 10, 12.5, 17.5, 22.5, 27.5, then removes
+        // the new window's clamped 30, 30 prefix.
+        state.prepare_phase(&[30., 50.]);
+        assert!((state.phase_in().unwrap() - 40. / 400.).abs() < 1e-6);
+    }
 
     // A frame's channel-0 value identifies the frame across chunks. In the
     // channel-major `[channels, feature_len]` layout, channel 0 occupies
@@ -578,6 +740,7 @@ mod tests {
             Some(StreamParams {
                 frame_hop,
                 sample_rate,
+                ..StreamParams::default()
             }),
         )
     }

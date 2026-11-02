@@ -1,0 +1,16 @@
+{
+  "revision": "5171e1dcf31a33d1afeb14ef7c6aac6dadae5dc1",
+  "normalized_source_sha256": {
+    "rvc/lib/algorithm/attentions.py": "ed5bb31fb9bc131fe27b1ac5bd8d06fa9532eaa0d71bd592b5364ecddb84cba8",
+    "rvc/lib/algorithm/commons.py": "5be0f00df006252527088d326646136b9931bfd1261987cf6a66894e7cd15bdd",
+    "rvc/lib/algorithm/encoders.py": "49998c0183786a3f36b7258b45dbf4e2858d958b52dfbfac803afe140708f68e",
+    "rvc/lib/algorithm/modules.py": "6a143b07df5c922ad07609d99f5448c4d4e98185cbd09208a0f6987cf542916f",
+    "rvc/lib/algorithm/normalization.py": "a981eddb19895a22631f58de614fc355c2054cba5d28983c866a66e2df073c51",
+    "rvc/lib/algorithm/residuals.py": "b7e131a075b76648bdf956f4b5e951ebd076354b3de526f50c564813dd62f148",
+    "rvc/lib/algorithm/synthesizers.py": "ac996f8b4d41bed9bee2f83d01cf4e1ac10c262899973d0017465e12177a2451",
+    "rvc/lib/algorithm/generators/hifigan.py": "df730f660f372086a8866c1654f5e46931b2fc36ea62a4f974058da066dadefa",
+    "rvc/lib/algorithm/generators/hifigan_mrf.py": "0dd1d23ca4a7426da921ea047bdd0b46776033dc8748d30acafd1a5207d6d799",
+    "rvc/lib/algorithm/generators/hifigan_nsf.py": "fa0d6713ee65c9c1c7601d2f71cf074c8fe4f31049f86b26fd3ecb208640641a",
+    "rvc/lib/algorithm/generators/refinegan.py": "6bab430ea73cc3ec632a7aed0f9ab7fc31f081bf7a12a0785e8efc69d1e24507"
+  }
+}

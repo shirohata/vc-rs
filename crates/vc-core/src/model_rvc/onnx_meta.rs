@@ -68,6 +68,8 @@ pub(super) struct ModelIo {
 /// the native shim).
 #[derive(Debug, Clone)]
 pub(super) struct RvcIoNames {
+    /// Validated V2 layout; None for conventional and legacy V1 exports.
+    pub(super) stream_layout: Option<Box<StreamFormat>>,
     pub(super) feats: String,
     pub(super) p_len: String,
     pub(super) pitch: String,
@@ -81,13 +83,13 @@ pub(super) struct RvcIoNames {
     /// fresh `N(0, 1)` tensor of this shape each inference; `None` means the model
     /// samples its own noise and needs no extra input.
     pub(super) rnd: Option<RvcRndInput>,
-    /// Optional NSF source-noise input of a streaming export
-    /// (`nsf_noise`, shape `[1, audio_len, 1]`): per-output-sample `N(0, 1)` noise
-    /// the decoder's NSF source would otherwise sample internally. `None` for
-    /// non-streaming exports.
+    /// Optional streaming Gaussian input: V1 `[1,audio_len,1]`, V2
+    /// `[1,frames*noise_frame_hop,1]` packed by feature frame. V2 includes all
+    /// independent source/AdaIN domains; it is not an audio-only noise buffer.
     pub(super) nsf_noise: Option<String>,
     /// Optional NSF fundamental-phase input of a streaming export
-    /// (`phase_in`, shape `[1, 1, 1]`): the normalized phase at the window start.
+    /// (`phase_in`, shape `[1,1,harmonics]`): normalized phases at the window
+    /// start. V1 and RefineGAN use 1; MRF V2 uses 9.
     /// Paired with [`phase_out`](Self::phase_out). `None` for non-streaming.
     pub(super) phase_in: Option<String>,
     /// Optional NSF fundamental-phase output of a streaming export. The current
@@ -111,6 +113,9 @@ pub(super) struct StreamFormat {
     /// `rvc.sample_rate` — the model's output sample rate, the time base for the
     /// per-frame phase advance `f0 / sample_rate * frame_hop`.
     pub(super) sample_rate: u32,
+    pub(super) noise_frame_hop: usize,
+    pub(super) phase_channels: usize,
+    pub(super) linear_f0: bool,
 }
 
 /// The resolved name and static channel count (`inter_channels`, the middle axis
@@ -158,6 +163,11 @@ const RVC_PHASE_IN_ALIASES: &[&str] = &["phase_in"];
 const RVC_PHASE_OUT_ALIASES: &[&str] = &["streaming_nsf_phase", "phase_out"];
 
 impl RvcIoNames {
+    pub(super) fn phase_channels(&self) -> usize {
+        self.stream_layout
+            .as_deref()
+            .map_or(1, |s| s.phase_channels)
+    }
     /// Only the per-sample trace can carry phase between overlapping windows.
     /// The legacy scalar is the window's final phase, so it must use the CPU
     /// fallback just like an export without a phase output. Keep input binding
@@ -173,6 +183,7 @@ impl RvcIoNames {
     #[cfg(test)]
     pub(super) fn canonical() -> Self {
         Self {
+            stream_layout: None,
             feats: "feats".to_string(),
             p_len: "p_len".to_string(),
             pitch: "pitch".to_string(),
@@ -235,6 +246,10 @@ impl ModelIo {
     /// erroring with the model's actual names when a role cannot be matched.
     pub(super) fn resolve_rvc_io_names(&self) -> Result<RvcIoNames> {
         Ok(RvcIoNames {
+            stream_layout: self
+                .stream_format()?
+                .filter(|s| s.version == 2)
+                .map(Box::new),
             feats: self.resolve_input_alias("feats", RVC_FEATS_ALIASES)?,
             p_len: self.resolve_input_alias("p_len", RVC_P_LEN_ALIASES)?,
             pitch: self.resolve_input_alias("pitch", RVC_PITCH_ALIASES)?,
@@ -265,7 +280,7 @@ impl ModelIo {
         };
         let shape_valid = tensor.dims.len() == 3
             && tensor.dims[0] == 1
-            && tensor.dims[2] == 1
+            && tensor.dims[2] == self.stream_format()?.map_or(1, |s| s.phase_channels) as i64
             && if per_sample {
                 tensor.dims[1] >= 0
             } else {
@@ -317,10 +332,60 @@ impl ModelIo {
             .and_then(|value| value.trim().parse::<u32>().ok())
             .filter(|rate| *rate > 0)
             .ok_or_else(|| anyhow!("streaming RVC export is missing a positive rvc.sample_rate"))?;
+        let (noise_frame_hop, phase_channels, linear_f0) = if version == 2 {
+            let positive = |key: &str| -> Result<usize> {
+                self.metadata_value(key)
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .filter(|&v| v > 0)
+                    .ok_or_else(|| anyhow!("streaming V2 requires positive {key}"))
+            };
+            let noise = positive("rvc.noise_frame_hop")?;
+            let phases = positive("rvc.phase_channels")?;
+            let vocoder = self.metadata_value("rvc.vocoder");
+            if !matches!(
+                (vocoder, phases),
+                (Some("MRF HiFi-GAN"), 9) | (Some("RefineGAN"), 1)
+            ) || noise > 1_000_000
+                || noise < frame_hop
+                || (vocoder == Some("MRF HiFi-GAN") && noise != frame_hop * 9)
+                || frame_hop.checked_mul(100) != Some(sample_rate as usize)
+            {
+                bail!("unsupported streaming V2 vocoder/layout");
+            }
+            for (name, last) in [("phase_in", phases as i64), ("nsf_noise", 1)] {
+                let t = self
+                    .input(name)
+                    .ok_or_else(|| anyhow!("streaming V2 requires {name}"))?;
+                if t.elem_type != 1
+                    || t.dims.len() != 3
+                    || t.dims[0] != 1
+                    || t.dims[2] != last
+                    || (name == "phase_in" && t.dims[1] != 1)
+                {
+                    bail!("invalid streaming V2 {name} shape/type");
+                }
+            }
+            let output = self
+                .output("streaming_nsf_phase")
+                .ok_or_else(|| anyhow!("streaming V2 requires per-sample phase trace"))?;
+            if output.elem_type != 1
+                || output.dims.len() != 3
+                || output.dims[0] != 1
+                || output.dims[2] != phases as i64
+            {
+                bail!("invalid streaming V2 phase trace");
+            }
+            (noise, phases, vocoder == Some("RefineGAN"))
+        } else {
+            (frame_hop, 1, false)
+        };
         Ok(Some(StreamFormat {
             version,
             frame_hop,
             sample_rate,
+            noise_frame_hop,
+            phase_channels,
+            linear_f0,
         }))
     }
 
@@ -1052,6 +1117,42 @@ mod tests {
         assert_eq!(stream.sample_rate, 48_000);
         // Streaming exports record the rate as `rvc.sample_rate`, not a JSON blob.
         assert_eq!(io.rvc_sample_rate(), Some(48_000));
+    }
+
+    #[test]
+    fn v2_layout_rejects_inconsistent_noise_phase_and_rate_metadata() {
+        let model = vc_convert::pth_to_onnx(
+            vc_convert::test_fixtures::tiny_applio_mrf_pth(),
+            &vc_convert::ConvertOptions::default(),
+            &mut |_| {},
+        )
+        .unwrap();
+        super::super::tests::with_temp_model("v2-layout", &model.onnx_bytes, |path| {
+            let original = read_model_io(path).unwrap();
+            let layout = original.stream_format().unwrap().unwrap();
+            assert_eq!((layout.phase_channels, layout.noise_frame_hop), (9, 3600));
+            for (key, value) in [
+                ("rvc.phase_channels", "1"),
+                ("rvc.noise_frame_hop", "0"),
+                ("rvc.noise_frame_hop", "400"),
+                ("rvc.sample_rate", "48000"),
+                ("rvc.vocoder", "unknown"),
+            ] {
+                let mut io = original.clone();
+                io.metadata.iter_mut().find(|(k, _)| k == key).unwrap().1 = value.into();
+                assert!(io.resolve_rvc_io_names().is_err(), "{key}={value}");
+            }
+            let mut io = original.clone();
+            io.inputs
+                .iter_mut()
+                .find(|t| t.name == "phase_in")
+                .unwrap()
+                .dims[2] = 1;
+            assert!(io.resolve_rvc_io_names().is_err());
+            let mut io = original;
+            io.outputs.retain(|t| t.name != "streaming_nsf_phase");
+            assert!(io.resolve_rvc_io_names().is_err());
+        });
     }
 
     #[test]

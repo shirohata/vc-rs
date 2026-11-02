@@ -41,7 +41,7 @@ impl GaussianNoise {
     }
 
     /// Uniform `f64` in the half-open interval `[0, 1)` (53-bit mantissa).
-    fn next_unit(&mut self) -> f64 {
+    pub(super) fn next_unit(&mut self) -> f64 {
         // Top 53 bits scaled by 2^-53 lands in [0, 1); the low bound is excluded
         // below so the log in Box-Muller never sees zero.
         (self.next_u64() >> 11) as f64 * (1.0 / (1u64 << 53) as f64)

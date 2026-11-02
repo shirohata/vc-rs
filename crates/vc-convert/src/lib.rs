@@ -9,7 +9,9 @@
 //! pickled tensors) is parsed directly and the RVC synthesizer is rebuilt
 //! node-by-node as an ONNX graph, then serialized as protobuf. The output
 //! contract is exactly what `vc-core::model_rvc::onnx_meta` accepts;
-//! supported models are RVC **v2 with F0** only.
+//! Supported models are RVC **v2 with F0**, using standard HiFi-GAN or
+//! Applio's MRF HiFi-GAN / RefineGAN. See docs/applio_ja.md for qualification
+//! limits; synthetic numerical parity does not establish trained-model quality.
 
 mod checkpoint;
 mod graph;
@@ -155,6 +157,12 @@ pub fn convert_pth_file(
 /// vc-core's round-trip tests (dev-dependency, `test-fixtures` feature).
 #[cfg(any(test, feature = "test-fixtures"))]
 pub mod test_fixtures {
+    pub fn tiny_applio_mrf_pth() -> &'static [u8] {
+        include_bytes!("../tests/fixtures/tiny_applio_mrf.pth")
+    }
+    pub fn tiny_applio_refine_pth() -> &'static [u8] {
+        include_bytes!("../tests/fixtures/tiny_applio_refine.pth")
+    }
     pub fn tiny_v2_f0_pth() -> &'static [u8] {
         include_bytes!("../tests/fixtures/tiny_v2_f0.pth")
     }
@@ -178,6 +186,43 @@ mod tests {
             ..ConvertOptions::default()
         };
         graph::synthesizer::build_model(&checkpoint, &options).unwrap()
+    }
+
+    #[test]
+    fn applio_exports_externalize_every_random_domain() {
+        for (bytes, phases) in [
+            (test_fixtures::tiny_applio_mrf_pth(), 9),
+            (test_fixtures::tiny_applio_refine_pth(), 1),
+        ] {
+            let c = parse_pth(bytes).unwrap();
+            let model = graph::synthesizer::build_model(&c, &ConvertOptions::default()).unwrap();
+            assert_eq!(metadata(&model, "rvc.stream_format_version"), Some("2"));
+            assert_eq!(
+                metadata(&model, "rvc.phase_channels"),
+                Some(phases.to_string().as_str())
+            );
+            assert_eq!(count_op(&model, "RandomNormalLike"), 0);
+            assert_eq!(count_op(&model, "RandomUniform"), 0);
+            assert!(model.graph.nodes.iter().any(|n| n.op_type == "Sin"));
+            let webui = graph::synthesizer::build_model(
+                &c,
+                &ConvertOptions {
+                    export_mode: ExportMode::Webui,
+                    ..ConvertOptions::default()
+                },
+            )
+            .unwrap();
+            assert!(count_op(&webui, "RandomNormalLike") > 0);
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_or_mislabeled_vocoder() {
+        let mut c = parse_pth(test_fixtures::tiny_v2_f0_pth()).unwrap();
+        c.vocoder = "unknown".into();
+        assert!(graph::synthesizer::validate_checkpoint(&c).is_err());
+        c.vocoder = "MRF HiFi-GAN".into();
+        assert!(graph::synthesizer::build_model(&c, &ConvertOptions::default()).is_err());
     }
 
     fn names(infos: &[crate::onnx::ValueInfo]) -> Vec<&str> {
