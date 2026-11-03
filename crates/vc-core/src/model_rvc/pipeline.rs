@@ -47,6 +47,87 @@ enum InputDenoiser {
     Rnnoise(Box<crate::denoise::RnnoiseDenoiser>),
 }
 
+/// Preparation is independent of RVC/Embedder/F0 sessions. Build this on a
+/// control/worker thread before committing a standalone denoiser change.
+pub enum InputDenoiserConfig {
+    Off,
+    NoiseGate {
+        threshold: f32,
+        shaping: NoiseGateShaping,
+    },
+    #[cfg(feature = "rnnoise")]
+    Rnnoise,
+    #[cfg(feature = "gtcrn")]
+    Gtcrn {
+        model_dir: std::path::PathBuf,
+        backend: crate::denoise::GtcrnBackend,
+    },
+}
+
+pub struct PreparedInputDenoiser {
+    sample_rate: u32,
+    input: InputDenoiser,
+    #[cfg(feature = "gtcrn")]
+    gtcrn: Option<crate::denoise::GtcrnDenoiser>,
+}
+
+impl PreparedInputDenoiser {
+    pub fn prepare(sample_rate: u32, config: InputDenoiserConfig) -> Result<Self> {
+        ensure!(sample_rate > 0, "denoiser sample rate must be positive");
+        let mut prepared = Self {
+            sample_rate,
+            input: InputDenoiser::Off,
+            #[cfg(feature = "gtcrn")]
+            gtcrn: None,
+        };
+        match config {
+            InputDenoiserConfig::Off => {}
+            InputDenoiserConfig::NoiseGate { threshold, shaping } => {
+                prepared.input = InputDenoiser::Gate(dsp::NoiseGate::new(
+                    sample_rate as f32,
+                    threshold,
+                    shaping.attack_ms,
+                    shaping.release_ms,
+                    shaping.floor,
+                ));
+            }
+            #[cfg(feature = "rnnoise")]
+            InputDenoiserConfig::Rnnoise => {
+                prepared.input = InputDenoiser::Rnnoise(Box::new(
+                    crate::denoise::RnnoiseDenoiser::new(sample_rate)?,
+                ));
+            }
+            #[cfg(feature = "gtcrn")]
+            InputDenoiserConfig::Gtcrn { model_dir, backend } => {
+                // GTCRN always stays on the new 16 kHz increment, not the device
+                // waveform or the rolling context. Its frame/F0 grid is unchanged.
+                let mut denoiser = crate::denoise::GtcrnDenoiser::new(
+                    crate::denoise::GtcrnConfig {
+                        model_dir: &model_dir,
+                        backend,
+                    },
+                    super::shape::EMBEDDER_SAMPLE_RATE,
+                )?;
+                // Validate real frame inference before committing either route.
+                // Reset afterwards: the probe is never part of the live timeline.
+                let mut probe = vec![
+                    0.0;
+                    denoiser.latency_samples()
+                        + super::shape::EMBEDDER_SAMPLE_RATE as usize / 10
+                ];
+                denoiser.process_in_place(&mut probe)?;
+                ensure!(
+                    probe.iter().all(|sample| sample.is_finite()),
+                    "GTCRN preparation produced non-finite audio"
+                );
+                denoiser.reset()?;
+                prepared.gtcrn = Some(denoiser);
+            }
+        }
+        Ok(prepared)
+    }
+}
+
 impl InputDenoiser {
     fn content_delay_samples(&self) -> usize {
         match self {
@@ -266,10 +347,9 @@ impl Default for F0Config {
 /// shared by every front-end (the standalone worker and the VST3 host callback).
 ///
 /// `noise_gate_enabled`/`noise_gate_threshold` live here, but the gate's
-/// attack/release/floor and the denoiser *variant* selection (off / gate /
-/// rnnoise) are static load-time config: switching to/from rnnoise rebuilds a
-/// stateful denoiser and so requires a reload, and `apply_live` cannot replace
-/// an active rnnoise stage (see `set_noise_gate`).
+/// attack/release/floor remain load-scoped. Stateful method changes use
+/// [`PreparedInputDenoiser`] and a complete streaming reset, retaining inference
+/// sessions. `apply_live` cannot replace a stateful denoiser (see `set_noise_gate`).
 #[derive(Clone, Copy, Debug)]
 pub struct LiveParams {
     pub pitch_shift: f32,
@@ -376,6 +456,23 @@ fn native_engine_build_progress(cached: bool, role: LoadModelRole) -> Option<Loa
 }
 
 impl RvcPipeline {
+    /// Swap only the denoising stage. The caller must reset the complete pipeline
+    /// and converter timeline before processing again; the returned stage permits
+    /// rollback if device restart fails. No inference session is loaded here.
+    pub fn replace_input_denoiser(
+        &mut self,
+        mut prepared: PreparedInputDenoiser,
+    ) -> Result<PreparedInputDenoiser> {
+        ensure!(
+            prepared.sample_rate == self.input_sample_rate,
+            "prepared denoiser input rate changed"
+        );
+        std::mem::swap(&mut self.input_denoiser, &mut prepared.input);
+        #[cfg(feature = "gtcrn")]
+        std::mem::swap(&mut self.stream_state.gtcrn, &mut prepared.gtcrn);
+        Ok(prepared)
+    }
+
     #[cfg(feature = "rnnoise")]
     pub fn load_with_rnnoise(config: RvcPipelineConfig<'_>) -> Result<Self> {
         if config.noise_gate_enabled {

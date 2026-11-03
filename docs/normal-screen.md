@@ -30,6 +30,15 @@ running. Reload-scoped differences show beside transport; gain/pitch and other
 existing live parameters do not require Restart. Passthrough retains pitch but
 disables its controls, and respects the controller's live-switch capability.
 
+Microphone, output-device and input-denoiser selections have automatic apply requests.
+The GUI acknowledges only the requested fields after success, so these changes
+cannot apply staged voice-model, provider or other-device edits. Failed selections keep
+the previous applied values and expose an error. Same-rate device changes
+retain voice-model sessions, while rate changes rebuild internally. Off/Gate
+continues without an I/O restart; RNNoise/GTCRN changes restart the audio timeline
+after both routes are prepared. Model acquisition stays explicit. Gate shaping,
+chunk/context settings and other reload-scoped edits still require Restart.
+
 Meters show the existing conversion telemetry as RMS dBFS, not the tutorial's
 pre-denoise peak meter. Nominal content delay excludes device/queue latency.
 Unavailable metrics are not fabricated. Tests replace engine starts and downloads

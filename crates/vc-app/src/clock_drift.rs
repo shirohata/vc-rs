@@ -31,6 +31,13 @@ impl ClockDriftController {
         self.integral = -self.ppm * 1e-6;
     }
 
+    /// Only denoiser changes on the same endpoints may retain this estimate.
+    /// A changed microphone has a different physical clock, even at equal Hz.
+    pub(crate) fn seed(&mut self, ppm: f64) {
+        self.ppm = ppm.clamp(-MAX_CLOCK_CORRECTION_PPM, MAX_CLOCK_CORRECTION_PPM);
+        self.rebase();
+    }
+
     pub(crate) fn target_samples(&self) -> usize {
         self.target
             .map_or(0, |seconds| (seconds * self.sample_rate).round() as usize)
@@ -76,6 +83,18 @@ pub(crate) fn startup_reserve(rate: u32, callback_frames: usize, hop: usize) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn denoiser_restart_keeps_only_clock_estimate_and_new_microphone_starts_at_zero() {
+        let mut clock = ClockDriftController::new(48000);
+        clock.seed(375.0);
+        assert_eq!(clock.update(9999, 0.5, false), 375.0);
+        assert_eq!(clock.target_samples(), 0);
+        assert_eq!(clock.update(1200, 0.5, true), 375.0);
+        assert_eq!(clock.target_samples(), 1200);
+        let mut new_microphone = ClockDriftController::new(48000);
+        assert_eq!(new_microphone.update(1200, 0.5, false), 0.0);
+    }
 
     /// Virtual device callbacks with fractional sample accounting, not rounded
     /// hops. No wall-clock waits or neural model are needed for a two-hour run.

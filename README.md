@@ -172,9 +172,10 @@ back to RVC.
 Choose `off`, `noise-gate`, `rnnoise`, or `gtcrn` under **Input denoiser**.
 RNNoise uses an embedded model and needs no additional download. Passthrough
 applies Input gain, the selected input denoiser, and Output gain. Switching
-between `off` and `noise-gate`, including the gate threshold, is live; switching
-to RNNoise or GTCRN requires **Restart** while running, or **Start** when
-stopped. These input denoisers are not
+between `off` and `noise-gate`, including the gate threshold, is live. Other
+method changes apply automatically with a short interruption, retaining loaded
+voice models. Preparation failure keeps the previous method and shows an error.
+These input denoisers are not
 included in VST3.
 
 Where each denoiser sits:
@@ -190,8 +191,15 @@ real time with large margin. It ships in the **standalone CLI/GUI packages**:
 Windows ML runs the tiny graph on ORT CPU, while TensorRT runs it through native
 TensorRT. VST3 does not include it. Its fixed delay is ~48 ms (the 16 kHz STFT
 reconstruction plus the adapter FIFO). In the GUI, select **Audio devices and noise reduction → Input denoiser → gtcrn → Download GTCRN**.
-The official 352 KB model (MIT) is verified and saved alongside its license in `%LOCALAPPDATA%\vc-rs\models\gtcrn`; its directory is configured automatically. Press **Restart** while running, or **Start** when stopped, to activate it.
+The official 352 KB model (MIT) is verified and saved alongside its license in `%LOCALAPPDATA%\vc-rs\models\gtcrn`; its directory is configured automatically. After downloading while running, use **Apply noise reduction** to retry a failed selection. When stopped, the selected method takes effect on **Start**.
 For CLI use, `download-models.ps1 -Gtcrn` fetches it into `assets\gtcrn\`. Select that directory or an existing model directory with `--gtcrn-model <dir>`.
+
+Selecting a microphone or output device during conversion switches automatically with an audio
+interruption. Matching stream rates retain the loaded voice models; changed rates
+rebuild internally and can take longer. The other endpoint and unapplied model/backend edits
+are preserved. Unavailable selections show an error; select an available device
+to recover after disconnection. Changes to the Windows default are not followed
+automatically.
 
 ## Tuning real-time settings
 

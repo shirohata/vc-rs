@@ -302,7 +302,7 @@ impl GuiSettings {
             output_gain: self.output_gain,
             // Gate on/off rides the unified live path now, so toggling the
             // denoiser between off and noise-gate takes effect without a reload;
-            // rnnoise still needs a reload (it rebuilds a stateful denoiser).
+            // RNNoise/GTCRN use the separate prepared-denoiser control request.
             noise_gate_enabled: self.denoiser == "noise-gate",
             noise_gate_threshold: self.noise_gate_threshold,
         }
@@ -532,7 +532,18 @@ impl VcGui {
 
     fn changed(&mut self) {
         self.dirty_since = Some(Instant::now());
-        self.controller.set_live_params(self.settings.live());
+        self.update_live_params();
+    }
+
+    fn update_live_params(&self) {
+        if !self.onboarding.active() {
+            // Method selection is controller-owned. A poll can miss an accepted
+            // Gate change, so echoing any GUI gate bit could undo that success.
+            self.controller.set_live_controls(self.settings.live());
+        } else {
+            // Model-free setup diagnostics retain the original live snapshot path.
+            self.controller.set_live_params(self.settings.live());
+        }
     }
 
     fn maybe_save(&mut self) {
@@ -762,6 +773,7 @@ impl VcGui {
             self.applied_chunk_ms = None;
             self.onboarding.normal.requested = None;
             self.onboarding.normal.applied = None;
+            self.onboarding.normal.requested_runtime = None;
         }
     }
 
@@ -990,7 +1002,7 @@ fn device_combo(
     } else {
         egui::ComboBox::from_id_salt(label)
     };
-    // An empty value follows the system default; only explicit device names
+    // An empty value resolves the system default when streams open; only explicit device names
     // can be missing from the latest enumeration. Preserve the saved selection.
     let missing = !value.is_empty() && !names.contains(value);
     let mut selected = egui::RichText::new(if value.is_empty() {

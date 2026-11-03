@@ -7,6 +7,7 @@ pub(crate) struct NormalState {
     pub requested: Option<GuiSettings>,
     pub applied: Option<GuiSettings>,
     pub expected_revision: u64,
+    pub requested_runtime: Option<u64>,
     details: details::ModelDetailsState,
 }
 
@@ -20,6 +21,15 @@ fn reload_signature(settings: &GuiSettings) -> String {
     config.pitch_shift = 0.0;
     config.speaker_id = 0;
     config.noise_gate_threshold = 0.0;
+    // Device selections are acknowledged separately; history is UI-only state.
+    config.input_device.clear();
+    config.input_host.clear();
+    config.output_device.clear();
+    config.output_host.clear();
+    config.denoiser.clear();
+    config.gtcrn_model_dir.clear();
+    config.recent_input_devices.clear();
+    config.recent_output_devices.clear();
     config.passthrough = false;
     config.tutorial = None;
     config.accepted_terms.clear();
@@ -31,11 +41,110 @@ fn reload_signature(settings: &GuiSettings) -> String {
 }
 
 impl VcGui {
+    pub(super) fn request_input_change(&mut self, status: &EngineStatusSnapshot) {
+        self.request_device_change(status, true);
+    }
+
+    pub(super) fn request_output_change(&mut self, status: &EngineStatusSnapshot) {
+        self.request_device_change(status, false);
+    }
+
+    fn request_device_change(&mut self, status: &EngineStatusSnapshot, input: bool) {
+        if (!status.input_recoverable && status.state != EngineState::Running)
+            || self.onboarding.normal.requested.is_some()
+        {
+            return;
+        }
+        let (host, device) = if input {
+            (
+                self.settings.input_host(),
+                string_option(&self.settings.input_device),
+            )
+        } else {
+            (
+                self.settings.output_host(),
+                string_option(&self.settings.output_device),
+            )
+        };
+        #[cfg(not(test))]
+        let result = if input {
+            self.controller.change_input(host, device)
+        } else {
+            self.controller.change_output(host, device)
+        }
+        .map_err(|e| format!("{e:#}"));
+        #[cfg(test)]
+        let result: Result<u64, String> = {
+            if input {
+                self.onboarding.effects.input_requests.push((host, device));
+            } else {
+                self.onboarding.effects.output_requests.push((host, device));
+            }
+            Ok((self.onboarding.effects.input_requests.len()
+                + self.onboarding.effects.output_requests.len()
+                + self.onboarding.effects.denoiser_requests.len()) as u64)
+        };
+        match result {
+            Ok(revision) => {
+                self.ui_error = None;
+                self.onboarding.normal.requested_runtime = Some(revision);
+            }
+            Err(error) => self.ui_error = Some(error),
+        }
+    }
+
+    pub(super) fn request_denoiser_change(&mut self, status: &EngineStatusSnapshot) {
+        if (!status.input_recoverable && status.state != EngineState::Running)
+            || self.onboarding.normal.requested.is_some()
+        {
+            return;
+        }
+        let mode = match parse_denoiser(&self.settings.denoiser) {
+            Ok(mode) => mode,
+            Err(error) => {
+                self.ui_error = Some(error);
+                return;
+            }
+        };
+        let dir = path_option(&self.settings.gtcrn_model_dir);
+        #[cfg(not(test))]
+        let result = self
+            .controller
+            .change_denoiser(mode, dir)
+            .map_err(|error| format!("{error:#}"));
+        #[cfg(test)]
+        let result: Result<u64, String> = {
+            self.onboarding.effects.denoiser_requests.push((mode, dir));
+            Ok((self.onboarding.effects.input_requests.len()
+                + self.onboarding.effects.output_requests.len()
+                + self.onboarding.effects.denoiser_requests.len()) as u64)
+        };
+        match result {
+            Ok(revision) => {
+                self.ui_error = None;
+                self.onboarding.normal.requested_runtime = Some(revision);
+            }
+            Err(error) => self.ui_error = Some(error),
+        }
+    }
+
     fn normal_toolbar(&mut self, ui: &mut egui::Ui, status: &EngineStatusSnapshot) {
         let lang = self.settings.language;
-        if status.state == EngineState::Error {
+        if self
+            .onboarding
+            .normal
+            .requested_runtime
+            .is_some_and(|revision| status.reconfiguration_revision >= revision)
+        {
+            self.onboarding.normal.requested_runtime = None;
+            if let Some(error) = &status.reconfiguration_error {
+                self.ui_error = Some(error.clone());
+            }
+        }
+        if status.state == EngineState::Error && !status.input_recoverable {
             self.onboarding.normal.requested = None;
             self.onboarding.normal.applied = None;
+            self.onboarding.normal.requested_runtime = None;
         }
         if status.state == EngineState::Running
             && status.session_revision >= self.onboarding.normal.expected_revision
@@ -45,8 +154,48 @@ impl VcGui {
                 self.onboarding.normal.applied = Some(applied);
             }
         }
+        // A GUI poll may skip successful intermediate requests. Synchronize the
+        // actual applied runtime even when the latest request failed; never infer
+        // it from the selected controls or overwrite unrelated staged settings.
+        if status.state == EngineState::Running || status.input_recoverable {
+            if let (Some(actual), Some(applied)) =
+                (&status.applied_runtime, &mut self.onboarding.normal.applied)
+            {
+                applied.input_host = match actual.input_host {
+                    AudioHost::Wasapi => "wasapi",
+                    AudioHost::Asio => "asio",
+                    AudioHost::CoreAudio => "coreaudio",
+                    AudioHost::Alsa => "alsa",
+                    AudioHost::Jack => "jack",
+                }
+                .into();
+                applied.input_device = actual.input_device.clone().unwrap_or_default();
+                applied.output_host = match actual.output_host {
+                    AudioHost::Wasapi => "wasapi",
+                    AudioHost::Asio => "asio",
+                    AudioHost::CoreAudio => "coreaudio",
+                    AudioHost::Alsa => "alsa",
+                    AudioHost::Jack => "jack",
+                }
+                .into();
+                applied.output_device = actual.output_device.clone().unwrap_or_default();
+                applied.denoiser = match actual.denoiser_mode {
+                    DenoiserMode::Off => "off",
+                    DenoiserMode::NoiseGate => "noise-gate",
+                    DenoiserMode::Rnnoise => "rnnoise",
+                    DenoiserMode::Gtcrn => "gtcrn",
+                }
+                .into();
+                applied.gtcrn_model_dir = actual
+                    .gtcrn_model_dir
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+            }
+        }
         let busy = matches!(status.state, EngineState::Starting | EngineState::Stopping)
-            || self.onboarding.normal.requested.is_some();
+            || self.onboarding.normal.requested.is_some()
+            || self.onboarding.normal.requested_runtime.is_some();
         let running = status.state == EngineState::Running;
         ui.horizontal_wrapped(|ui| {
             if busy {
@@ -80,7 +229,7 @@ impl VcGui {
             {
                 self.apply_or_start();
             }
-            if (running || busy)
+            if (running || busy || status.input_recoverable)
                 && ui
                     .add_enabled(
                         status.state != EngineState::Stopping,
@@ -240,6 +389,11 @@ impl VcGui {
         status: &EngineStatusSnapshot,
     ) {
         let lang = self.settings.language;
+        let old_device = if input {
+            self.settings.input_device.clone()
+        } else {
+            self.settings.output_device.clone()
+        };
         let mut changed = false;
         ui.push_id(
             if input {
@@ -270,6 +424,22 @@ impl VcGui {
                     &mut changed,
                     false,
                 );
+                let (active, selected) = if input {
+                    (&status.input_device, &self.settings.input_device)
+                } else {
+                    (&status.output_device, &self.settings.output_device)
+                };
+                if !active.is_empty() && !selected.is_empty() && active != selected {
+                    ui.small(format!(
+                        "{}: {}",
+                        lang.text(if input {
+                            "Active input"
+                        } else {
+                            "Active output"
+                        }),
+                        active
+                    ));
+                }
                 changed |= ui
                     .add(
                         egui::Slider::new(
@@ -323,6 +493,11 @@ impl VcGui {
         );
         if changed {
             self.changed();
+            if input && old_device != self.settings.input_device {
+                self.request_input_change(status);
+            } else if !input && old_device != self.settings.output_device {
+                self.request_output_change(status);
+            }
         }
     }
 
@@ -657,10 +832,13 @@ impl VcGui {
     fn connection_settings_ui(
         &mut self,
         ui: &mut egui::Ui,
-        _status: &EngineStatusSnapshot,
+        status: &EngineStatusSnapshot,
         _devices: &DeviceList,
     ) {
         let lang = self.settings.language;
+        let old_input_host = self.settings.input_host.clone();
+        let old_output_host = self.settings.output_host.clone();
+        let old_denoiser = self.settings.denoiser.clone();
         let mut changed = false;
         let mut host_changed = false;
         if gui_host_names().len() > 1 {
@@ -700,6 +878,15 @@ impl VcGui {
                         .changed();
                 }
             });
+        if let Some(applied) = &self.onboarding.normal.applied {
+            if applied.denoiser != self.settings.denoiser {
+                ui.small(format!(
+                    "{}: {}",
+                    lang.text("Active noise reduction"),
+                    lang.text(&applied.denoiser)
+                ));
+            }
+        }
         if self.settings.denoiser == "noise-gate" {
             changed |= ui
                 .add(
@@ -727,11 +914,25 @@ impl VcGui {
                 )
                 .changed();
         }
-        // GTCRN model dir is reload-scoped (the denoiser is built at load),
-        // matching the staged-settings convention for model paths.
+        // Model acquisition stays explicit. A prepared method change applies
+        // this directory without reloading the voice-model sessions.
         if self.settings.denoiser == "gtcrn" {
             if model_setup::gtcrn_available(&self.settings.gtcrn_model_dir) {
-                ui.small(lang.text("GTCRN: ready (Apply / Start to activate)"));
+                ui.small(lang.text("GTCRN: ready"));
+                if status.input_recoverable
+                    && self
+                        .onboarding
+                        .normal
+                        .applied
+                        .as_ref()
+                        .is_some_and(|applied| {
+                            applied.denoiser != "gtcrn"
+                                || applied.gtcrn_model_dir != self.settings.gtcrn_model_dir
+                        })
+                    && ui.button(lang.text("Apply noise reduction")).clicked()
+                {
+                    self.request_denoiser_change(status);
+                }
             } else {
                 ui.horizontal_wrapped(|ui| {
                         ui.small("GTCRN: 352 KB · MIT · © 2024 Rong Xiaobin");
@@ -758,6 +959,15 @@ impl VcGui {
 
         if changed {
             self.changed();
+            if old_input_host != self.settings.input_host {
+                self.request_input_change(status);
+            }
+            if old_output_host != self.settings.output_host {
+                self.request_output_change(status);
+            }
+            if old_denoiser != self.settings.denoiser {
+                self.request_denoiser_change(status);
+            }
         }
     }
     fn performance_metrics_ui(&self, ui: &mut egui::Ui, status: &EngineStatusSnapshot) {

@@ -2,6 +2,7 @@
 //! discovering models, or touching the user's persisted settings. Keep these
 //! tests below the eframe lifecycle: `VcGui::new` and `maybe_save` perform I/O.
 use super::*;
+use vc_app::AppliedRuntimeConfig;
 #[cfg(any(feature = "windowsml", feature = "tensorrt"))]
 #[path = "backend_tests.rs"]
 mod backend_tests;
@@ -33,6 +34,356 @@ fn ready_main_fixture(language: text::Language) -> Fixture {
         Arc::new(Mutex::new(Some([Ok(()), Ok(())]))),
     ));
     fixture
+}
+
+#[test]
+fn ui_output_widget_switches_without_restart_and_keeps_staged_models() {
+    for lang in [text::Language::English, text::Language::Japanese] {
+        let mut fixture = ready_main_fixture(lang);
+        fixture.status.state = EngineState::Running;
+        fixture.status.input_recoverable = true;
+        fixture.status.output_device = "Old speaker".into();
+        fixture.devices.outputs = vec!["Old speaker".into(), "New speaker".into()];
+        fixture.app.settings.output_device = "Old speaker".into();
+        fixture.app.settings.input_device = "Applied microphone".into();
+        fixture.app.onboarding.normal.applied = Some(fixture.app.settings.clone());
+        let old_model = fixture.app.settings.model.clone();
+        let mut h = harness(fixture);
+        h.get_by_value("Old speaker").click();
+        h.run_steps(4);
+        h.get_by_label("New speaker").click();
+        h.run_steps(4);
+        assert_eq!(
+            h.state().app.onboarding.effects.output_requests,
+            vec![(AudioHost::default(), Some("New speaker".into()))]
+        );
+        assert!(h.state().app.onboarding.effects.input_requests.is_empty());
+        assert_eq!(h.state().app.onboarding.effects.start_requests, 0);
+        assert!(h
+            .query_by_label(lang.text("Unapplied changes — Restart to apply."))
+            .is_none());
+        {
+            let fixture = h.state_mut();
+            fixture.app.settings.model = "Staged voice.onnx".into();
+            fixture.app.settings.provider = "staged provider".into();
+            fixture.status.output_device = "New speaker".into();
+            fixture.status.applied_runtime = Some(AppliedRuntimeConfig {
+                input_device: Some("Applied microphone".into()),
+                output_device: Some("New speaker".into()),
+                ..Default::default()
+            });
+            fixture.status.reconfiguration_revision = 1;
+        }
+        h.run_steps(4);
+        let applied = h.state().app.onboarding.normal.applied.as_ref().unwrap();
+        assert_eq!(applied.output_device, "New speaker");
+        assert_eq!(applied.input_device, "Applied microphone");
+        assert_eq!(applied.model, old_model);
+        assert_ne!(applied.provider, "staged provider");
+        assert!(h.state().app.onboarding.normal.requested_runtime.is_none());
+    }
+}
+
+#[test]
+fn ui_unobserved_default_output_success_survives_later_failure() {
+    let mut fixture = ready_main_fixture(text::Language::English);
+    fixture.status.state = EngineState::Running;
+    fixture.status.input_recoverable = true;
+    fixture.app.settings.output_device = "Old speaker".into();
+    fixture.app.onboarding.normal.applied = Some(fixture.app.settings.clone());
+    fixture.app.settings.output_device.clear();
+    fixture.app.request_output_change(&fixture.status);
+    fixture.app.settings.output_device = "Unavailable speaker".into();
+    fixture.app.request_output_change(&fixture.status);
+    fixture.status.output_device = "Resolved default speaker".into();
+    fixture.status.applied_runtime = Some(AppliedRuntimeConfig {
+        output_host: AudioHost::Asio,
+        output_device: None,
+        ..Default::default()
+    });
+    fixture.status.reconfiguration_revision = 2;
+    fixture.status.reconfiguration_error = Some("Selected output is unavailable".into());
+    let mut h = harness(fixture);
+    h.run_steps(4);
+    let applied = h.state().app.onboarding.normal.applied.as_ref().unwrap();
+    assert!(
+        applied.output_device.is_empty(),
+        "Default intent must survive missed ACKs"
+    );
+    assert_eq!(applied.output_host, "asio");
+    assert_eq!(h.state().app.settings.output_device, "Unavailable speaker");
+    assert!(h.state().app.ui_error.is_some());
+    assert_eq!(h.state().app.onboarding.effects.start_requests, 0);
+}
+
+#[test]
+fn ui_unobserved_success_before_latest_failure_keeps_actual_applied_runtime() {
+    let mut fixture = ready_main_fixture(text::Language::English);
+    fixture.status.state = EngineState::Running;
+    fixture.status.input_recoverable = true;
+    fixture.app.settings.input_device = "mic A".into();
+    fixture.app.onboarding.normal.applied = Some(fixture.app.settings.clone());
+    let old_model = fixture.app.settings.model.clone();
+    fixture.app.settings.model = "staged voice.onnx".into();
+    fixture.app.settings.provider = "staged provider".into();
+
+    // A succeeds on the engine before the GUI polls. B is submitted with the
+    // stale snapshot, and the GUI observes only B's failed completion.
+    fixture.app.settings.input_device = "mic B".into();
+    fixture.app.request_input_change(&fixture.status);
+    fixture.app.settings.denoiser = "noise-gate".into();
+    fixture.app.request_denoiser_change(&fixture.status);
+    fixture.app.settings.denoiser = "gtcrn".into();
+    fixture.app.settings.gtcrn_model_dir = "staged GTCRN path".into();
+    fixture.app.request_denoiser_change(&fixture.status);
+    fixture.status.input_device = "mic B".into();
+    fixture.status.applied_runtime = Some(AppliedRuntimeConfig {
+        input_host: AudioHost::Asio,
+        input_device: Some("mic B".into()),
+        denoiser_mode: DenoiserMode::NoiseGate,
+        gtcrn_model_dir: Some(PathBuf::from("accepted GTCRN path")),
+        ..Default::default()
+    });
+    fixture.status.reconfiguration_revision = 3;
+    fixture.status.reconfiguration_error = Some("GTCRN preparation failed".into());
+    let mut h = harness(fixture);
+    h.run_steps(4);
+    let applied = h.state().app.onboarding.normal.applied.as_ref().unwrap();
+    assert_eq!(applied.input_device, "mic B");
+    assert_eq!(applied.input_host, "asio");
+    assert_eq!(applied.denoiser, "noise-gate");
+    assert_eq!(applied.gtcrn_model_dir, "accepted GTCRN path");
+    assert_eq!(applied.model, old_model);
+    assert_ne!(applied.provider, "staged provider");
+    assert_eq!(h.state().app.settings.gtcrn_model_dir, "staged GTCRN path");
+    assert!(h.state().app.ui_error.is_some());
+}
+
+#[test]
+fn ui_unobserved_default_input_success_preserves_intent_and_saved_paths() {
+    for fail_input in [false, true] {
+        let mut fixture = ready_main_fixture(text::Language::English);
+        fixture.status.state = EngineState::Running;
+        fixture.status.input_recoverable = true;
+        fixture.app.settings.input_device = "old explicit microphone".into();
+        fixture.app.settings.gtcrn_model_dir = "saved model directory".into();
+        fixture.app.onboarding.normal.applied = Some(fixture.app.settings.clone());
+        fixture.app.settings.input_device.clear();
+        fixture.app.request_input_change(&fixture.status);
+        if fail_input {
+            fixture.app.settings.input_device = "unavailable microphone".into();
+            fixture.app.request_input_change(&fixture.status);
+        } else {
+            fixture.app.settings.denoiser = "gtcrn".into();
+            fixture.app.settings.gtcrn_model_dir = "new saved selection".into();
+            fixture.app.request_denoiser_change(&fixture.status);
+        }
+        fixture.status.input_device = "resolved Default endpoint".into();
+        fixture.status.applied_runtime = Some(AppliedRuntimeConfig {
+            input_device: None,
+            denoiser_mode: DenoiserMode::Off,
+            gtcrn_model_dir: Some(PathBuf::from("saved model directory")),
+            ..Default::default()
+        });
+        fixture.status.reconfiguration_revision = 2;
+        fixture.status.reconfiguration_error = Some("Latest selection failed".into());
+        let mut h = harness(fixture);
+        h.run_steps(4);
+        let applied = h.state().app.onboarding.normal.applied.as_ref().unwrap();
+        assert!(
+            applied.input_device.is_empty(),
+            "Default must not become a resolved endpoint name"
+        );
+        assert_eq!(applied.gtcrn_model_dir, "saved model directory");
+        if fail_input {
+            assert_eq!(
+                h.state().app.settings.input_device,
+                "unavailable microphone"
+            );
+        } else {
+            assert!(h.state().app.settings.input_device.is_empty());
+            assert_eq!(
+                h.state().app.settings.gtcrn_model_dir,
+                "new saved selection"
+            );
+        }
+    }
+}
+
+#[test]
+fn ui_unobserved_gtcrn_success_keeps_accepted_path_after_replacement_failure() {
+    let mut fixture = ready_main_fixture(text::Language::English);
+    fixture.status.state = EngineState::Running;
+    fixture.status.input_recoverable = true;
+    fixture.app.onboarding.normal.applied = Some(fixture.app.settings.clone());
+    fixture.app.settings.denoiser = "gtcrn".into();
+    fixture.app.settings.gtcrn_model_dir = "accepted directory".into();
+    fixture.app.request_denoiser_change(&fixture.status);
+    fixture.app.settings.gtcrn_model_dir = "rejected directory".into();
+    fixture.app.request_denoiser_change(&fixture.status);
+    fixture.status.applied_runtime = Some(AppliedRuntimeConfig {
+        denoiser_mode: DenoiserMode::Gtcrn,
+        gtcrn_model_dir: Some(PathBuf::from("accepted directory")),
+        ..Default::default()
+    });
+    fixture.status.reconfiguration_revision = 2;
+    fixture.status.reconfiguration_error = Some("Replacement model failed".into());
+    let mut h = harness(fixture);
+    h.run_steps(4);
+    let applied = h.state().app.onboarding.normal.applied.as_ref().unwrap();
+    assert_eq!(applied.denoiser, "gtcrn");
+    assert_eq!(applied.gtcrn_model_dir, "accepted directory");
+    assert_eq!(h.state().app.settings.gtcrn_model_dir, "rejected directory");
+}
+
+#[test]
+fn ui_input_change_acknowledges_only_input_and_failure_keeps_applied_selection() {
+    let mut fixture = ready_main_fixture(text::Language::English);
+    fixture.status.state = EngineState::Running;
+    fixture.status.input_recoverable = true;
+    fixture.app.onboarding.normal.applied = Some(fixture.app.settings.clone());
+    let original_model = fixture.app.settings.model.clone();
+    fixture.app.settings.model = "unapplied-model.onnx".into();
+    fixture.app.settings.output_device = "unapplied-output".into();
+    fixture.app.settings.input_device = "new microphone".into();
+    fixture.app.request_input_change(&fixture.status);
+    assert_eq!(fixture.app.onboarding.effects.input_requests.len(), 1);
+    fixture.status.reconfiguration_revision = 1;
+    fixture.status.applied_runtime = Some(AppliedRuntimeConfig {
+        input_device: Some("new microphone".into()),
+        ..Default::default()
+    });
+    let mut h = harness(fixture);
+    h.run_steps(4);
+    let applied = h.state().app.onboarding.normal.applied.as_ref().unwrap();
+    assert_eq!(applied.input_device, "new microphone");
+    assert_eq!(applied.model, original_model);
+    assert_ne!(applied.output_device, "unapplied-output");
+    {
+        let fixture = h.state_mut();
+        fixture.app.settings.input_device = "missing microphone".into();
+        fixture.app.request_input_change(&fixture.status);
+        fixture.status.reconfiguration_revision = 2;
+        fixture.status.reconfiguration_error = Some("Selected microphone is unavailable".into());
+    }
+    h.run_steps(4);
+    assert_eq!(
+        h.state()
+            .app
+            .onboarding
+            .normal
+            .applied
+            .as_ref()
+            .unwrap()
+            .input_device,
+        "new microphone"
+    );
+    assert!(h.state().app.ui_error.is_some());
+    assert_eq!(h.state().app.onboarding.effects.start_requests, 0);
+}
+
+#[test]
+fn ui_denoiser_changes_and_coalesced_input_wait_for_latest_ack_without_restart() {
+    let mut fixture = ready_main_fixture(text::Language::English);
+    fixture.status.state = EngineState::Running;
+    fixture.status.input_recoverable = true;
+    fixture.app.onboarding.normal.applied = Some(fixture.app.settings.clone());
+    fixture.app.settings.input_device = "new microphone".into();
+    fixture.app.request_input_change(&fixture.status);
+    fixture.app.settings.denoiser = "noise-gate".into();
+    fixture.app.request_denoiser_change(&fixture.status);
+    fixture.status.reconfiguration_revision = 1;
+    fixture.status.applied_runtime = Some(AppliedRuntimeConfig {
+        input_device: Some("new microphone".into()),
+        ..Default::default()
+    });
+    let mut h = harness(fixture);
+    h.run_steps(4);
+    assert_eq!(
+        h.state()
+            .app
+            .onboarding
+            .normal
+            .applied
+            .as_ref()
+            .unwrap()
+            .input_device,
+        "new microphone"
+    );
+    assert_eq!(
+        h.state()
+            .app
+            .onboarding
+            .normal
+            .applied
+            .as_ref()
+            .unwrap()
+            .denoiser,
+        "off"
+    );
+    assert!(h.state().app.onboarding.normal.requested_runtime.is_some());
+    h.state_mut().status.reconfiguration_revision = 2;
+    h.state_mut()
+        .status
+        .applied_runtime
+        .as_mut()
+        .unwrap()
+        .denoiser_mode = DenoiserMode::NoiseGate;
+    h.run_steps(4);
+    let applied = h.state().app.onboarding.normal.applied.as_ref().unwrap();
+    assert_eq!(applied.input_device, "new microphone");
+    assert_eq!(applied.denoiser, "noise-gate");
+    assert!(h
+        .query_by_label("Unapplied changes — Restart to apply.")
+        .is_none());
+    {
+        let fixture = h.state_mut();
+        fixture.app.settings.denoiser = "rnnoise".into();
+        fixture.app.request_denoiser_change(&fixture.status);
+        fixture.status.reconfiguration_revision = 3;
+        fixture
+            .status
+            .applied_runtime
+            .as_mut()
+            .unwrap()
+            .denoiser_mode = DenoiserMode::Rnnoise;
+    }
+    h.run_steps(4);
+    assert_eq!(
+        h.state()
+            .app
+            .onboarding
+            .normal
+            .applied
+            .as_ref()
+            .unwrap()
+            .denoiser,
+        "rnnoise"
+    );
+    {
+        let fixture = h.state_mut();
+        fixture.app.settings.denoiser = "gtcrn".into();
+        fixture.app.request_denoiser_change(&fixture.status);
+        fixture.status.reconfiguration_revision = 4;
+        fixture.status.reconfiguration_error = Some("GTCRN preparation failed".into());
+    }
+    h.run_steps(4);
+    assert_eq!(
+        h.state()
+            .app
+            .onboarding
+            .normal
+            .applied
+            .as_ref()
+            .unwrap()
+            .denoiser,
+        "rnnoise"
+    );
+    assert!(h.state().app.ui_error.is_some());
+    assert!(h
+        .query_by_label("Unapplied changes — Restart to apply.")
+        .is_none());
+    assert_eq!(h.state().app.onboarding.effects.start_requests, 0);
 }
 
 #[test]

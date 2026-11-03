@@ -45,8 +45,8 @@ pub use inspect::{
     inspect_model, read_model_metadata, validate_onnx_model, validate_rvc_model, ModelMetadata,
 };
 pub use pipeline::{
-    F0Config, LiveParams, LoadModelRole, LoadProgress, NoiseGateShaping, OutputDynamicsConfig,
-    RvcPipeline, RvcPipelineConfig,
+    F0Config, InputDenoiserConfig, LiveParams, LoadModelRole, LoadProgress, NoiseGateShaping,
+    OutputDynamicsConfig, PreparedInputDenoiser, RvcPipeline, RvcPipelineConfig,
 };
 pub use process_priority::{set_process_gpu_priority, set_process_power_throttling};
 

@@ -238,6 +238,30 @@ conversion resumes, the worker clears stale RVC rolling context and smoother
 history together with the input/output resamplers and denoiser state before
 processing the next chunk. Model-free sessions expose only the passthrough route.
 
+The GUI sends input, output and denoiser edits through a separate coalescing control
+mailbox. These requests patch the last applied configuration, never staged model,
+provider or other-device edits. Explicit device names are checked without default-device
+fallback. An endpoint change stops and joins the old worker, then transfers its
+loaded model to a new worker when the input/output rates and hop match. Fresh
+streams, rings and a new clock servo discard the previous endpoint timeline;
+either endpoint change discards the old relative-clock estimate. Changed rates
+instead load the pipeline for the newly negotiated contract. Audio
+stream failure retains models for another explicit device selection. Stop or
+Apply invalidates pending changes, and obsolete preparation cannot acknowledge
+the latest GUI selection. The OS default is resolved on selection, not followed.
+
+Off/Gate retains its per-chunk live path without stream restart. Stateful denoiser
+changes prepare independent RVC and passthrough stages before replacing either;
+GTCRN preparation validates frame inference and resets the probe state. RNNoise
+stays at input rate and GTCRN at the new 16 kHz increment. The transfer uses the
+existing whole-pipeline and converter reset APIs, clearing model context,
+noise/phase, denoiser FIFOs and smoothing/resampler history together. Only the
+same-endpoint denoiser restart retains the bounded clock estimate, with queue
+phase relearned. Device restart failure attempts the exact previous endpoints and
+denoisers; if restoration fails, the GUI reports a recoverable silent state.
+Opening devices, preparation, allocation and joins remain off audio callbacks.
+VST3 continues to use DAW-owned I/O and its existing reset/latency contract.
+
 ## Chunk Lifecycle
 
 Realtime audio arrives in device callback-sized blocks, but the model operates

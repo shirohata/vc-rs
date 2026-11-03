@@ -9,8 +9,8 @@ mod clock_drift;
 mod realtime;
 
 pub use realtime::{
-    write_wav_mono, AudioHost, DenoiserMode, DeviceList, DeviceTestConfig, DeviceTestSnapshot,
-    EngineController, EngineState, EngineStatusSnapshot, RealtimeConfig, Smoother,
-    TelemetrySnapshot, TestOutput,
+    write_wav_mono, AppliedRuntimeConfig, AudioHost, DenoiserMode, DeviceList, DeviceTestConfig,
+    DeviceTestSnapshot, EngineController, EngineState, EngineStatusSnapshot, RealtimeConfig,
+    Smoother, TelemetrySnapshot, TestOutput,
 };
 pub use vc_core::model_rvc::{F0Config, LiveParams, NoiseGateShaping, OutputDynamicsConfig};

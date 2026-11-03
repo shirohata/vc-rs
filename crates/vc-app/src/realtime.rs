@@ -29,11 +29,18 @@ const OUTPUT_QUEUE_CHUNKS: usize = 4;
 const COMMAND_CAPACITY: usize = 8;
 
 #[cfg(test)]
+thread_local! { static MODEL_LOADS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+#[cfg(test)]
+thread_local! { static FAIL_NEXT_PLAY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+
+#[cfg(test)]
 #[path = "realtime/clock_tests.rs"]
 mod clock_tests;
 mod device_test;
+mod reconfigure;
 use device_test::DeviceTestSession;
 pub use device_test::{DeviceTestConfig, DeviceTestSnapshot, TestOutput};
+use reconfigure::{DenoiserChange, DeviceChange, ReconfigureMailbox, RetainedModel};
 
 /// OS audio host / API. Modelled on cpal's `HostId` (the canonical serialized
 /// tokens match: `wasapi`/`asio`/`coreaudio`/`alsa`/`jack`), so the same enum
@@ -136,8 +143,8 @@ pub struct RealtimeConfig {
     // GTCRN model directory (holds gtcrn_stream.onnx). Required only when
     // `denoiser_mode == Gtcrn`; ignored otherwise.
     pub gtcrn_model_dir: Option<PathBuf>,
-    // Denoiser mode and gate attack/release/floor are static (set at load);
-    // the gate threshold is live (see `LiveParams`).
+    // Gate shaping remains load-scoped; standalone method changes use the
+    // prepared-denoiser control path, and threshold uses LiveParams.
     pub noise_gate_shaping: NoiseGateShaping,
     pub output_dynamics: OutputDynamicsConfig,
     pub passthrough: bool,
@@ -292,6 +299,32 @@ impl RealtimeConfig {
     }
 }
 
+/// Last successfully applied GUI-editable runtime settings, independent of the
+/// most recent request's success/failure. Keep device selection intent separate
+/// from the resolved endpoint: `None` means the user selected Default.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct AppliedRuntimeConfig {
+    pub input_host: AudioHost,
+    pub input_device: Option<String>,
+    pub output_host: AudioHost,
+    pub output_device: Option<String>,
+    pub denoiser_mode: DenoiserMode,
+    pub gtcrn_model_dir: Option<PathBuf>,
+}
+
+impl AppliedRuntimeConfig {
+    fn from_config(config: &RealtimeConfig) -> Self {
+        Self {
+            input_host: config.input_host,
+            input_device: config.input_device.clone(),
+            output_host: config.output_host,
+            output_device: config.output_device.clone(),
+            denoiser_mode: config.denoiser_mode,
+            gtcrn_model_dir: config.gtcrn_model_dir.clone(),
+        }
+    }
+}
+
 // `LiveParams` itself now lives in vc-core (re-exported via `lib.rs`) so the
 // per-chunk live-update path is shared with the VST3 host callback; this is the
 // lock-free worker-facing mirror that the audio side never touches.
@@ -313,6 +346,12 @@ impl AtomicLiveParams {
     }
 
     fn store(&self, value: LiveParams) {
+        self.store_controls(value);
+        self.noise_gate_enabled
+            .store(value.noise_gate_enabled, Ordering::Relaxed);
+    }
+
+    fn store_controls(&self, value: LiveParams) {
         self.pitch_shift
             .store(value.pitch_shift.to_bits(), Ordering::Relaxed);
         self.speaker_id.store(value.speaker_id, Ordering::Relaxed);
@@ -320,8 +359,6 @@ impl AtomicLiveParams {
             .store(value.input_gain.to_bits(), Ordering::Relaxed);
         self.output_gain
             .store(value.output_gain.to_bits(), Ordering::Relaxed);
-        self.noise_gate_enabled
-            .store(value.noise_gate_enabled, Ordering::Relaxed);
         self.noise_gate_threshold
             .store(value.noise_gate_threshold.to_bits(), Ordering::Relaxed);
     }
@@ -353,6 +390,13 @@ pub struct EngineStatusSnapshot {
     /// Changes only after a newly requested conversion session starts. Frontends
     /// must not confirm a preview using a stale Running snapshot from its predecessor.
     pub session_revision: u64,
+    pub reconfiguration_revision: u64,
+    pub reconfiguration_error: Option<String>,
+    /// Audio reconfiguration can resume a retained model after either endpoint
+    /// fails. The original input-era name is retained for API compatibility.
+    pub input_recoverable: bool,
+    /// Authoritative applied state, also present after a later request fails.
+    pub applied_runtime: Option<AppliedRuntimeConfig>,
     pub state: EngineState,
     pub message: String,
     pub detail: Option<String>,
@@ -500,11 +544,13 @@ pub struct EngineController {
     live: Arc<AtomicLiveParams>,
     passthrough: Arc<AtomicBool>,
     control: Option<JoinHandle<()>>,
+    reconfigure: Arc<ReconfigureMailbox>,
 }
 
 impl EngineController {
     pub fn new(initial_live: LiveParams) -> Self {
         let (tx, rx) = mpsc::sync_channel(COMMAND_CAPACITY);
+        let reconfigure = Arc::new(ReconfigureMailbox::default());
         let status = Arc::new(Mutex::new(EngineStatusSnapshot::default()));
         let devices = Arc::new(Mutex::new(DeviceList::default()));
         let telemetry = Arc::new(Telemetry::default());
@@ -518,6 +564,7 @@ impl EngineController {
             let live = Arc::clone(&live);
             let passthrough = Arc::clone(&passthrough);
             let test_snapshot = Arc::clone(&test_snapshot);
+            let reconfigure = Arc::clone(&reconfigure);
             thread::Builder::new()
                 .name("vc-app-control".to_string())
                 .stack_size(64 * 1024 * 1024)
@@ -530,6 +577,7 @@ impl EngineController {
                         live,
                         passthrough,
                         test_snapshot,
+                        reconfigure,
                     )
                 })
                 .expect("failed to spawn vc-app control thread")
@@ -543,16 +591,19 @@ impl EngineController {
             live,
             passthrough,
             control: Some(control),
+            reconfigure,
         }
     }
 
     pub fn apply_config(&self, config: RealtimeConfig) -> Result<()> {
         config.validate()?;
+        self.reconfigure.cancel();
         self.try_command(Command::Apply(config))
     }
 
     /// Starts/reconfigures model-free diagnostics, replacing any prior session.
     pub fn start_device_test(&self, config: DeviceTestConfig) -> Result<()> {
+        self.reconfigure.cancel();
         self.try_command(Command::DeviceTest(config))
     }
 
@@ -563,7 +614,25 @@ impl EngineController {
             .unwrap_or_default()
     }
 
+    /// Change only input selection, retaining applied model/output settings.
+    pub fn change_input(&self, host: AudioHost, device: Option<String>) -> Result<u64> {
+        self.reconfigure.request(DeviceChange { host, device })
+    }
+
+    /// Change only output selection, retaining applied model/input settings.
+    /// Matching device rates reuse inference sessions; a rate change reloads
+    /// through the shared pipeline. Device opening happens on the control thread.
+    pub fn change_output(&self, host: AudioHost, device: Option<String>) -> Result<u64> {
+        self.reconfigure.request_output(host, device)
+    }
+
+    pub fn change_denoiser(&self, mode: DenoiserMode, model_dir: Option<PathBuf>) -> Result<u64> {
+        self.reconfigure
+            .request_denoiser(DenoiserChange { mode, model_dir })
+    }
+
     pub fn stop(&self) -> Result<()> {
+        self.reconfigure.cancel();
         self.try_command(Command::Stop)
     }
 
@@ -573,6 +642,12 @@ impl EngineController {
 
     pub fn set_live_params(&self, params: LiveParams) {
         self.live.store(params);
+    }
+
+    /// GUI method selection belongs to the reconfiguration control path. Other
+    /// live edits must not echo an unobserved/stale gate ACK back into the DSP.
+    pub fn set_live_controls(&self, params: LiveParams) {
+        self.live.store_controls(params);
     }
 
     pub fn set_passthrough(&self, enabled: bool) {
@@ -595,6 +670,7 @@ impl EngineController {
 
 impl Drop for EngineController {
     fn drop(&mut self) {
+        self.reconfigure.cancel();
         let _ = self.tx.send(Command::Shutdown);
         if let Some(control) = self.control.take() {
             let _ = control.join();
@@ -602,6 +678,8 @@ impl Drop for EngineController {
     }
 }
 
+// These are the controller's independent shared handles, never callback state.
+#[allow(clippy::too_many_arguments)]
 fn control_loop(
     rx: Receiver<Command>,
     status: Arc<Mutex<EngineStatusSnapshot>>,
@@ -610,13 +688,16 @@ fn control_loop(
     live: Arc<AtomicLiveParams>,
     passthrough: Arc<AtomicBool>,
     test_snapshot: Arc<Mutex<DeviceTestSnapshot>>,
+    reconfigure: Arc<ReconfigureMailbox>,
 ) {
     let mut session: Option<RealtimeSession> = None;
     let mut test_session: Option<DeviceTestSession> = None;
     let mut session_revision = 0_u64;
+    let mut recovery: Option<(RealtimeConfig, Option<RetainedModel>)> = None;
     loop {
         match rx.recv_timeout(Duration::from_millis(100)) {
             Ok(Command::DeviceTest(config)) => {
+                recovery = None;
                 drop(session.take());
                 drop(test_session.take());
                 telemetry.reset();
@@ -632,6 +713,7 @@ fn control_loop(
                 }
             }
             Ok(Command::Apply(config)) => {
+                recovery = None;
                 drop(test_session.take());
                 *test_snapshot.lock().unwrap() = DeviceTestSnapshot::default();
                 passthrough.store(config.passthrough, Ordering::Relaxed);
@@ -658,6 +740,7 @@ fn control_loop(
                 }
             }
             Ok(Command::Stop) => {
+                recovery = None;
                 drop(test_session.take());
                 *test_snapshot.lock().unwrap() = DeviceTestSnapshot::default();
                 set_status(&status, EngineState::Stopping, "Stopping");
@@ -684,6 +767,16 @@ fn control_loop(
                 "Audio device disconnected or test worker stopped. Retry the device test.".into()
             });
         }
+        reconfigure::apply_pending(
+            &reconfigure,
+            &mut session,
+            &mut recovery,
+            &telemetry,
+            &live,
+            &passthrough,
+            &status,
+            session_revision,
+        );
         let mut audio_failure = None;
         if let Some(session) = session.as_mut() {
             for (message, stream) in [
@@ -699,8 +792,14 @@ fn control_loop(
         }
         if let Some(message) = audio_failure {
             let detail = session.as_ref().and_then(|s| s.last_error());
-            drop(session.take());
+            if let Some(mut failed) = session.take() {
+                if message == "Input audio stream stopped" && failed.running.load(Ordering::Relaxed)
+                {
+                    recovery = Some((failed.config.clone(), failed.suspend()));
+                }
+            }
             set_error_message(&status, message, detail);
+            status.lock().unwrap().input_recoverable = recovery.is_some();
         } else if session
             .as_ref()
             .is_some_and(|s| !s.running.load(Ordering::Relaxed))
@@ -733,6 +832,11 @@ fn set_status(
             status.output_sample_rate = 0;
             status.passthrough_live_switchable = false;
         }
+        if matches!(state, EngineState::Stopped | EngineState::Stopping) {
+            status.input_recoverable = false;
+            status.reconfiguration_error = None;
+            status.applied_runtime = None;
+        }
     }
 }
 
@@ -746,6 +850,7 @@ fn set_error_message(
 ) {
     if let Ok(mut status) = status.lock() {
         status.state = EngineState::Error;
+        status.input_recoverable = false;
         status.message = message.into();
         status.detail = detail;
         status.input_format.clear();
@@ -761,6 +866,7 @@ fn set_error_message(
 fn set_error(status: &Mutex<EngineStatusSnapshot>, error: &anyhow::Error) {
     if let Ok(mut status) = status.lock() {
         status.state = EngineState::Error;
+        status.input_recoverable = false;
         status.message = error.to_string();
         status.detail = Some(format!("{error:#}"));
         status.input_format.clear();
@@ -872,6 +978,11 @@ impl PassthroughProcessor {
         self.adaptive_resampler = None;
         self.resampler =
             dsp::StreamingResampleMono::new(self.input_rate as usize, self.output_rate as usize)?;
+        #[cfg(feature = "gtcrn")]
+        if let PassthroughDenoiser::Gtcrn(denoiser) = &mut self.denoiser {
+            denoiser.reset()?;
+            return Ok(());
+        }
         self.denoiser = match self.mode {
             DenoiserMode::Rnnoise => {
                 #[cfg(feature = "rnnoise")]
@@ -915,8 +1026,8 @@ impl PassthroughProcessor {
     }
 
     fn update_live_denoiser(&mut self, live: &LiveParams) {
-        // Stateful denoisers are static load-time choices; a live gate toggle must
-        // never tear them down.
+        // Stateful denoisers change through the prepared-pair control path;
+        // ordinary live gate updates must never tear them down.
         if self.mode == DenoiserMode::Rnnoise || self.mode == DenoiserMode::Gtcrn {
             return;
         }
@@ -1014,6 +1125,25 @@ enum RuntimeModel {
 }
 
 impl RuntimeModel {
+    fn reset(&mut self, live: &LiveParams) -> Result<()> {
+        match self {
+            Self::PassthroughOnly(passthrough) => {
+                passthrough.correction_ppm = 0.0;
+                passthrough.reset(live)?;
+            }
+            Self::Switchable {
+                passthrough, rvc, ..
+            } => {
+                passthrough.correction_ppm = 0.0;
+                passthrough.reset(live)?;
+                rvc.model_mut().reset_streaming_state()?;
+                rvc.reset_streaming_state();
+                rvc.set_output_clock_correction(0.0)?;
+            }
+        }
+        Ok(())
+    }
+
     fn output_resample_delay_samples(&self, passthrough_requested: bool) -> Option<usize> {
         match self {
             Self::PassthroughOnly(passthrough) => passthrough
@@ -1147,13 +1277,15 @@ fn accumulate_input_chunk(
 }
 
 struct RealtimeSession {
+    config: RealtimeConfig,
+    telemetry: Arc<Telemetry>,
     running: Arc<AtomicBool>,
     // The error that stopped the inference worker, if any. The worker writes it
     // before clearing `running`; the controller surfaces it in the engine status
     // instead of the bare "Realtime worker stopped" message.
     last_error: Arc<Mutex<Option<String>>>,
     wake: Arc<WorkerWake>,
-    worker: Option<JoinHandle<()>>,
+    worker: Option<JoinHandle<RuntimeModel>>,
     input_stream: Option<AudioStream>,
     output_stream: Option<AudioStream>,
     status: EngineStatusSnapshot,
@@ -1193,95 +1325,38 @@ impl RealtimeSession {
             config.output_device.as_deref(),
             config.wasapi_buffer_ms,
         )?;
+        Self::start_opened(
+            config,
+            audio,
+            telemetry,
+            live,
+            passthrough_live,
+            status,
+            &mut None,
+            None,
+        )
+    }
+
+    // Keep the applied config, opened endpoints and transferable model explicit:
+    // a restart must not accidentally read the GUI's unrelated staged settings.
+    #[allow(clippy::too_many_arguments)]
+    fn start_opened(
+        mut config: RealtimeConfig,
+        audio: RealtimeAudio,
+        telemetry: Arc<Telemetry>,
+        live: Arc<AtomicLiveParams>,
+        passthrough_live: Arc<AtomicBool>,
+        status: &Arc<Mutex<EngineStatusSnapshot>>,
+        retained: &mut Option<RetainedModel>,
+        ticket: Option<(&ReconfigureMailbox, u64)>,
+    ) -> Result<Self> {
+        let applied_runtime = AppliedRuntimeConfig::from_config(&config);
         let input_rate = audio.input_sample_rate();
         let output_rate = audio.output_sample_rate();
         let (input_chunk, output_chunk) = config.chunk_samples(input_rate, output_rate)?;
-        let current_live = live.load();
-        #[cfg(feature = "gtcrn")]
-        let gtcrn_backend = vc_core::denoise::GtcrnBackend::for_provider(
-            config.provider,
-            config.gpu_priority,
-            config.gpu_device_id,
-        );
         let debug_input = Arc::new(Mutex::new(Vec::new()));
         let debug_output = Arc::new(Mutex::new(Vec::new()));
-        let mut passthrough_processor = PassthroughProcessor::new(
-            config.denoiser_mode,
-            config.noise_gate_shaping,
-            input_rate,
-            output_rate,
-            config.gtcrn_model_dir.clone(),
-            #[cfg(feature = "gtcrn")]
-            gtcrn_backend,
-            &current_live,
-        )?;
-        passthrough_processor.enable_adaptive_output();
         let passthrough_live_switchable = config.has_complete_model_set();
-        let model = if passthrough_live_switchable {
-            let report_progress = |progress| {
-                set_status(
-                    status,
-                    EngineState::Starting,
-                    load_progress_message(progress),
-                );
-            };
-            let pipeline_config = config.pipeline_config(
-                input_rate,
-                input_chunk,
-                &current_live,
-                Some(&report_progress),
-            );
-            let pipeline = match config.denoiser_mode {
-                DenoiserMode::Off | DenoiserMode::NoiseGate => RvcPipeline::load(pipeline_config)?,
-                DenoiserMode::Rnnoise => {
-                    #[cfg(feature = "rnnoise")]
-                    {
-                        RvcPipeline::load_with_rnnoise(pipeline_config)?
-                    }
-                    #[cfg(not(feature = "rnnoise"))]
-                    {
-                        bail!("RNNoise support is not enabled in this build")
-                    }
-                }
-                DenoiserMode::Gtcrn => {
-                    #[cfg(feature = "gtcrn")]
-                    {
-                        let model_dir = config.gtcrn_model_dir.as_deref().ok_or_else(|| {
-                            anyhow!("GTCRN denoiser requires a model directory (gtcrn_model_dir)")
-                        })?;
-                        RvcPipeline::load_with_gtcrn(
-                            pipeline_config,
-                            vc_core::denoise::GtcrnConfig {
-                                model_dir,
-                                backend: gtcrn_backend,
-                            },
-                        )?
-                    }
-                    #[cfg(not(feature = "gtcrn"))]
-                    {
-                        bail!("GTCRN support is not enabled in this build")
-                    }
-                }
-            };
-            RuntimeModel::Switchable {
-                passthrough: passthrough_processor,
-                rvc: ChunkConverter::new_adaptive(
-                    pipeline,
-                    ChunkOutputConfig {
-                        kind: config.smoother.kind(),
-                        output_sample_rate: output_rate,
-                        output_chunk_samples: output_chunk,
-                        crossfade_ms: config.crossfade_ms,
-                        sola_search_ms: config.sola_search_ms,
-                        tail_discard_ms: config.rvc_output_tail_discard_ms,
-                    },
-                ),
-                passthrough_active: config.passthrough,
-            }
-        } else {
-            RuntimeModel::PassthroughOnly(passthrough_processor)
-        };
-
         let output_capacity = output_chunk * OUTPUT_QUEUE_CHUNKS;
         let running = Arc::new(AtomicBool::new(true));
         let wake = Arc::new(WorkerWake::default());
@@ -1297,6 +1372,29 @@ impl RealtimeSession {
             &wake,
             &telemetry,
         )?;
+        let clock_ppm = retained
+            .as_ref()
+            .filter(|old| old.matches(input_rate, output_rate, input_chunk))
+            .map_or(0.0, |old| old.clock_ppm);
+        let mut model = reconfigure::reuse_or_load(
+            retained,
+            input_rate,
+            output_rate,
+            input_chunk,
+            &live.load(),
+            || {
+                Self::load_model(
+                    &config,
+                    input_rate,
+                    output_rate,
+                    input_chunk,
+                    output_chunk,
+                    &live,
+                    status,
+                )
+            },
+        )?;
+        model.set_clock_correction(clock_ppm, passthrough_live.load(Ordering::Relaxed))?;
         let last_error = Arc::new(Mutex::new(None));
         let worker_last_error = Arc::clone(&last_error);
         let worker_running = Arc::clone(&running);
@@ -1323,6 +1421,7 @@ impl RealtimeSession {
                     let mut input_acc = Vec::<f32>::with_capacity(input_chunk * 2);
                     let mut prepared = Vec::<f32>::with_capacity(output_chunk * 2);
                     let mut clock = crate::clock_drift::ClockDriftController::new(output_rate);
+                    clock.seed(clock_ppm);
                     let hop_seconds = input_chunk as f64 / input_rate as f64;
                     let mut previous_faults = (0, 0, 0);
                     let mut previous_route = None;
@@ -1475,17 +1574,51 @@ impl RealtimeSession {
                             Ordering::Relaxed,
                         );
                     }
+                    model
                 })?,
         );
 
-        if let Err(err) = output_stream.play().and_then(|_| input_stream.play()) {
+        if ticket.is_some_and(|(mailbox, revision)| !mailbox.is_current(revision)) {
             drop(input_stream);
             drop(output_stream);
-            stop_startup_worker(&running, &wake, &mut worker);
+            *retained =
+                stop_startup_worker(&running, &wake, &mut worker).map(|model| RetainedModel {
+                    model,
+                    input_rate,
+                    output_rate,
+                    input_chunk,
+                    clock_ppm,
+                });
+            bail!("Input change was superseded");
+        }
+        #[cfg(test)]
+        let fail_play = FAIL_NEXT_PLAY.with(|fail| fail.replace(false));
+        #[cfg(not(test))]
+        let fail_play = false;
+        let play_result = if fail_play {
+            Err(anyhow!("injected stream playback failure"))
+        } else {
+            output_stream.play().and_then(|_| input_stream.play())
+        };
+        if let Err(err) = play_result {
+            drop(input_stream);
+            drop(output_stream);
+            *retained =
+                stop_startup_worker(&running, &wake, &mut worker).map(|model| RetainedModel {
+                    model,
+                    input_rate,
+                    output_rate,
+                    input_chunk,
+                    clock_ppm,
+                });
             return Err(err);
         }
 
+        config.input_device = Some(audio.input_name().to_string());
+        config.output_device = Some(audio.output_name().to_string());
         Ok(Self {
+            config: config.clone(),
+            telemetry,
             running,
             last_error,
             wake,
@@ -1494,6 +1627,10 @@ impl RealtimeSession {
             output_stream: Some(output_stream),
             status: EngineStatusSnapshot {
                 session_revision: 0,
+                reconfiguration_revision: 0,
+                reconfiguration_error: None,
+                input_recoverable: true,
+                applied_runtime: Some(applied_runtime),
                 state: EngineState::Running,
                 message: format!(
                     "Running (in: {} / out: {})",
@@ -1515,6 +1652,124 @@ impl RealtimeSession {
             debug_output,
             input_rate,
             output_rate,
+        })
+    }
+
+    fn load_model(
+        config: &RealtimeConfig,
+        input_rate: u32,
+        output_rate: u32,
+        input_chunk: usize,
+        output_chunk: usize,
+        live: &AtomicLiveParams,
+        status: &Arc<Mutex<EngineStatusSnapshot>>,
+    ) -> Result<RuntimeModel> {
+        #[cfg(test)]
+        MODEL_LOADS.with(|count| count.set(count.get() + 1));
+        let current_live = live.load();
+        #[cfg(feature = "gtcrn")]
+        let gtcrn_backend = vc_core::denoise::GtcrnBackend::for_provider(
+            config.provider,
+            config.gpu_priority,
+            config.gpu_device_id,
+        );
+        let mut passthrough_processor = PassthroughProcessor::new(
+            config.denoiser_mode,
+            config.noise_gate_shaping,
+            input_rate,
+            output_rate,
+            config.gtcrn_model_dir.clone(),
+            #[cfg(feature = "gtcrn")]
+            gtcrn_backend,
+            &current_live,
+        )?;
+        passthrough_processor.enable_adaptive_output();
+        let model = if config.has_complete_model_set() {
+            let report_progress = |progress| {
+                set_status(
+                    status,
+                    EngineState::Starting,
+                    load_progress_message(progress),
+                );
+            };
+            let pipeline_config = config.pipeline_config(
+                input_rate,
+                input_chunk,
+                &current_live,
+                Some(&report_progress),
+            );
+            let pipeline = match config.denoiser_mode {
+                DenoiserMode::Off | DenoiserMode::NoiseGate => RvcPipeline::load(pipeline_config)?,
+                DenoiserMode::Rnnoise => {
+                    #[cfg(feature = "rnnoise")]
+                    {
+                        RvcPipeline::load_with_rnnoise(pipeline_config)?
+                    }
+                    #[cfg(not(feature = "rnnoise"))]
+                    {
+                        bail!("RNNoise support is not enabled in this build")
+                    }
+                }
+                DenoiserMode::Gtcrn => {
+                    #[cfg(feature = "gtcrn")]
+                    {
+                        let model_dir = config.gtcrn_model_dir.as_deref().ok_or_else(|| {
+                            anyhow!("GTCRN denoiser requires a model directory (gtcrn_model_dir)")
+                        })?;
+                        RvcPipeline::load_with_gtcrn(
+                            pipeline_config,
+                            vc_core::denoise::GtcrnConfig {
+                                model_dir,
+                                backend: gtcrn_backend,
+                            },
+                        )?
+                    }
+                    #[cfg(not(feature = "gtcrn"))]
+                    {
+                        bail!("GTCRN support is not enabled in this build")
+                    }
+                }
+            };
+            RuntimeModel::Switchable {
+                passthrough: passthrough_processor,
+                rvc: ChunkConverter::new_adaptive(
+                    pipeline,
+                    ChunkOutputConfig {
+                        kind: config.smoother.kind(),
+                        output_sample_rate: output_rate,
+                        output_chunk_samples: output_chunk,
+                        crossfade_ms: config.crossfade_ms,
+                        sola_search_ms: config.sola_search_ms,
+                        tail_discard_ms: config.rvc_output_tail_discard_ms,
+                    },
+                ),
+                passthrough_active: config.passthrough,
+            }
+        } else {
+            RuntimeModel::PassthroughOnly(passthrough_processor)
+        };
+        Ok(model)
+    }
+
+    // Join before handing inference sessions to another worker. New rings and
+    // clock servo discard device-timeline state without touching callbacks.
+    fn suspend(&mut self) -> Option<RetainedModel> {
+        self.running.store(false, Ordering::SeqCst);
+        self.wake.wake();
+        drop(self.input_stream.take());
+        drop(self.output_stream.take());
+        self.worker.take()?.join().ok().map(|model| RetainedModel {
+            model,
+            input_rate: self.input_rate,
+            output_rate: self.output_rate,
+            input_chunk: self
+                .config
+                .chunk_samples(self.input_rate, self.output_rate)
+                .expect("active timing")
+                .0,
+            clock_ppm: f64::from(f32::from_bits(
+                self.telemetry.output_clock_ppm_bits.load(Ordering::Relaxed),
+            )),
         })
     }
 
@@ -1626,20 +1881,18 @@ fn build_streams(
     Ok((input_stream, output_stream, input_consumer, output_producer))
 }
 
-fn stop_startup_worker(
+fn stop_startup_worker<T>(
     running: &AtomicBool,
     wake: &WorkerWake,
-    worker: &mut Option<JoinHandle<()>>,
-) {
+    worker: &mut Option<JoinHandle<T>>,
+) -> Option<T> {
     // Stream playback can still fail after the inference worker starts. Always
     // stop and join it before returning so failed Apply attempts cannot leave a
     // model/CUDA context alive behind the next session. Wake it first: with no
     // playing input stream it may already be parked waiting for input.
     running.store(false, Ordering::SeqCst);
     wake.wake();
-    if let Some(worker) = worker.take() {
-        let _ = worker.join();
-    }
+    worker.take().and_then(|worker| worker.join().ok())
 }
 
 /// Write mono `f32` samples to a 16-bit PCM WAV file. Shared by the realtime
@@ -1732,6 +1985,26 @@ mod tests {
         assert_eq!(out.output_gain, params.output_gain);
         assert_eq!(out.noise_gate_enabled, params.noise_gate_enabled);
         assert_eq!(out.noise_gate_threshold, params.noise_gate_threshold);
+    }
+
+    #[test]
+    fn gui_live_controls_cannot_overwrite_an_unobserved_gate_success() {
+        let live = AtomicLiveParams::new(LiveParams::default());
+        // Control has accepted Off -> Gate, but GUI still has its old Off state.
+        live.noise_gate_enabled.store(true, Ordering::Relaxed);
+        live.store_controls(LiveParams {
+            input_gain: 2.0,
+            pitch_shift: 3.0,
+            noise_gate_enabled: false,
+            ..Default::default()
+        });
+        let current = live.load();
+        assert!(current.noise_gate_enabled);
+        assert_eq!(current.input_gain, 2.0);
+        assert_eq!(current.pitch_shift, 3.0);
+        // The full-snapshot API remains compatible for non-GUI callers.
+        live.store(LiveParams::default());
+        assert!(!live.load().noise_gate_enabled);
     }
 
     #[test]
