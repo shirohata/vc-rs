@@ -483,7 +483,7 @@ impl VcGui {
             Provider::from_name(&self.settings.provider).unwrap_or(vc_core::default_provider());
         let mut backend = selected.backend();
         egui::ComboBox::new("Provider", lang.text("Provider"))
-            .selected_text(gui_provider_label(backend.label()))
+            .selected_text(lang.text(backend.display_name()))
             .show_ui(ui, |ui| {
                 // Build's base backends plus the device's live Windows ML
                 // catalog EPs (cached in vc-core), so the picker offers what
@@ -494,9 +494,12 @@ impl VcGui {
                     .filter(|p| gui_provider_visible(*p))
                     .filter(|p| p.backend() == *p)
                 {
-                    let label = provider.label();
                     if ui
-                        .selectable_value(&mut backend, provider, gui_provider_label(label))
+                        .selectable_value(
+                            &mut backend,
+                            provider,
+                            lang.text(provider.display_name()),
+                        )
                         .changed()
                     {
                         // New selections are explicit. Only restored settings
@@ -594,6 +597,11 @@ impl VcGui {
             } else if retry {
                 self.openvino_devices.retry();
             }
+        }
+        if let Some(hint) =
+            Provider::from_name(&self.settings.provider).and_then(Provider::display_hint)
+        {
+            ui.small(lang.text(hint));
         }
         // GPU priority now applies to every backend: a process-wide Windows
         // GPU scheduling priority class (set on engine start) plus, on the

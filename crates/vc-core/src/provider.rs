@@ -29,7 +29,7 @@ pub enum Provider {
 }
 
 /// Canonical name plus alternate spellings for one [`Provider`]. `name` doubles
-/// as the value shown by `label()` and emitted by the CLI/VST3/GUI.
+/// as the value returned by `label()` and persisted by the CLI/VST3/GUI.
 struct ProviderInfo {
     name: &'static str,
     aliases: &'static [&'static str],
@@ -131,6 +131,47 @@ impl Provider {
 
     pub fn label(self) -> &'static str {
         self.info().name
+    }
+
+    /// English UI text (also used as a GUI translation key). Never persist or
+    /// parse this text: `label()` remains the compatible CLI/settings token.
+    /// These names describe the requested configuration, not operation placement.
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::Cpu => "CPU",
+            Self::Cuda => "CUDA (NVIDIA GPU)",
+            Self::TensorRt => "TensorRT (NVIDIA GPU)",
+            Self::WindowsMl => "Windows ML (automatic)",
+            Self::WindowsMlCpu => "CPU (Windows ML)",
+            Self::WindowsMlDirectMl => "DirectML (GPU)",
+            Self::WindowsMlNvTensorRtRtx => "TensorRT RTX (NVIDIA GPU)",
+            Self::WindowsMlOpenVino => "OpenVINO",
+            Self::WindowsMlOpenVinoCpu => "OpenVINO (CPU)",
+            Self::WindowsMlOpenVinoGpu => "OpenVINO (GPU)",
+            Self::WindowsMlOpenVinoNpu => "OpenVINO (NPU)",
+            Self::WindowsMlQnn => "QNN",
+            Self::WindowsMlMiGraphX => "MIGraphX",
+            Self::WindowsMlVitisAi => "Vitis AI",
+        }
+    }
+
+    /// Short UI explanation shared by GUI and VST3; no runtime policy is
+    /// inferred from this text. In particular, an OpenVINO device restriction
+    /// does not promise that every model or operation runs on that device.
+    pub fn display_hint(self) -> Option<&'static str> {
+        match self {
+            Self::WindowsMl => Some(
+                "Windows ML automatically chooses an available backend. Some processing may use the CPU.",
+            ),
+            Self::WindowsMlOpenVino => Some(
+                "The device is unspecified in this saved setting; this is not automatic device selection. Some processing may use the CPU.",
+            ),
+            Self::WindowsMlCpu | Self::Cpu => None,
+            _ if self.is_windows_ml() => Some(
+                "Some processing may use the CPU even when a GPU or NPU is selected.",
+            ),
+            _ => None,
+        }
     }
 
     /// Backend shown in a picker. Hardware-specific persisted names remain
@@ -360,6 +401,32 @@ impl clap::ValueEnum for Provider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_names_leave_cli_and_persisted_tokens_unchanged() {
+        let expected = [
+            ("cpu", "CPU"),
+            ("cuda", "CUDA (NVIDIA GPU)"),
+            ("tensorrt", "TensorRT (NVIDIA GPU)"),
+            ("windowsml", "Windows ML (automatic)"),
+            ("windowsml-cpu", "CPU (Windows ML)"),
+            ("windowsml-directml", "DirectML (GPU)"),
+            ("windowsml-nvtrtx", "TensorRT RTX (NVIDIA GPU)"),
+            ("windowsml-openvino", "OpenVINO"),
+            ("windowsml-openvino-cpu", "OpenVINO (CPU)"),
+            ("windowsml-openvino-gpu", "OpenVINO (GPU)"),
+            ("windowsml-openvino-npu", "OpenVINO (NPU)"),
+            ("windowsml-qnn", "QNN"),
+            ("windowsml-migraphx", "MIGraphX"),
+            ("windowsml-vitisai", "Vitis AI"),
+        ];
+        assert_eq!(expected.len(), Provider::ALL.len());
+        for (&provider, (token, display)) in Provider::ALL.iter().zip(expected) {
+            assert_eq!(provider.display_name(), display);
+            assert_eq!(provider.label(), token);
+            assert_eq!(Provider::from_name(token), Some(provider));
+        }
+    }
 
     #[cfg(feature = "ort")]
     #[test]

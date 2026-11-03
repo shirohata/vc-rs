@@ -70,13 +70,17 @@ unset, and initially closed for configured instances.
 
 - **Browse** for the RVC model, embedder, and F0 (RMVPE) `.onnx` files
 - choose the **backend** — the GUI lists only the providers this package was
-  built with: the Windows ML package offers `windowsml` (auto), `windowsml-directml`,
-  CPU options, and EP choices from this PC's Windows ML catalog; the TensorRT
-  package offers `tensorrt`. Catalog presence does not establish model compatibility
+  built with: the Windows ML package offers **Windows ML (automatic)**,
+  **DirectML (GPU)**, CPU options, and backends from this PC's Windows ML catalog;
+  the TensorRT package offers **TensorRT (NVIDIA GPU)**. Automatic mode chooses an
+  available backend. Catalog presence does not establish model compatibility
 - set the **chunk size** (ms) — larger means more latency but more context
 - hit **Load / Reload** to apply model / backend / chunk edits
 - watch the **status** line (`no models configured` / `models configured; click
-  Load / Reload` / `loading…` / `running (cuda)` / `load failed: …`)
+  Load / Reload` / `loading…` / `running (configured backend: Windows ML (automatic))`
+  / `load failed: …`). The running label describes the applied configuration,
+  not the execution provider or device used for every operation; some processing
+  may use the CPU. Staged backend changes appear there only after Load / Reload
 - adjust the live parameters (Pitch / Speaker / Input · Output gain)
 
 Model/backend/chunk, Extra convert, and gate attack/release/floor edits are
@@ -166,7 +170,7 @@ providers are also accepted: `windowsml-nvtrtx`, `windowsml-qnn`,
 explicit providers do not fallback; they fail if the requested catalog EP is not
 present or ready.
 
-Select `windowsml-openvino` in the backend picker, then choose CPU, GPU, or NPU
+Select **OpenVINO** in the backend picker, then choose CPU, GPU, or NPU
 in the separate Device picker. New selections start with explicit CPU. There is
 no Default option; old unrestricted states display as "Unspecified (legacy setting)"
 and retain their original behavior. The picker shows available, unavailable, or

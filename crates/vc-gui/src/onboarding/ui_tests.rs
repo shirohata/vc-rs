@@ -599,7 +599,7 @@ fn ui_legacy_cpu_uses_the_single_windows_ml_cpu_option() {
     assert_eq!(fixture.app.settings.chunk_ms, 230);
     assert!(!gui_provider_visible(vc_core::Provider::Cpu));
     assert!(gui_provider_visible(vc_core::Provider::WindowsMlCpu));
-    assert_eq!(gui_provider_label("windowsml-cpu"), "CPU");
+    assert_eq!(Provider::WindowsMlCpu.display_name(), "CPU (Windows ML)");
 }
 
 #[test]

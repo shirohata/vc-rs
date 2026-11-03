@@ -1282,13 +1282,6 @@ fn gui_provider_visible(provider: Provider) -> bool {
     !(cfg!(feature = "windowsml") && provider == Provider::Cpu)
 }
 
-fn gui_provider_label(provider: &str) -> &str {
-    match provider {
-        "cpu" | "windowsml-cpu" => "CPU",
-        _ => provider,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

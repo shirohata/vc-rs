@@ -1,6 +1,76 @@
 //! Run with each distribution feature set, not just their unified dev build.
 use super::*;
 
+#[cfg(all(feature = "windowsml", feature = "ui-snapshots"))]
+#[test]
+#[ignore = "Render backend labels with injected devices; no inference, downloads or settings writes"]
+fn render_backend_pages() {
+    let destination = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/backend-ui");
+    fs::create_dir_all(&destination).unwrap();
+    for lang in [text::Language::English, text::Language::Japanese] {
+        for width in [880.0, 520.0] {
+            for provider in [
+                Provider::WindowsMl,
+                Provider::WindowsMlDirectMl,
+                Provider::WindowsMlNvTensorRtRtx,
+                Provider::WindowsMlOpenVinoCpu,
+                Provider::WindowsMlOpenVinoGpu,
+                Provider::WindowsMlOpenVinoNpu,
+                Provider::WindowsMlOpenVino,
+            ] {
+                let mut fixture = ready_main_fixture(lang);
+                fixture.app.settings.provider = provider.label().into();
+                fixture.app.onboarding.effects.catalog_providers = vec![
+                    Provider::WindowsMlNvTensorRtRtx,
+                    Provider::WindowsMlOpenVino,
+                ];
+                fixture.app.openvino_devices.status =
+                    vc_core::openvino::DeviceStatus::Detected(Provider::OPENVINO_DEVICES.to_vec());
+                let mut h = harness_sized(fixture, egui::vec2(width, 680.0));
+                install_system_japanese_font(&h.ctx);
+                // Match production font sizes and spacing for layout inspection.
+                let mut style = (*h.ctx.global_style()).clone();
+                style.spacing.item_spacing = egui::vec2(10.0, 10.0);
+                style.spacing.button_padding = egui::vec2(12.0, 7.0);
+                for text_style in [egui::TextStyle::Body, egui::TextStyle::Button] {
+                    style
+                        .text_styles
+                        .insert(text_style, egui::FontId::proportional(16.0));
+                }
+                h.ctx.set_global_style(style);
+                h.run_steps(4);
+                h.get_by_label(lang.text("Backend Details")).scroll_to_me();
+                h.run_steps(8);
+                h.get_by_label(lang.text("Backend Details")).click();
+                h.run_steps(4);
+                h.get_by_label(lang.text("Provider")).scroll_to_me();
+                h.run_steps(8);
+                let stem = format!("{lang:?}-{width}-{}", provider.label());
+                h.render()
+                    .unwrap()
+                    .save(destination.join(format!("{stem}.png")))
+                    .unwrap();
+                if provider == Provider::WindowsMlNvTensorRtRtx {
+                    h.get_by_label(lang.text("Provider")).click();
+                    h.run_steps(4);
+                    h.render()
+                        .unwrap()
+                        .save(destination.join(format!("{stem}-choices.png")))
+                        .unwrap();
+                } else if provider == Provider::WindowsMlOpenVinoGpu {
+                    h.get_by_label(lang.text("OpenVINO Device")).click();
+                    h.run_steps(4);
+                    h.render()
+                        .unwrap()
+                        .save(destination.join(format!("{stem}-devices.png")))
+                        .unwrap();
+                }
+                assert_eq!(h.state().app.settings.provider, provider.label());
+            }
+        }
+    }
+}
+
 fn backend_harness(fixture: Fixture) -> Harness<'static, Fixture> {
     let lang = fixture.app.settings.language;
     let mut h = harness(fixture);
@@ -23,22 +93,34 @@ fn ui_provider_options_match_build_and_priority_is_always_available() {
         h.get_by_label(lang.text("Provider")).click();
         h.run_steps(4);
         for (label, expected) in [
-            ("windowsml", cfg!(feature = "windowsml")),
-            ("CPU", cfg!(feature = "windowsml")),
-            ("windowsml-directml", cfg!(feature = "windowsml")),
-            ("tensorrt", cfg!(feature = "tensorrt")),
+            ("Windows ML (automatic)", cfg!(feature = "windowsml")),
+            ("CPU (Windows ML)", cfg!(feature = "windowsml")),
+            ("DirectML (GPU)", cfg!(feature = "windowsml")),
+            ("TensorRT (NVIDIA GPU)", cfg!(feature = "tensorrt")),
         ] {
-            assert_eq!(h.query_by_label(label).is_some(), expected, "{label}");
+            assert_eq!(
+                h.query_by_label(lang.text(label)).is_some(),
+                expected,
+                "{label}"
+            );
         }
-        assert!(h.query_by_label("cpu").is_none());
-        assert!(h.query_by_label("cuda").is_none());
-        assert!(h.query_by_label("windowsml-openvino").is_none());
+        for raw in [
+            "cpu",
+            "cuda",
+            "tensorrt",
+            "windowsml",
+            "windowsml-cpu",
+            "windowsml-directml",
+            "windowsml-openvino",
+        ] {
+            assert!(h.query_by_label(raw).is_none(), "raw provider: {raw}");
+        }
         let selected = if cfg!(feature = "windowsml") {
-            "CPU"
+            "CPU (Windows ML)"
         } else {
-            "tensorrt"
+            "TensorRT (NVIDIA GPU)"
         };
-        h.get_by_label(selected).click();
+        h.get_by_label(lang.text(selected)).click();
         h.run_steps(4);
         assert_eq!(
             h.state().app.settings.provider,
@@ -90,7 +172,8 @@ fn ui_catalog_providers_can_be_selected_without_exposing_cuda_device_controls() 
                 assert!(h.query_by_label(device_name).is_none());
             }
             let provider = Provider::from_name(label).unwrap();
-            h.get_by_label(provider.backend().label()).click();
+            h.get_by_label(lang.text(provider.backend().display_name()))
+                .click();
             h.run_steps(4);
             if let Some(device) = provider.openvino_device_label() {
                 h.get_by_label(lang.text("OpenVINO Device")).click();
@@ -101,6 +184,9 @@ fn ui_catalog_providers_can_be_selected_without_exposing_cuda_device_controls() 
                 h.run_steps(4);
             } else {
                 assert!(h.query_by_label(lang.text("OpenVINO Device")).is_none());
+            }
+            if let Some(hint) = provider.display_hint() {
+                h.get_by_label(lang.text(hint));
             }
             assert_eq!(h.state().app.settings.provider, label);
             let saved = toml::to_string(&h.state().app.settings).unwrap();
@@ -137,7 +223,7 @@ fn ui_restores_openvino_hardware_without_changing_saved_provider() {
             // Re-selecting the same backend must not reset its device choice.
             h.get_by_label(lang.text("Provider")).click();
             h.run_steps(4);
-            h.get_by_label("windowsml-openvino").click();
+            h.get_by_label("OpenVINO").click();
             h.run_steps(4);
             assert_eq!(h.state().app.settings.provider, provider.label());
         }
@@ -246,7 +332,7 @@ fn ui_new_openvino_selection_is_explicit_cpu() {
     let mut h = backend_harness(fixture);
     h.get_by_label("Provider").click();
     h.run_steps(4);
-    h.get_by_label("windowsml-openvino").click();
+    h.get_by_label("OpenVINO").click();
     h.run_steps(4);
     assert_eq!(h.state().app.settings.provider, "windowsml-openvino-cpu");
     h.get_by_label("OpenVINO Device").click();

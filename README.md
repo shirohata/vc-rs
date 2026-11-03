@@ -234,8 +234,11 @@ For usage and the command list, see [`docs/cli.md`](docs/cli.md).
 3. Load the plugin in your DAW and open its editor:
    - **Browse** for the RVC model, embedder (ContentVec), and F0 (RMVPE) `.onnx`
      files.
-   - Choose the **backend** (windowsml package: `windowsml` /
-     `windowsml-directml` / CPU options and catalog EPs; tensorrt package: `tensorrt`).
+   - Choose the **backend** (Windows ML package: **Windows ML (automatic)**,
+     **DirectML (GPU)**, CPU options and catalog backends; TensorRT package:
+     **TensorRT (NVIDIA GPU)**). Automatic mode chooses an available backend.
+     Select **OpenVINO** to choose CPU, GPU, or NPU separately. These are
+     configuration choices; some processing may still use the CPU.
      See the [backend guide](docs/backends.md) for experimental options.
    - Set the **chunk size** (ms) — larger is more stable but adds latency.
    - Press **Load / Reload** to apply. Model / backend / chunk edits do not take

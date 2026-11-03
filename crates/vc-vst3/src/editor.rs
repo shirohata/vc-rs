@@ -118,7 +118,10 @@ fn draw_contents(ui: &mut egui::Ui, setter: &ParamSetter, state: &mut EditorStat
         .lock()
         .map(|s| s.clone())
         .unwrap_or_else(|_| PluginStatus::new("status unavailable"));
-    ui.label(format!("Status: {}", status.summary));
+    ui.label(format!(
+        "Status: {}",
+        backend_status_summary(&status.summary)
+    ));
     if let Some(detail) = status.detail {
         egui::CollapsingHeader::new("Error details")
             .default_open(false)
@@ -239,7 +242,7 @@ fn draw_staged_settings(ui: &mut egui::Ui, state: &mut EditorState) {
         let mut backend = selected_provider.backend();
         let mut provider_changed = false;
         egui::ComboBox::from_id_salt("provider")
-            .selected_text(backend.label().to_uppercase())
+            .selected_text(backend.display_name())
             .show_ui(ui, |ui| {
                 // Build's base backends plus the host device's live Windows ML
                 // catalog EPs (cached in vc-core), so the package offers what is
@@ -248,9 +251,8 @@ fn draw_staged_settings(ui: &mut egui::Ui, state: &mut EditorState) {
                     .into_iter()
                     .filter(|p| p.backend() == *p)
                 {
-                    let option = candidate.label();
                     if ui
-                        .selectable_value(&mut backend, candidate, option.to_uppercase())
+                        .selectable_value(&mut backend, candidate, candidate.display_name())
                         .changed()
                     {
                         selected_provider = if backend == Provider::WindowsMlOpenVino {
@@ -348,6 +350,10 @@ fn draw_staged_settings(ui: &mut egui::Ui, state: &mut EditorState) {
             }
         }
     });
+
+    if let Some(hint) = Provider::from_name(&provider).and_then(Provider::display_hint) {
+        ui.small(hint);
+    }
 
     // Latency / context sliders (10 ms steps). Applied on Load / Reload.
     let (chunk_ms, extra_convert_ms) = {
@@ -587,6 +593,19 @@ fn gpu_device_label(selected_id: u32, devices: &[GpuDevice]) -> String {
         .unwrap_or_else(|| format!("Unavailable: device {selected_id}"))
 }
 
+// Translate only the worker's known running summary. Keep diagnostics intact,
+// and use the applied provider from that summary, never the staged UI setting.
+fn backend_status_summary(summary: &str) -> String {
+    if let Some(provider) = summary
+        .strip_prefix("running (")
+        .and_then(|s| s.strip_suffix(')'))
+        .and_then(Provider::from_name)
+    {
+        return format!("running (configured backend: {})", provider.display_name());
+    }
+    summary.to_owned()
+}
+
 fn mark_dirty(state: &EditorState) {
     state.dirty.store(true, Ordering::SeqCst);
 }
@@ -594,6 +613,28 @@ fn mark_dirty(state: &EditorState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn running_status_describes_applied_configuration_and_preserves_diagnostics() {
+        for (token, display) in [
+            ("windowsml", "Windows ML (automatic)"),
+            ("windowsml-directml", "DirectML (GPU)"),
+            ("windowsml-openvino-gpu", "OpenVINO (GPU)"),
+            ("windowsml-openvino-npu", "OpenVINO (NPU)"),
+        ] {
+            assert_eq!(
+                backend_status_summary(&format!("running ({token})")),
+                format!("running (configured backend: {display})")
+            );
+        }
+        for unchanged in [
+            "loading…",
+            "load failed: windowsml-directml: device unavailable",
+            "running (unknown-future-provider)",
+        ] {
+            assert_eq!(backend_status_summary(unchanged), unchanged);
+        }
+    }
 
     #[test]
     fn displaying_chunk_slider_does_not_round_invalid_persisted_values() {
