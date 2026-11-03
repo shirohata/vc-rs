@@ -453,6 +453,76 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(windows, native_tensorrt))]
+    #[ignore = "requires VC_RS_GTCRN_MODEL, native builder and GPU; builds a fresh long Unicode cache"]
+    fn native_tensorrt_long_unicode_cache_round_trip() {
+        use std::os::windows::ffi::OsStrExt;
+        let _model = model_dir().expect("set VC_RS_GTCRN_MODEL to the GTCRN model directory");
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!(
+            "vc-gtcrn-native-paths-{}-{unique}",
+            std::process::id()
+        ));
+        let cache = base
+            .join("日本語のキャッシュ")
+            .join("long-path-".repeat(18))
+            .join("nested".repeat(10));
+        assert!(cache.as_os_str().encode_wide().count() > 260);
+        std::fs::create_dir_all(&cache).unwrap();
+        // Use a subprocess rather than changing the shared process environment.
+        // The first start must write the plan; the second must read that exact
+        // cached plan without a usable builder. This catches both native seams.
+        for cached in [false, true] {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "denoise::gtcrn::tests::native_tensorrt_loads_and_preserves_length",
+                    "--nocapture",
+                ])
+                .env("VC_RS_TENSORRT_CACHE_DIR", &cache);
+            if cached {
+                command.env(
+                    "VC_RS_TENSORRT_BUILDER_HELPER",
+                    base.join("missing-builder.exe"),
+                );
+            }
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "long Unicode cache (cached={cached}):\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        // Timing-cache paths use the same wide I/O contract as engine files.
+        let versions: Vec<_> = std::fs::read_dir(&cache)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("native-trt-")
+            })
+            .collect();
+        assert_eq!(versions.len(), 1);
+        assert!(
+            versions[0]
+                .path()
+                .join("build-v2/device-0/timing.cache")
+                .metadata()
+                .unwrap()
+                .len()
+                > 0
+        );
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
     #[cfg(native_tensorrt)]
     fn native_tensorrt_cache_continuity_across_chunk_partitions() {
         let Some(dir) = model_dir() else {

@@ -83,6 +83,21 @@ inspection/clear commands. Windows ML TensorRT RTX
 cache paths are unchanged. Rebuild the app/plugin **and** builder helper for each
 SDK; copying only new runtime DLLs into an old build is not an upgrade workflow.
 
+The native builder and runtime share UTF-8 to Windows wide-path handling for
+engine and timing-cache files. Extended-length paths support caches beyond
+`MAX_PATH`, including GTCRN's multi-input profile directories and non-ASCII user
+directories, without changing system long-path settings or the cache namespace.
+Both native binaries must be rebuilt when updating this shared file-I/O helper.
+With `VC_RS_GTCRN_MODEL` set to a local GTCRN model directory, the opt-in
+`native_tensorrt_long_unicode_cache_round_trip` core test builds under a fresh,
+long Unicode cache path and reloads with the builder unavailable to check cache
+reuse. Activate the SDK and run:
+
+```powershell
+cargo test -p vc-core --no-default-features --features tensorrt,gtcrn `
+    native_tensorrt_long_unicode_cache_round_trip -- --ignored --nocapture
+```
+
 SDK-selection regression tests need no GPU or SDK:
 
 ```powershell

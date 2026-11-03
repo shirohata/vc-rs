@@ -6,6 +6,7 @@ use tensorrt_sdk::{cuda_major_for_trt, detect_sdk, resolve_cuda_root};
 
 fn main() {
     println!("cargo:rerun-if-changed=../../build_support/tensorrt_sdk.rs");
+    println!("cargo:rerun-if-changed=../../build_support/native_file_path.h");
     println!("cargo:rerun-if-env-changed=TENSORRT_ROOT");
     println!("cargo:rerun-if-env-changed=CUDA_PATH");
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
@@ -50,6 +51,7 @@ fn main() {
     cc::Build::new()
         .cpp(true)
         .std("c++17")
+        .include("../../build_support")
         .include(&tensorrt_include)
         .include(&cuda_include)
         .file("src/trt_builder_shim.cpp")

@@ -1,6 +1,7 @@
 #include <NvInfer.h>
 #include <NvInferPlugin.h>
 #include <cuda_runtime_api.h>
+#include "native_file_path.h"
 
 #include <algorithm>
 #include <cstdarg>
@@ -256,7 +257,7 @@ bool parse_profile_shapes(char const* profile_shapes, std::map<std::string, nvin
 }
 
 bool read_file(char const* path, std::vector<char>& data, Message& msg, char const* label) {
-    std::ifstream file(path, std::ios::binary);
+    std::ifstream file(vc_rs::native_file_path(path), std::ios::binary);
     if (!file) {
         msg.append("failed to open %s: %s\n", label, path);
         return false;

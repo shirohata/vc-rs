@@ -2,6 +2,7 @@
 #include <NvInferPlugin.h>
 #include <NvOnnxParser.h>
 #include <cuda_runtime_api.h>
+#include "native_file_path.h"
 
 #include <algorithm>
 #include <cstdarg>
@@ -373,7 +374,7 @@ extern "C" int trt_build_engine(
     if (use_timing_cache) {
         std::vector<char> blob;
         {
-            std::ifstream cache_file(timing_cache_path, std::ios::binary);
+            std::ifstream cache_file(vc_rs::native_file_path(timing_cache_path), std::ios::binary);
             if (cache_file) {
                 blob.assign(std::istreambuf_iterator<char>(cache_file), std::istreambuf_iterator<char>());
             }
@@ -433,7 +434,7 @@ extern "C" int trt_build_engine(
     if (use_timing_cache && timing_cache) {
         std::unique_ptr<nvinfer1::IHostMemory, TrtDeleter<nvinfer1::IHostMemory>> cache_blob(timing_cache->serialize());
         if (cache_blob) {
-            std::ofstream cache_out(timing_cache_path, std::ios::binary | std::ios::trunc);
+            std::ofstream cache_out(vc_rs::native_file_path(timing_cache_path), std::ios::binary | std::ios::trunc);
             if (cache_out) {
                 cache_out.write(static_cast<char const*>(cache_blob->data()), static_cast<std::streamsize>(cache_blob->size()));
             }
@@ -442,7 +443,7 @@ extern "C" int trt_build_engine(
             }
         }
     }
-    std::ofstream file(engine_path, std::ios::binary);
+    std::ofstream file(vc_rs::native_file_path(engine_path), std::ios::binary);
     if (!file) {
         msg.append("failed to create TensorRT engine: %s\n", engine_path);
         return 1;
@@ -476,7 +477,7 @@ extern "C" int trt_run_engine(
         return 2;
     }
 
-    std::ifstream file(engine_path, std::ios::binary);
+    std::ifstream file(vc_rs::native_file_path(engine_path), std::ios::binary);
     if (!file) {
         msg.append("failed to open engine: %s\n", engine_path);
         return 2;
