@@ -368,18 +368,26 @@ played.
 
 The RVC output-gain stage clips after RMS mixing even at unity gain; mixing
 can exceed the generator's earlier full-scale clamp. The passthrough output-gain
-stage likewise clips resampler overshoot at unity gain. `ModelOutput.output_rms`
-describes the model candidate, while `ChunkStats.output_rms` measures the actual
-joined/resampled samples on the worker. The standalone output meter uses the
+stage likewise clips resampler overshoot at unity gain. After joining and fixed
+or adaptive output resampling, `ChunkConverter` clips fresh overshoot to full
+scale and measures RMS in the same worker-side pass. This does not reapply gain
+or alter the retained join/filter history, sample count, or content delay. VST3's
+float output follows the same bounded-output policy as WAV and standalone output;
+it does not reserve extra headroom above the pipeline's existing candidate clamp.
+`ModelOutput.output_rms` describes the model candidate, while `ChunkStats.output_rms`
+measures the final clipped samples. The standalone output meter uses the
 latter, so discarded tails, crossfade history, and filter startup are reflected
 in its level. Priming emits no samples and reports zero output RMS.
 
 RMS mixing measures 40 ms forward windows at 10 ms sample positions and
 interpolates on that fixed grid. Stretching the envelope to each candidate's
 length would give shared source times different gains in adjacent candidates.
-After the final measurement anchor it holds that value; the existing
-zero-padded analysis windows at the candidate tail remain a separate boundary
-policy. This adds no lookahead, stream state, or content delay. Different raw
+After the final measurement anchor it holds that value. Tail analysis windows
+retain their zero-padded denominator; the 0.001 output-RMS floor receives the
+same partial-window support weight and fixed-grid interpolation. This preserves
+the floor's level meaning without artificially attenuating quiet candidate tails.
+Full-window RMS mixing and the saved mix-rate semantics are unchanged. This adds
+no lookahead, stream state, or content delay. Different raw
 model generations can still require different gains on overlapping content.
 
 ### Continuous resampling with fixed hops

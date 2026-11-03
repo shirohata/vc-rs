@@ -187,6 +187,46 @@ pub struct RmsMixScratch {
     output_rms: Vec<f32>,
 }
 
+const RMS_ENVELOPE_WINDOW_HOPS: usize = 4;
+const RMS_MIX_FLOOR: f32 = 1e-3;
+
+/// The envelope's zero padding attenuates both RMS values equally, but a fixed
+/// denominator floor would not share that attenuation. Apply the same support
+/// weight to the floor, interpolated on the same anchors, so quiet overlapping
+/// candidates do not acquire a gain dip just because one window ends sooner.
+/// Only the last four anchors can be partial; retain one preceding full anchor
+/// for interpolation. The stack array avoids per-sample square roots or storage.
+struct RmsMixFloorTail {
+    values: [f32; RMS_ENVELOPE_WINDOW_HOPS + 1],
+    len: usize,
+    start_sample: usize,
+}
+
+impl RmsMixFloorTail {
+    fn new(samples: usize, hop: usize) -> Self {
+        let frames = samples.div_ceil(hop);
+        let mut tail = Self {
+            values: [RMS_MIX_FLOOR; RMS_ENVELOPE_WINDOW_HOPS + 1],
+            len: frames.min(RMS_ENVELOPE_WINDOW_HOPS + 1),
+            start_sample: frames.saturating_sub(RMS_ENVELOPE_WINDOW_HOPS + 1) * hop,
+        };
+        let window = hop.saturating_mul(RMS_ENVELOPE_WINDOW_HOPS).max(1);
+        for (index, value) in tail.values[..tail.len].iter_mut().enumerate() {
+            let available = samples.saturating_sub(tail.start_sample + index * hop);
+            *value *= (available.min(window) as f32 / window as f32).sqrt();
+        }
+        tail
+    }
+
+    fn at(&self, index: usize, hop: usize) -> f32 {
+        if index < self.start_sample {
+            RMS_MIX_FLOOR
+        } else {
+            rms_envelope_at(&self.values[..self.len], index - self.start_sample, hop)
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum RmsMixGainCurve {
     Linear,
@@ -229,7 +269,7 @@ pub fn compute_rms_envelope_into(input: &[f32], sample_rate: usize, output: &mut
     }
 
     let hop_len = rms_envelope_hop_samples(sample_rate);
-    let frame_len = hop_len.saturating_mul(4).max(1);
+    let frame_len = hop_len.saturating_mul(RMS_ENVELOPE_WINDOW_HOPS).max(1);
     let frame_count = input.len().div_ceil(hop_len);
     output.reserve(frame_count);
 
@@ -245,8 +285,8 @@ pub fn compute_rms_envelope_into(input: &[f32], sample_rate: usize, output: &mut
         }
         // Points belong to sample positions 0, hop, 2*hop...; RMS mixing must
         // preserve that grid across overlapping candidates of different lengths.
-        // Keep the existing forward window and zero-padded tail denominator;
-        // their finite-window boundary behavior is separate from interpolation.
+        // Retain the forward window and zero-padded tail denominator. RMS mix
+        // must give its denominator floor the same support weight at the tail.
         output.push((sum / frame_len as f32).sqrt());
     }
 }
@@ -325,6 +365,7 @@ pub fn apply_rms_mix_with_scratch(
     // the level curve.
     let gain_curve = RmsMixGainCurve::for_exponent(exponent);
     let hop_len = rms_envelope_hop_samples(sample_rate);
+    let floor_tail = RmsMixFloorTail::new(output.len(), hop_len);
 
     for (index, sample) in output.iter_mut().enumerate() {
         if !sample.is_finite() {
@@ -333,7 +374,7 @@ pub fn apply_rms_mix_with_scratch(
         }
         let in_rms = rms_envelope_at(&scratch.input_rms, index, hop_len);
         let out_rms = rms_envelope_at(&scratch.output_rms, index, hop_len);
-        let out_rms = finite_nonnegative(out_rms).max(1e-3);
+        let out_rms = finite_nonnegative(out_rms).max(floor_tail.at(index, hop_len));
         let ratio = finite_nonnegative(in_rms) / out_rms;
         let gain = gain_curve.gain(ratio);
         let mixed = *sample * gain;
@@ -1129,6 +1170,80 @@ mod tests {
                 output.fill(0.8);
                 apply_rms_mix(&vec![0.0; len], &mut output, sample_rate, 0.0);
                 assert!(output.iter().all(|sample| *sample == 0.0));
+            }
+        }
+    }
+
+    #[test]
+    fn rms_mix_preserves_full_window_and_above_floor_gains() {
+        let hop = 480;
+        let len = 12 * hop + 73;
+        let input: Vec<_> = (0..len)
+            .map(|i| 0.1 + 0.02 * (i as f32 * 0.013).sin())
+            .collect();
+        let raw: Vec<_> = (0..len)
+            .map(|i| {
+                if i < 9 * hop {
+                    0.01 + 0.005 * (i as f32 * 0.027).sin()
+                } else {
+                    0.0008
+                }
+            })
+            .collect();
+        let input_rms = compute_rms_envelope(&input, 48_000);
+        let output_rms = compute_rms_envelope(&raw, 48_000);
+        for mix in [0.0_f32, 0.5, 0.9] {
+            let mut actual = raw.clone();
+            apply_rms_mix(&input, &mut actual, 48_000, mix);
+            for i in 0..len {
+                let in_rms = rms_envelope_at(&input_rms, i, hop);
+                let out_rms = rms_envelope_at(&output_rms, i, hop);
+                // Both neighboring analysis anchors have complete support, or
+                // the denominator floor cannot participate. These samples must
+                // retain the pre-fix gain even when the same candidate ends quietly.
+                if (i / hop + 1) * hop + 4 * hop <= len || out_rms >= 0.001 {
+                    let old_gain = (in_rms / out_rms.max(0.001)).powf(1.0 - mix);
+                    assert_abs_diff_eq!(actual[i], raw[i] * old_gain, epsilon = 1e-7);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rms_mix_low_level_tail_keeps_constant_gain_for_partial_windows() {
+        for rate in [32_000, 40_000, 44_100, 48_000] {
+            let hop = rate / 100;
+            for len in [1, hop - 1, 4 * hop, 4 * hop + 1, 12 * hop + hop / 3] {
+                for level in [0.0_f32, 1e-8, 0.0008, 0.001, 0.002] {
+                    for mix in [0.0_f32, 0.5, 0.9, 1.0] {
+                        let input = vec![0.1; len];
+                        let mut output = vec![level; len];
+                        apply_rms_mix(&input, &mut output, rate, mix);
+                        let expected = level * (0.1 / level.max(0.001)).powf(1.0 - mix);
+                        assert!(
+                            output.iter().all(|v| (*v - expected).abs() < 2e-6),
+                            "rate={rate} len={len} level={level} mix={mix} tail={}",
+                            output[len - 1]
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rms_mix_low_level_overlap_does_not_dip_at_the_previous_candidate_tail() {
+        let hop = 480;
+        let window = 12 * hop;
+        let advance = 10 * hop;
+        let input = vec![0.1; window];
+        for mix in [0.0, 0.5, 0.9] {
+            let mut previous = vec![0.0008; window];
+            let mut next = previous.clone();
+            apply_rms_mix(&input, &mut previous, 48_000, mix);
+            apply_rms_mix(&input, &mut next, 48_000, mix);
+            for i in advance..window {
+                assert_abs_diff_eq!(previous[i], next[i - advance], epsilon = 2e-6);
             }
         }
     }

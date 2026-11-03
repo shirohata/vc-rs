@@ -35,7 +35,7 @@ pub struct ChunkStats {
     /// device/queue latency and inference wall time. None until initialized.
     pub content_delay_samples: Option<usize>,
     pub input_rms: f32,
-    /// RMS of the joined/resampled output, including retained history and filter
+    /// RMS after final output clipping, including joined history and resampler
     /// startup. Zero for `prime`, which emits no audio. Model-stage RMS remains
     /// available in `ModelOutput` and must not drive the output meter.
     pub output_rms: f32,
@@ -217,7 +217,12 @@ impl<M: VoiceModel> ChunkConverter<M> {
                 .expect("resampler set above")
                 .process_fixed(smoother.output(), output_chunk_samples, out)?;
         }
-        stats.output_rms = crate::dsp::rms(out);
+        // Candidate gain/clipping already ran before alignment. Joining (in
+        // particular phase vocoder) and either resampler can introduce fresh
+        // overshoot, including equal-rate device ASRC. Clip only the committed
+        // output, without touching filter/join history or reapplying gain, and
+        // meter those same samples in one allocation-free worker-side pass.
+        stats.output_rms = crate::dsp::apply_gain_and_rms(out, 1.0);
         stats.content_delay_samples = Some(self.output_content_delay_samples());
         stats.processing_time = started.elapsed();
         Ok(stats)
@@ -736,6 +741,140 @@ mod tests {
                 assert!(max_error < 1e-6, "{kind:?} {from}->{to}: {max_error}");
             }
         }
+    }
+
+    #[test]
+    fn final_output_clips_resampler_overshoot_before_metering() {
+        for adaptive in [false, true] {
+            let rate = if adaptive { 48_000 } else { 44_100 };
+            let settings = ChunkOutputConfig {
+                kind: SmoothingKind::Sola,
+                output_sample_rate: rate,
+                output_chunk_samples: rate as usize / 10,
+                crossfade_ms: 0,
+                sola_search_ms: 0,
+                tail_discard_ms: 0,
+            };
+            let candidate: Vec<_> = (0..4800)
+                .map(|i| if i % 480 < 240 { 0.99 } else { -0.99 })
+                .collect();
+            let model = FakeModel::new((0..6).map(|_| Ok(output(candidate.clone(), 48_000))));
+            let mut converter = if adaptive {
+                ChunkConverter::new_adaptive(model, settings)
+            } else {
+                ChunkConverter::new(model, settings)
+            };
+            let mut fixed = OutputResampler::new_fixed(
+                48_000,
+                rate as usize,
+                4800,
+                settings.output_chunk_samples,
+            )
+            .unwrap();
+            let mut asrc = AdaptiveOutputResampler::new(48_000, rate as usize, 4800).unwrap();
+            let mut raw = Vec::new();
+            let mut out = Vec::new();
+            let mut overshot = false;
+            for _ in 0..6 {
+                if adaptive {
+                    asrc.process_into(&candidate, &mut raw).unwrap();
+                } else {
+                    fixed
+                        .process_fixed(&candidate, settings.output_chunk_samples, &mut raw)
+                        .unwrap();
+                }
+                overshot |= raw.iter().any(|v| v.abs() > 1.0);
+                let stats = converter.process_chunk(&[], 48_000, &mut out).unwrap();
+                assert_eq!(out.len(), raw.len());
+                for (&actual, &reference) in out.iter().zip(&raw) {
+                    assert_eq!(actual, reference.clamp(-1.0, 1.0));
+                }
+                assert_eq!(stats.output_rms, crate::dsp::rms(&out));
+                let delay = if adaptive {
+                    asrc.delay_samples()
+                } else {
+                    fixed.delay_samples()
+                };
+                assert_eq!(converter.output_content_delay_samples(), delay);
+            }
+            assert!(overshot, "fixture must exercise resampler overshoot");
+        }
+    }
+
+    #[test]
+    fn final_output_clips_phase_vocoder_peaks_without_reapplying_model_gain() {
+        for amplitude in [0.2, 0.99] {
+            let settings = ChunkOutputConfig {
+                kind: SmoothingKind::PhaseVocoder,
+                output_sample_rate: 48_000,
+                output_chunk_samples: 4800,
+                crossfade_ms: 10,
+                sola_search_ms: 0,
+                tail_discard_ms: 0,
+            };
+            let signal = |hz: f64, phase: f64| {
+                (0..5280)
+                    .map(|i| {
+                        (amplitude
+                            * (std::f64::consts::TAU * hz * i as f64 / 48_000.0 + phase).sin())
+                            as f32
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let previous = signal(440.0, 0.0);
+            let current = signal(660.0, 0.7);
+            let mut meta = output(current.clone(), 48_000);
+            // Gain is already represented by the candidate. Finalization must
+            // not apply this model diagnostic a second time (also in VST3).
+            meta.1.applied_output_gain = 2.0;
+            let mut converter = ChunkConverter::new(
+                FakeModel::new([Ok(output(previous.clone(), 48_000)), Ok(meta)]),
+                settings,
+            );
+            let prime = converter.prime(&[], 48_000).unwrap();
+            assert_eq!(prime.output_rms, 0.0);
+            let mut reference = sola::model_domain_chunk_smoother(ChunkSmootherConfig {
+                kind: settings.kind,
+                output_sample_rate: 48_000,
+                output_chunk_samples: 4800,
+                model_sample_rate: 48_000,
+                crossfade_ms: 10,
+                sola_search_ms: 0,
+                tail_discard_ms: 0,
+            });
+            reference.prime_model_output(&previous, &[]);
+            reference.process(&current, &[]);
+            assert_eq!(
+                reference.output().iter().any(|v| v.abs() > 1.0),
+                amplitude > 0.9
+            );
+            let mut out = Vec::new();
+            let stats = converter.process_chunk(&[], 48_000, &mut out).unwrap();
+            for (&actual, &raw) in out.iter().zip(reference.output()) {
+                assert_eq!(actual, raw.clamp(-1.0, 1.0));
+            }
+            assert_eq!(stats.output_rms, crate::dsp::rms(&out));
+        }
+    }
+
+    #[test]
+    fn final_output_empty_adaptive_startup_has_zero_rms() {
+        let settings = ChunkOutputConfig {
+            output_sample_rate: 48_000,
+            output_chunk_samples: 1,
+            crossfade_ms: 0,
+            sola_search_ms: 0,
+            tail_discard_ms: 0,
+            kind: SmoothingKind::Sola,
+        };
+        let mut converter = ChunkConverter::new_adaptive(
+            FakeModel::new([Ok(output(vec![0.25], 48_000))]),
+            settings,
+        );
+        let mut out = vec![123.0];
+        let stats = converter.process_chunk(&[], 48_000, &mut out).unwrap();
+        assert!(out.is_empty());
+        assert_eq!(stats.output_rms, 0.0);
     }
 
     #[test]

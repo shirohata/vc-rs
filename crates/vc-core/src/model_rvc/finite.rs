@@ -145,6 +145,8 @@ pub fn convert_finite<M: VoiceModel>(
 mod tests {
     use std::time::Duration;
 
+    use approx::assert_abs_diff_eq;
+
     use super::*;
     use crate::model_rvc::{ChunkOutputConfig, ContentDelay, ModelOutput};
     use crate::sola::SmoothingKind;
@@ -318,6 +320,31 @@ mod tests {
             assert!(result.audio[..640].iter().any(|&sample| sample > 0.3));
             assert!(result.audio[2561..].iter().any(|&sample| sample > 0.3));
         }
+    }
+
+    #[test]
+    fn finite_clips_resampling_peaks_and_recovers_the_final_partial_tail() {
+        let input: Vec<_> = (0..3201)
+            .map(|i| if i % 160 < 80 { 0.99 } else { -0.99 })
+            .collect();
+        let raw = crate::dsp::resample_mono(&input, 16_000, 48_000).unwrap();
+        assert!(raw.iter().any(|v| v.abs() > 1.0));
+        let result = convert_finite(
+            converter(SmoothingKind::Sola, 768, 10, 10, 48_000),
+            &input,
+            16_000,
+            1600,
+        )
+        .unwrap();
+        assert_eq!(result.audio.len(), raw.len());
+        assert!(result.chunks.iter().any(|c| c.flushing));
+        assert!(result.audio.iter().all(|v| v.abs() <= 1.0));
+        for (&actual, &expected) in result.audio.iter().zip(&raw) {
+            assert_abs_diff_eq!(actual, expected.clamp(-1.0, 1.0), epsilon = 1e-4);
+        }
+        assert!(result.audio[result.audio.len() - 3..]
+            .iter()
+            .any(|v| v.abs() > 0.1));
     }
 
     #[test]
