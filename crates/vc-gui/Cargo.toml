@@ -24,6 +24,7 @@ asio = ["vc-app/asio"]
 jack = ["vc-app/jack"]
 
 [dependencies]
+vc-models = { path = "../vc-models" }
 # Opt-in test renderer; Vulkan avoids upstream kittest's incompatible DX12
 # allocator bindings. These are absent from the shipped GUI feature sets.
 egui-wgpu = { version = "0.34.3", default-features = false, optional = true }

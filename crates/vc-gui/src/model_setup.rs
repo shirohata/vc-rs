@@ -68,10 +68,7 @@ pub fn discover_gtcrn(dir: &mut String, roots: &[PathBuf]) -> bool {
 }
 
 pub fn cache_dir() -> Result<PathBuf, String> {
-    std::env::var_os("LOCALAPPDATA")
-        .or_else(|| std::env::var_os("APPDATA"))
-        .map(|dir| PathBuf::from(dir).join("vc-rs").join("models"))
-        .ok_or_else(|| "Cannot locate the user model directory (LOCALAPPDATA / APPDATA).".into())
+    vc_models::cache_dir().map_err(|e| e.to_string())
 }
 
 pub fn available(value: &str) -> bool {
@@ -81,6 +78,14 @@ pub fn available(value: &str) -> bool {
 /// Validate the exact downloaded bytes on a background worker. Custom models
 /// need structural validation instead of a hash belonging to a different file.
 pub fn validate_support(path: &Path, index: usize) -> Result<(), String> {
+    if index == 0 {
+        if let Ok(root) = cache_dir() {
+            if let Some(model) = vc_models::for_path(&root, path) {
+                return vc_models::verify_cached(model, &root, &AtomicBool::new(false))
+                    .map_err(|e| format!("{e:#}"));
+            }
+        }
+    }
     if cache_dir().is_ok_and(|dir| path == dir.join(MODELS[index].file)) {
         verify_file(path, &MODELS[index])
     } else {

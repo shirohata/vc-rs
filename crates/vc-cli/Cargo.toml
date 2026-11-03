@@ -33,6 +33,7 @@ asio = ["vc-app/asio"]
 jack = ["vc-app/jack"]
 
 [dependencies]
+vc-models = { path = "../vc-models" }
 # `clap` is always on (the CLI derives `value_enum` from vc-core's `Provider`);
 # the inference backends are selected through this crate's features above.
 vc-core = { path = "../vc-core", features = ["clap"] }

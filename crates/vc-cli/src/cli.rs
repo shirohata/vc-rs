@@ -53,6 +53,8 @@ pub enum Command {
     Devices(DevicesArgs),
     /// Inspect ONNX model inputs, outputs, and metadata.
     Inspect(InspectArgs),
+    /// List, import, fetch, or verify pinned embedder packages (no inference).
+    Embedders(EmbeddersArgs),
     /// List or install Windows ML catalog execution providers.
     #[cfg(all(windows, feature = "windowsml"))]
     #[command(name = "windowsml-eps", alias = "windows-ml-eps", alias = "winml-eps")]
@@ -65,6 +67,40 @@ pub enum Command {
     Run(RunArgs),
     /// Run conversion against a wav file for model/DSP verification.
     Wav(WavArgs),
+}
+
+#[derive(Debug, Parser)]
+pub struct EmbeddersArgs {
+    #[command(subcommand)]
+    pub command: EmbeddersCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum EmbeddersCommand {
+    /// Show fixed candidates and whether a published source is configured.
+    List,
+    /// Import the exact local ZIP matching the selected ID and version.
+    Import {
+        #[command(flatten)]
+        package: EmbedderPackageArgs,
+        #[arg(long)]
+        zip: PathBuf,
+    },
+    /// Fetch the pinned published asset, or report that its source is unset.
+    Fetch(EmbedderPackageArgs),
+    /// Verify ONNX and all three companion documents in the managed cache.
+    Verify(EmbedderPackageArgs),
+}
+
+#[derive(Debug, Parser)]
+pub struct EmbedderPackageArgs {
+    pub id: String,
+    /// Fixed package version, never a latest-version lookup.
+    #[arg(long, default_value = "0.1.0")]
+    pub version: String,
+    /// Override the shared user model-cache root.
+    #[arg(long)]
+    pub cache_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Parser)]

@@ -37,6 +37,7 @@ fn reload_signature(settings: &GuiSettings) -> String {
     config.setup_skipped = false;
     config.support_custom_mode = Default::default();
     config.support_custom_paths = Default::default();
+    config.embedder_package = None;
     toml::to_string(&config).unwrap_or_default()
 }
 
@@ -521,27 +522,62 @@ impl VcGui {
             })
             .unwrap_or_default();
         let name = model_setup::MODELS[index].name;
-        let mut custom = match self.settings.support_custom_mode[index].as_str() {
-            "custom" => true,
-            "downloaded" => false,
-            _ => !path.is_empty() && path != default,
+        let package = (index == 0)
+            .then(|| {
+                self.settings
+                    .embedder_package
+                    .as_ref()
+                    .and_then(vc_models::selected)
+            })
+            .flatten();
+        let mut source = match self.settings.support_custom_mode[index].as_str() {
+            "custom" => "custom",
+            "downloaded" => "downloaded",
+            "package" if package.is_some() => "package",
+            _ => {
+                if !path.is_empty() && path != default {
+                    "custom"
+                } else {
+                    "downloaded"
+                }
+            }
         };
-        let before = custom;
+        let before = source;
         egui::ComboBox::new(
             ("support-source", index),
             lang.text(if index == 0 { "Embedder" } else { "F0 model" }),
         )
-        .selected_text(if custom { lang.text("Custom") } else { name })
+        .selected_text(match source {
+            "custom" => lang.text("Custom"),
+            "package" => lang.text(&package.unwrap().label),
+            _ => name,
+        })
         .show_ui(ui, |ui| {
-            ui.selectable_value(&mut custom, false, name);
-            ui.selectable_value(&mut custom, true, lang.text("Custom"));
+            ui.selectable_value(&mut source, "downloaded", name);
+            ui.selectable_value(&mut source, "custom", lang.text("Custom"));
+            if let Some(model) = package {
+                ui.selectable_value(&mut source, "package", lang.text(&model.label));
+            }
         });
-        if custom != before {
-            if before {
+        if source != before {
+            if before == "custom" {
                 self.settings.support_custom_paths[index] = path.clone();
             }
-            let value = if custom {
+            let value = if source == "custom" {
                 self.settings.support_custom_paths[index].clone()
+            } else if source == "package" {
+                #[cfg(not(test))]
+                let root = model_setup::cache_dir().ok();
+                #[cfg(test)]
+                let root = Some(self.onboarding.effects.support_cache_dir.clone());
+                root.map(|root| {
+                    package
+                        .unwrap()
+                        .model_path(&root)
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .unwrap_or_default()
             } else {
                 default.clone()
             };
@@ -550,12 +586,11 @@ impl VcGui {
             } else {
                 self.settings.f0_model = value;
             }
-            self.settings.support_custom_mode[index] =
-                if custom { "custom" } else { "downloaded" }.into();
+            self.settings.support_custom_mode[index] = source.into();
             self.changed();
         }
         ui.push_id(("support", index), |ui| {
-            if custom {
+            if source == "custom" {
                 let (changed, browse) = model_path_control(
                     ui,
                     lang.text("File path"),
@@ -584,7 +619,7 @@ impl VcGui {
             if model_setup::available(selected) {
                 ui.small(lang.text("File found"));
             } else {
-                if custom {
+                if source != "downloaded" {
                     ui.colored_label(egui::Color32::LIGHT_RED, lang.text("File not found"));
                 } else {
                     ui.small(format!(
@@ -605,6 +640,9 @@ impl VcGui {
                 }
             }
         });
+        if index == 0 {
+            self.embedder_packages_ui(ui);
+        }
     }
 
     fn download_support_role(&mut self, index: usize, path: &str) {

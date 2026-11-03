@@ -48,6 +48,35 @@ pwsh .\download-models.ps1
 | `wav` | WAV ファイル→WAV ファイル変換（同一パイプラインで決定的にテスト可能） |
 | `windowsml-eps` | Windows ML catalog EP の一覧・インストール（windowsml 版のみ） |
 | `engine-cache` | GPU エンジンキャッシュの確認・消去 |
+| `embedders` | 固定Embedderパッケージの一覧・取り込み・取得・検証 |
+
+### Embedderパッケージ
+
+`embedders list` はvc-embedders 0.1.0の固定候補を表示します。公開ダウンロード先は
+未設定です。対応するローカルZIPがある場合に取り込めます。カタログへの収録は
+公開済みという意味ではありません。
+
+```powershell
+.\vc-rs.exe embedders list
+.\vc-rs.exe embedders import applio-spin --version 0.1.0 --zip .\vc-embedders-0.1.0-applio-spin.zip
+.\vc-rs.exe embedders verify applio-spin --version 0.1.0
+```
+
+表示された`model.onnx`のパスを`run`／`wav`の`--embedder`やGUI／VST3で指定します。
+保存先は通常`%LOCALAPPDATA%\vc-rs\models`、未設定なら`%APPDATA%`配下です。
+`--cache-dir`で保存先のルートを変更できます。ID・version・ONNXハッシュごとに分離し、
+ONNXとREADME・LICENSE・NOTICEを揃えて保存します。ZIPと4ファイルのサイズ・SHA-256を
+内蔵カタログと照合し、検証済みキャッシュは再利用します。取得失敗やキャンセルで
+既存ファイルを破壊せず、中断した転送は再試行時に最初から取得します。
+Ctrl+Cでキャンセルを要求できます。
+`embedders fetch`は固定された公開先を設定した場合だけ取得し、未設定ならその旨を表示します。
+起動時の自動取得・最新版の検索・既存選択の自動差し替えは行いません。
+
+音声モデルの学習時と同じ重み・特徴層・射影・波形前処理を選んでください。
+ContentVec、言語別HuBERT、SPIN、SPIN v2は別の特徴量で、次元の一致だけでは互換になりません。
+RVC用は`unit9`（第9層＋学習済み射影、256次元）と`unit12`（第12層、768次元）、
+Applio用は`unit12`のみです。入力は16 kHzモノラルfloat32、約`[-1,1]`にスケーリングし、
+平均・分散の標準化を加えません。生成器／Vocoderの対応は別に確認が必要です。
 
 ### 診断
 

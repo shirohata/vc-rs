@@ -51,6 +51,14 @@ Reference ContentVec and RMVPE models are downloaded only at the user's request
 by `download-models.ps1`; they are third-party files and must not be added to a
 release archive.
 
+The standalone GUI/CLI also share a fixed catalog for optional vc-embedders
+packages. The catalog identifies local 0.1.0 candidates and currently has no
+published source URL. Never bundle their ZIPs, extracted model caches, or
+machine-local acquisition records. Enabling a public source requires a fixed
+versioned asset URL and verification of the final archive and member hashes;
+do not infer publication from locally generated candidates. Preserve the
+model-specific README, LICENSE, and NOTICE beside an acquired ONNX.
+
 ## Backend Isolation
 
 Build every distributed binary with one provider feature set. Do not reuse a

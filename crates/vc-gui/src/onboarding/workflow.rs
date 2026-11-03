@@ -6,6 +6,8 @@ use vc_app::{DeviceTestConfig, TestOutput};
 #[cfg(test)]
 #[derive(Default)]
 pub(crate) struct TestEffects {
+    pub package_zip: Option<PathBuf>,
+    pub package_requests: Vec<String>,
     pub catalog_providers: Vec<Provider>,
     pub session_revision: u64,
     pub stop_requests: usize,
@@ -102,6 +104,7 @@ impl VcGui {
                 #[cfg(test)]
                 self.onboarding.effects.saved.push(candidate.clone());
                 self.settings = candidate;
+                self.onboarding.packages.observe_selection(&self.settings);
                 self.dirty_since = None;
                 self.ui_error = None;
                 true
@@ -135,6 +138,7 @@ impl VcGui {
         self.onboarding.test_signature = None;
         self.onboarding.prepare_requested = false;
         self.model_download = None;
+        self.onboarding.packages.cancel();
         // An in-flight exporter may finish its explicitly requested file, but
         // leaving the page must prevent its result from replacing a later choice.
         self.pth_convert = None;
@@ -516,6 +520,7 @@ impl VcGui {
                         if ui.button(lang.text("Choose RMVPE…")).clicked() {
                             self.browse_into(ModelKind::F0);
                         }
+                        self.embedder_packages_ui(ui);
                     },
                 );
                 if !self.runtime_ready() {

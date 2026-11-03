@@ -1,0 +1,471 @@
+[
+  {
+    "id": "rvc-fairseq-base",
+    "version": "0.1.0",
+    "label": "ContentVec (RVC fairseq)",
+    "license": "MIT",
+    "url": null,
+    "archive": {
+      "name": "vc-embedders-0.1.0-rvc-fairseq-base.zip",
+      "size": 231022771,
+      "sha256": "c6b681d311daf662c122c4fe21568323635d0458956c88cb83109330c2675c1a"
+    },
+    "members": [
+      {
+        "name": "README.md",
+        "size": 840,
+        "sha256": "d9bcdcf1bed5f5948c5c2a6a068bafc49ab7698f88a14b05de1ac2a06595852a"
+      },
+      {
+        "name": "NOTICE.md",
+        "size": 1274,
+        "sha256": "a8aaf51fc287dd92b52adfeaf46ff7da2242bff6b391252290a376c205a4f906"
+      },
+      {
+        "name": "LICENSE.txt",
+        "size": 1057,
+        "sha256": "feb87a2e0c305de3464cc44077da5393c52d8ca6362d37427157d04ec6f4510d"
+      },
+      {
+        "name": "model.onnx",
+        "size": 378531985,
+        "sha256": "a4ede7329124ecc4c6ee979f4c1b5a77edc5043f14f29c03ab7576de5d2a89a0"
+      }
+    ],
+    "source_revision": "d746688a32940f4bee410ed7c87ec9cf8ff04f74",
+    "source_weights": [
+      {
+        "name": "hubert_base.pt",
+        "sha256": "60d936ec5a566776fc392e69ad8b630d14eb588111233fe313436e200a7b187b"
+      }
+    ],
+    "profile": "rvc-fairseq",
+    "outputs": [
+      {
+        "name": "unit9",
+        "layer": 9,
+        "projection": true,
+        "channels": 256
+      },
+      {
+        "name": "unit12",
+        "layer": 12,
+        "projection": false,
+        "channels": 768
+      }
+    ],
+    "input": {
+      "sample_rate": 16000,
+      "dtype": "float32",
+      "shape": [
+        1,
+        "samples"
+      ],
+      "normalization": "none"
+    },
+    "source_repository": "auspicious3000/contentvec",
+    "source_revision_scope": "Author repository revision for license and checkpoint link; checkpoint identity is pinned by SHA-256.",
+    "application_repository": "RVC-Project/Retrieval-based-Voice-Conversion-WebUI",
+    "application_revision": "d60cd3d009b7e438f92f8624fa89b710d10c6a39"
+  },
+  {
+    "id": "rvc-hubert-base",
+    "version": "0.1.0",
+    "label": "ContentVec (RVC Transformers)",
+    "license": "MIT",
+    "url": null,
+    "archive": {
+      "name": "vc-embedders-0.1.0-rvc-hubert-base.zip",
+      "size": 231022764,
+      "sha256": "055ea81ed4e52460f88ebbdcec31b81e0377a8f3757f5ed089d10b289cdd8811"
+    },
+    "members": [
+      {
+        "name": "README.md",
+        "size": 839,
+        "sha256": "82f38626e3032971224ad103b4300d299411ee0ba47b1b1aad56067c122f0a47"
+      },
+      {
+        "name": "NOTICE.md",
+        "size": 1273,
+        "sha256": "f039e19237814222f073ffb31afc0d0226bf5c92bd7dbf614aa76c3a532e2a60"
+      },
+      {
+        "name": "LICENSE.txt",
+        "size": 1057,
+        "sha256": "feb87a2e0c305de3464cc44077da5393c52d8ca6362d37427157d04ec6f4510d"
+      },
+      {
+        "name": "model.onnx",
+        "size": 378531976,
+        "sha256": "30fe742ecd3d0cd3be6d146c168feac91e4186cc3ef0e44071037f0b5027e743"
+      }
+    ],
+    "source_revision": "d746688a32940f4bee410ed7c87ec9cf8ff04f74",
+    "source_weights": [
+      {
+        "name": "hubert_base.pt",
+        "sha256": "60d936ec5a566776fc392e69ad8b630d14eb588111233fe313436e200a7b187b"
+      }
+    ],
+    "profile": "rvc",
+    "outputs": [
+      {
+        "name": "unit9",
+        "layer": 9,
+        "projection": true,
+        "channels": 256
+      },
+      {
+        "name": "unit12",
+        "layer": 12,
+        "projection": false,
+        "channels": 768
+      }
+    ],
+    "input": {
+      "sample_rate": 16000,
+      "dtype": "float32",
+      "shape": [
+        1,
+        "samples"
+      ],
+      "normalization": "none"
+    },
+    "source_repository": "auspicious3000/contentvec",
+    "source_revision_scope": "Author repository revision for license and checkpoint link; checkpoint identity is pinned by SHA-256.",
+    "application_repository": "RVC-Project/Retrieval-based-Voice-Conversion-WebUI",
+    "application_revision": "81eed5e8f68b6bed1789f682fe78cdd324495afc"
+  },
+  {
+    "id": "applio-contentvec",
+    "version": "0.1.0",
+    "label": "ContentVec (Applio)",
+    "license": "MIT",
+    "url": null,
+    "archive": {
+      "name": "vc-embedders-0.1.0-applio-contentvec.zip",
+      "size": 230560362,
+      "sha256": "f0475096332486193ccc688d040fc2e8428353243c4530d24dd55926a86a8b9b"
+    },
+    "members": [
+      {
+        "name": "README.md",
+        "size": 856,
+        "sha256": "620bd8caffee73b151956abb3eb35442ff337fef9cc020961f87a0f0fff5358e"
+      },
+      {
+        "name": "NOTICE.md",
+        "size": 1260,
+        "sha256": "6b24c2d689e414599cb86537327eb769de58bd3badc26e71f9f78decefecbe39"
+      },
+      {
+        "name": "LICENSE.txt",
+        "size": 1057,
+        "sha256": "feb87a2e0c305de3464cc44077da5393c52d8ca6362d37427157d04ec6f4510d"
+      },
+      {
+        "name": "model.onnx",
+        "size": 377744118,
+        "sha256": "a5a586d87601b33299617fd56f1d6e0310ab68c17b37bd88cfae4e2964540331"
+      }
+    ],
+    "source_revision": "d746688a32940f4bee410ed7c87ec9cf8ff04f74",
+    "source_weights": [
+      {
+        "name": "hubert_base.pt",
+        "sha256": "60d936ec5a566776fc392e69ad8b630d14eb588111233fe313436e200a7b187b"
+      }
+    ],
+    "profile": "applio",
+    "outputs": [
+      {
+        "name": "unit12",
+        "layer": 12,
+        "projection": false,
+        "channels": 768
+      }
+    ],
+    "input": {
+      "sample_rate": 16000,
+      "dtype": "float32",
+      "shape": [
+        1,
+        "samples"
+      ],
+      "normalization": "none"
+    },
+    "source_repository": "auspicious3000/contentvec",
+    "source_revision_scope": "Author repository revision for license and checkpoint link; checkpoint identity is pinned by SHA-256.",
+    "application_repository": "IAHispano/Applio",
+    "application_revision": "5379cf261fa7d8085c3b077aa42dabca7c85310b"
+  },
+  {
+    "id": "applio-chinese-hubert-base",
+    "version": "0.1.0",
+    "label": "Chinese HuBERT (Applio)",
+    "license": "MIT",
+    "url": null,
+    "archive": {
+      "name": "vc-embedders-0.1.0-applio-chinese-hubert-base.zip",
+      "size": 230817727,
+      "sha256": "56436af1f0f2d2da0f4a12c2b8eb71ff9aa1c553f119c89ffa2fe945a73bd498"
+    },
+    "members": [
+      {
+        "name": "README.md",
+        "size": 861,
+        "sha256": "4c59406d4d5dc6a131d3d049958426a233446ba3a5a0854672a4fb9257b379d5"
+      },
+      {
+        "name": "NOTICE.md",
+        "size": 1277,
+        "sha256": "90223e504bdf7ba8fe0c36e18c0f4d3b2dc217e7bdf8237dc9c0d6370b34e835"
+      },
+      {
+        "name": "LICENSE.txt",
+        "size": 1036,
+        "sha256": "508a77d2e7b51d98adeed32648ad124b7b30241a8e70b2e72c99f92d8e5874d1"
+      },
+      {
+        "name": "model.onnx",
+        "size": 377744127,
+        "sha256": "548f6174ad1572be76c7693001df2253fc850b99db572af7b14784da7e3e5d39"
+      }
+    ],
+    "source_revision": "fce0375452b1dd6c080ac3248d423d4d037bc831",
+    "source_weights": [
+      {
+        "name": "config.json",
+        "sha256": "f6bd1bdef239518d022edcef31243acf344a2afa33d5428e16f221cac09cbcd0"
+      },
+      {
+        "name": "pytorch_model.bin",
+        "sha256": "2fefccd26c2794a583b80f6f7210c721873cb7ebae2c1cde3baf9b27855e24d8"
+      }
+    ],
+    "profile": "applio",
+    "outputs": [
+      {
+        "name": "unit12",
+        "layer": 12,
+        "projection": false,
+        "channels": 768
+      }
+    ],
+    "input": {
+      "sample_rate": 16000,
+      "dtype": "float32",
+      "shape": [
+        1,
+        "samples"
+      ],
+      "normalization": "none"
+    },
+    "source_repository": "TencentGameMate/chinese-hubert-base",
+    "source_revision_scope": "Original publisher model repository revision.",
+    "application_repository": "IAHispano/Applio",
+    "application_revision": "5379cf261fa7d8085c3b077aa42dabca7c85310b"
+  },
+  {
+    "id": "applio-korean-hubert-base",
+    "version": "0.1.0",
+    "label": "Korean HuBERT (Applio)",
+    "license": "Apache-2.0",
+    "url": null,
+    "archive": {
+      "name": "vc-embedders-0.1.0-applio-korean-hubert-base.zip",
+      "size": 351370450,
+      "sha256": "b6ba13fbb8ae2644cd87258d6939bcb2255e5bdf66d3250a532ebd71863bdeb8"
+    },
+    "members": [
+      {
+        "name": "README.md",
+        "size": 868,
+        "sha256": "5ca2cbc0ab4e35f30c83969ece42ef4014fc27f2fc45008e38b22ae0b305ee06"
+      },
+      {
+        "name": "NOTICE.md",
+        "size": 1165,
+        "sha256": "f4c82c0b6f355c6508f32080af6cd4b0237594a7b519d86a300023537e38bb1a"
+      },
+      {
+        "name": "LICENSE.txt",
+        "size": 11358,
+        "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+      },
+      {
+        "name": "model.onnx",
+        "size": 377744126,
+        "sha256": "d3cc737f5b36ef4da64533407c3451486777695fc126810e85c442e30434c2df"
+      }
+    ],
+    "source_revision": "e4d80ff0b7ae7701be69f2f3375316b1c10c4294",
+    "source_weights": [
+      {
+        "name": "config.json",
+        "sha256": "24ea67cacbff255e2848b16d655618b49a164539a20cc9dc3339d4319a4259f3"
+      },
+      {
+        "name": "pytorch_model.bin",
+        "sha256": "931f6232879f8eadf7dbd9e00e1fa4cac61ad269af89d509b2ed75009b1a02c5"
+      }
+    ],
+    "profile": "applio",
+    "outputs": [
+      {
+        "name": "unit12",
+        "layer": 12,
+        "projection": false,
+        "channels": 768
+      }
+    ],
+    "input": {
+      "sample_rate": 16000,
+      "dtype": "float32",
+      "shape": [
+        1,
+        "samples"
+      ],
+      "normalization": "none"
+    },
+    "source_repository": "team-lucid/hubert-base-korean",
+    "source_revision_scope": "Original publisher model repository revision.",
+    "application_repository": "IAHispano/Applio",
+    "application_revision": "5379cf261fa7d8085c3b077aa42dabca7c85310b"
+  },
+  {
+    "id": "applio-spin",
+    "version": "0.1.0",
+    "label": "SPIN (Applio)",
+    "license": "MIT",
+    "url": null,
+    "archive": {
+      "name": "vc-embedders-0.1.0-applio-spin.zip",
+      "size": 287613968,
+      "sha256": "79622c23ae5bbbe93544fc85157350567ec99cc8205c3edb3f8d610894e8e217"
+    },
+    "members": [
+      {
+        "name": "README.md",
+        "size": 850,
+        "sha256": "5489820514aa21288d6f6830a45f2ceab8a8e70354e36f83c2c656999e426f39"
+      },
+      {
+        "name": "NOTICE.md",
+        "size": 1677,
+        "sha256": "c2763abd95b20f9824abbe9bc842e0cbaec5f8ed33f6e87a91df24fabbf74346"
+      },
+      {
+        "name": "LICENSE.txt",
+        "size": 1067,
+        "sha256": "7823c04ca7103c5e6f20b497ed1f4fcfd08356e7a6766c30121cdafb0823fe44"
+      },
+      {
+        "name": "model.onnx",
+        "size": 377744112,
+        "sha256": "53a8cf0f523a7c073de0943bddc86346e0d677a075719211f3abac624d3ff74e"
+      }
+    ],
+    "source_revision": "e908bdd5bf9f18cede26bbbec724b1a4bc7c2f14",
+    "source_weights": [
+      {
+        "name": "config.json",
+        "sha256": "442f4c090139d059dc8426b8a5ce9f2c637f01c556d5f5ec82d7bc26df342610"
+      },
+      {
+        "name": "pytorch_model.bin",
+        "sha256": "057f12bfda54e2d486d86a52a3beb2a07c96a888bc6ac0c382c12ac18dbd500c"
+      }
+    ],
+    "profile": "applio",
+    "outputs": [
+      {
+        "name": "unit12",
+        "layer": 12,
+        "projection": false,
+        "channels": 768
+      }
+    ],
+    "input": {
+      "sample_rate": 16000,
+      "dtype": "float32",
+      "shape": [
+        1,
+        "samples"
+      ],
+      "normalization": "none"
+    },
+    "source_repository": "IAHispano/Applio",
+    "source_revision_scope": "Official Applio model distribution revision; license statement pinned separately.",
+    "application_repository": "IAHispano/Applio",
+    "application_revision": "5379cf261fa7d8085c3b077aa42dabca7c85310b"
+  },
+  {
+    "id": "applio-spin-v2",
+    "version": "0.1.0",
+    "label": "SPIN v2 (Applio)",
+    "license": "MIT",
+    "url": null,
+    "archive": {
+      "name": "vc-embedders-0.1.0-applio-spin-v2.zip",
+      "size": 306799493,
+      "sha256": "9e8d8c5f3237e632bc7fac5dd3fe8ba7db185a8ca4eaf8cc5768ba8873467692"
+    },
+    "members": [
+      {
+        "name": "README.md",
+        "size": 853,
+        "sha256": "d31781669870c4f1cd7b80b7454e7337adacc34fe0f1a710f6c7fd36ce7da05f"
+      },
+      {
+        "name": "NOTICE.md",
+        "size": 1680,
+        "sha256": "c3ddf6bc89c4bcda498c21a265846d07ac9de065b25e95b6252e34f11e60ebfa"
+      },
+      {
+        "name": "LICENSE.txt",
+        "size": 1067,
+        "sha256": "7823c04ca7103c5e6f20b497ed1f4fcfd08356e7a6766c30121cdafb0823fe44"
+      },
+      {
+        "name": "model.onnx",
+        "size": 377744115,
+        "sha256": "2c4ada40695712f302520127bd5634ebed05fb3334467ebda313955e2f1d43c0"
+      }
+    ],
+    "source_revision": "e908bdd5bf9f18cede26bbbec724b1a4bc7c2f14",
+    "source_weights": [
+      {
+        "name": "config.json",
+        "sha256": "8d3fbf68edffae2afafaa9083002fdb53a8ccc5fe1c0b6af5f0db1bd9f7fad61"
+      },
+      {
+        "name": "pytorch_model.bin",
+        "sha256": "9a9ac0be326057b17607a988be497793817f8274e987cf691a1b61192510f823"
+      }
+    ],
+    "profile": "applio",
+    "outputs": [
+      {
+        "name": "unit12",
+        "layer": 12,
+        "projection": false,
+        "channels": 768
+      }
+    ],
+    "input": {
+      "sample_rate": 16000,
+      "dtype": "float32",
+      "shape": [
+        1,
+        "samples"
+      ],
+      "normalization": "none"
+    },
+    "source_repository": "IAHispano/Applio",
+    "source_revision_scope": "Official Applio model distribution revision; license statement pinned separately.",
+    "application_repository": "IAHispano/Applio",
+    "application_revision": "5379cf261fa7d8085c3b077aa42dabca7c85310b"
+  }
+]

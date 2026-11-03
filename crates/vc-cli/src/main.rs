@@ -1,5 +1,6 @@
 mod cli;
 mod doctor;
+mod embedders;
 mod engine;
 mod engine_cache;
 mod join_report;
@@ -30,6 +31,7 @@ fn main() -> Result<()> {
         Command::Doctor => doctor::run(),
         Command::Devices(args) => list_devices(args.audio_backend),
         Command::Inspect(args) => model_rvc::inspect_model(&args.model),
+        Command::Embedders(args) => embedders::run(args),
         #[cfg(all(windows, feature = "windowsml"))]
         Command::WindowsMlEps(args) => windows_ml_eps::run(args),
         Command::EngineCache(args) => engine_cache::run(args),

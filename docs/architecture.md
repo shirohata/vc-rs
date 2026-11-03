@@ -30,6 +30,10 @@ chunk-conversion, smoothing, or output-assembly implementations.
 - `vc-cli`: CLI arguments, validation, realtime runtime control, and WAV file
   adaptation to the shared conversion components.
 - `vc-gui`: GUI state and controls that configure the `vc-app` runtime.
+- `vc-models`: pinned embedder-package acquisition shared by GUI and CLI. It
+  verifies the archive and companion documents, stages extraction, and publishes
+  a complete versioned cache directory. It has no inference/audio dependency;
+  acquisition runs only on explicit user actions, outside audio callbacks.
 - `vc-vst3`: DAW host adaptation, audio-callback ring-buffer I/O, worker
   scheduling, plugin state, and host latency reporting.
 

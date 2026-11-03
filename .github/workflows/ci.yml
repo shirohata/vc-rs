@@ -77,7 +77,7 @@ jobs:
       # set runs without the Windows App SDK Runtime (see header). vc-convert
       # is ORT-free by design (hand-rolled ONNX writer) and featureless.
       - name: test (vc-gui + vc-vst3 + vc-convert, default features)
-        run: cargo test -p vc-gui -p vc-vst3 -p vc-convert
+        run: cargo test -p vc-gui -p vc-vst3 -p vc-convert -p vc-models
       # Separate invocations prevent Cargo feature unification from hiding
       # package-specific provider and widget visibility regressions.
       - name: test (GUI Windows ML distribution features)

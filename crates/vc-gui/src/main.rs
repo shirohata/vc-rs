@@ -146,6 +146,9 @@ struct GuiSettings {
     accepted_terms: Vec<String>,
     model: String,
     embedder: String,
+    // Descriptive package identity. The existing path stays authoritative,
+    // including for legacy/custom models and unknown future catalog entries.
+    embedder_package: Option<vc_models::Selection>,
     f0_model: String,
     support_custom_mode: [String; 2],
     support_custom_paths: [String; 2],
@@ -207,6 +210,7 @@ impl Default for GuiSettings {
             accepted_terms: Vec::new(),
             model: String::new(),
             embedder: String::new(),
+            embedder_package: None,
             f0_model: String::new(),
             support_custom_mode: Default::default(),
             support_custom_paths: Default::default(),
@@ -531,6 +535,7 @@ impl VcGui {
     }
 
     fn changed(&mut self) {
+        self.onboarding.observe_package_selection(&self.settings);
         self.dirty_since = Some(Instant::now());
         self.update_live_params();
     }
@@ -574,6 +579,11 @@ impl VcGui {
             }
         };
         if let Some(path) = dialog.pick_file() {
+            if matches!(kind, ModelKind::Rvc) {
+                // A .pth choice stages conversion before changing model, so the
+                // ordinary selection snapshot cannot observe this intent yet.
+                self.onboarding.invalidate_package_application();
+            }
             let value = path.to_string_lossy().into_owned();
             if matches!(kind, ModelKind::Rvc) && is_pth_path(&value) {
                 self.pth_convert = Some(PthConvert::new(path));
@@ -581,7 +591,10 @@ impl VcGui {
             }
             match kind {
                 ModelKind::Rvc => self.settings.model = value,
-                ModelKind::Embedder => self.settings.embedder = value,
+                ModelKind::Embedder => {
+                    self.settings.embedder = value;
+                    self.settings.support_custom_mode[0] = "custom".into();
+                }
                 ModelKind::F0 => self.settings.f0_model = value,
             }
             self.changed();
@@ -786,6 +799,7 @@ impl VcGui {
         devices: &vc_app::DeviceList,
     ) {
         ui_text::set_language(ui.ctx(), self.settings.language);
+        self.poll_embedder_package();
         self.pth_convert_window(ui.ctx());
         if self.onboarding.active() {
             if let Some(error) = &self.ui_error {
@@ -1110,8 +1124,13 @@ fn discover_support_models(settings: &mut GuiSettings) -> bool {
     if let Ok(cwd) = std::env::current_dir() {
         roots.push(cwd.join("assets"));
     }
+    // Discovery fills legacy/unconfigured slots, never substitutes a reference
+    // embedder for an explicitly selected missing package or Custom file.
     let embedder =
-        model_setup::discover(&mut settings.embedder, model_setup::MODELS[0].file, &roots);
+        !matches!(
+            settings.support_custom_mode[0].as_str(),
+            "package" | "custom"
+        ) && model_setup::discover(&mut settings.embedder, model_setup::MODELS[0].file, &roots);
     let f0 = model_setup::discover(&mut settings.f0_model, model_setup::MODELS[1].file, &roots);
     let gtcrn = model_setup::discover_gtcrn(&mut settings.gtcrn_model_dir, &roots);
     embedder || f0 || gtcrn

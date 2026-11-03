@@ -49,6 +49,38 @@ This downloads `.\assets\content_vec_500.onnx` and `.\assets\rmvpe.onnx`.
 | `wav` | WAV-file to WAV-file conversion (same pipeline, deterministic testing) |
 | `windowsml-eps` | List/install Windows ML catalog EPs (windowsml package only) |
 | `engine-cache` | Inspect/clear the GPU engine cache |
+| `embedders` | List, import, fetch, or verify fixed embedder packages |
+
+### Embedder packages
+
+`embedders list` lists the fixed vc-embedders 0.1.0 candidates. No public
+download source is configured yet; import an already available matching ZIP.
+The catalog does not claim that these candidates are publicly released.
+
+```powershell
+.\vc-rs.exe embedders list
+.\vc-rs.exe embedders import applio-spin --version 0.1.0 --zip .\vc-embedders-0.1.0-applio-spin.zip
+.\vc-rs.exe embedders verify applio-spin --version 0.1.0
+```
+
+The command prints the installed `model.onnx` path; pass it through `--embedder`
+to `run`/`wav`, or select it in the GUI/VST3. `--cache-dir` overrides the shared
+model-cache root (normally `%LOCALAPPDATA%\vc-rs\models`, falling back to
+`%APPDATA%`). Each ID/version/ONNX hash has a separate directory containing the
+ONNX, README, LICENSE, and NOTICE. Imports verify all four members and the ZIP
+against the built-in catalog, reuse verified entries, and preserve existing
+files on failed or cancelled acquisition. Interrupted transfers restart when
+retried. Ctrl+C requests cancellation. `embedders fetch` uses only a pinned published source when configured;
+it reports the missing source otherwise. There is no startup acquisition,
+latest-version lookup, or automatic replacement of an existing selection.
+
+Select the weights, feature layer, projection, and waveform preprocessing used
+to train the voice model. ContentVec, language-specific HuBERT, SPIN and SPIN v2
+are distinct; matching output dimensions do not establish compatibility.
+The RVC profiles supply `unit9` (layer 9 with trained projection, 256 channels)
+and `unit12` (layer 12, 768 channels). The Applio packages supply only `unit12`.
+Input is float32 mono at 16 kHz, scaled to approximately `[-1,1]`, without
+mean/variance normalization. Generator/vocoder support is a separate condition.
 
 ### Diagnostics
 

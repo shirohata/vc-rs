@@ -100,6 +100,24 @@ checks model-role compatibility. Completed reference files are reused; partial
 transfers are not resumed. Obsolete checks are associated with their original
 paths, and download/selection changes invalidate readiness.
 
+The normal screen's Model fold and Preparation's Details offer **Embedder
+packages**. Select an exact vc-embedders profile, then **Import ZIP and use…**
+to import its matching local archive. No public download source is configured
+for the fixed 0.1.0 candidates. Merely opening setup or selecting an entry does
+not acquire anything. A successful import selects the verified ONNX only if
+the voice/embedder selection has remained unchanged; otherwise it just fills
+the cache. Failed/cancelled jobs keep the current selection. Custom paths remain
+available when switching back from a package. Identity/version is saved beside
+the existing path without migrating older selections. Apply through the normal
+Start/Restart operation. The package directory retains README, LICENSE and
+NOTICE, and **Verify cache and use** rechecks all four files.
+
+Use the embedder weights, layer, projection and preprocessing used for training.
+SPIN/SPIN v2 are not substitutes for ContentVec-trained models. Generator and
+vocoder support is an independent requirement; importing a package does not
+establish backend compatibility or audio quality. CLI `embedders` commands use
+the same package cache and verification path (see [the CLI reference](cli.md#embedder-packages)).
+
 Conversion starts only through the existing normal-screen controls and uses the
 shared pipeline and consent/preparation guards. There is no preview session or
 preview-success state in the tutorial. Every navigation, including completion,

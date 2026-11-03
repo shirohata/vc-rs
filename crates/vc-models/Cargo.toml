@@ -1,0 +1,17 @@
+[package]
+name = "vc-models"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Pinned support-model acquisition, independent of audio and inference"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+ureq = { version = "3.4", default-features = false, features = ["native-tls"] }
+zip = { version = "9.0.1", default-features = false, features = ["deflate"] }

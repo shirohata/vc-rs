@@ -674,6 +674,46 @@ fn ui_small_screen_scroll_keeps_transport_and_reaches_language_and_setup() {
 }
 
 #[test]
+fn ui_installed_package_and_custom_remain_distinct_saved_choices() {
+    for lang in [text::Language::English, text::Language::Japanese] {
+        let mut fixture = ready_main_fixture(lang);
+        let model = vc_models::find("applio-spin-v2", "0.1.0").unwrap();
+        let package_path = model
+            .model_path(&fixture.app.onboarding.effects.support_cache_dir)
+            .to_string_lossy()
+            .into_owned();
+        fixture.app.settings.embedder = package_path.clone();
+        fixture.app.settings.embedder_package = Some(model.selection());
+        fixture.app.settings.support_custom_mode[0] = "package".into();
+        fixture.app.settings.support_custom_paths[0] = "my-preserved-custom.onnx".into();
+        let mut h = harness(fixture);
+        h.get_by_label(lang.text("Model")).click();
+        h.run_steps(4);
+        // A missing managed package offers import, not a GPL reference download.
+        assert!(h.query_by_label(lang.text("Agree and download")).is_none());
+        h.get_by_label(lang.text("Embedder")).click();
+        h.run_steps(2);
+        h.get_by_label(lang.text("Custom")).click();
+        h.run_steps(4);
+        assert_eq!(h.state().app.settings.embedder, "my-preserved-custom.onnx");
+        assert_eq!(
+            h.state().app.settings.embedder_package,
+            Some(model.selection())
+        );
+        h.get_by_label(lang.text("Embedder")).click();
+        h.run_steps(2);
+        h.get_by_label(lang.text(&model.label)).click();
+        h.run_steps(4);
+        let settings = &h.state().app.settings;
+        assert_eq!(settings.embedder, package_path);
+        assert_eq!(settings.support_custom_paths[0], "my-preserved-custom.onnx");
+        assert_eq!(settings.support_custom_mode[0], "package");
+        assert_eq!(h.state().app.onboarding.effects.download_requests, 0);
+        assert!(h.state().app.onboarding.effects.package_requests.is_empty());
+    }
+}
+
+#[test]
 fn ui_stop_failure_keeps_applied_settings_and_shows_error() {
     let mut h = harness(ready_main_fixture(text::Language::English));
     h.get_by_label(text::START).click();

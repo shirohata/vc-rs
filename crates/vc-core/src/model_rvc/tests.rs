@@ -5,6 +5,67 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::Provider;
 
+/// Exercise a locally supplied embedder through the same loader used by every
+/// frontend. This checks runtime I/O, not training compatibility or audio quality.
+#[cfg(any(feature = "windowsml", feature = "tensorrt"))]
+#[test]
+#[ignore = "requires VC_RS_DIAG_EMBEDDER and an installed explicitly selected backend"]
+fn embedder_package_runtime_diagnostic() {
+    use super::feature::FeatureTensor;
+    use super::sessions::HubertEmbedderSession;
+    let path = PathBuf::from(std::env::var_os("VC_RS_DIAG_EMBEDDER").expect("VC_RS_DIAG_EMBEDDER"));
+    let provider_name =
+        std::env::var("VC_RS_DIAG_EMBEDDER_PROVIDER").expect("VC_RS_DIAG_EMBEDDER_PROVIDER");
+    let provider = Provider::from_name(&provider_name).expect("known provider");
+    assert!(provider.available_in_build());
+    let output = std::env::var("VC_RS_DIAG_EMBEDDER_OUTPUT").unwrap_or_else(|_| "unit12".into());
+    let channels = match output.as_str() {
+        "unit9" => 256,
+        "unit12" => 768,
+        _ => panic!("unit9/unit12 required"),
+    };
+    const SAMPLES: usize = 11520;
+    let input_name =
+        super::inspect::inspect_contentvec_input_name(&path, channels, Some(&output)).unwrap();
+    let mut session = HubertEmbedderSession::load(
+        &path,
+        provider,
+        channels,
+        Some(&output),
+        Some(
+            super::tensorrt::TensorRtSessionProfile::single_input(
+                super::tensorrt::ModelRole::ContentVec,
+                input_name,
+                SAMPLES,
+            )
+            .with_model_cache_key(super::tensorrt::tensor_rt_model_cache_key(&path).unwrap()),
+        ),
+        super::tensorrt::TensorRtRunMode::PinnedCpu,
+        super::tensorrt::TensorRtSessionPurpose::Main,
+    )
+    .unwrap();
+    let mut features = FeatureTensor::default();
+    for frequency in [0.0f32, 220.0] {
+        let signal: Vec<_> = (0..SAMPLES)
+            .map(|i| (std::f32::consts::TAU * frequency * i as f32 / 16000.0).sin() * 0.1)
+            .collect();
+        session.extract_into(&signal, &mut features).unwrap();
+        assert_eq!(
+            features.shape,
+            [1, ((SAMPLES - 400) / 320 + 1) as i64, channels]
+        );
+        assert_eq!(
+            features.data.len(),
+            features.shape.iter().product::<i64>() as usize
+        );
+        assert!(features.data.iter().all(|v| v.is_finite()));
+        eprintln!(
+            "provider={provider_name} output={output} input_hz={frequency} shape={:?} finite=true",
+            features.shape
+        );
+    }
+}
+
 #[cfg(all(windows, feature = "windowsml"))]
 #[test]
 #[ignore = "requires VC_RS_DIAG_EMBEDDER, VC_RS_DIAG_F0 and OpenVINO GPU"]

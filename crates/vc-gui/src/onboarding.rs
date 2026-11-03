@@ -15,6 +15,7 @@ type CheckResult = Arc<Mutex<Option<Result<(), String>>>>;
 type SupportResult = Arc<Mutex<Option<[Result<(), String>; 2]>>>;
 type RuntimeInspection = Arc<Mutex<Option<Result<bool, String>>>>;
 mod normal;
+mod packages;
 mod terms;
 mod workflow;
 
@@ -35,6 +36,7 @@ pub(super) enum Step {
 }
 
 pub(super) struct Onboarding {
+    packages: packages::Packages,
     step: Option<Step>,
     pub(super) normal: normal::NormalState,
     pub(super) model_check: Option<(String, CheckResult)>,
@@ -95,6 +97,7 @@ impl Onboarding {
             step = Some(Step::Terms);
         }
         Self {
+            packages: Default::default(),
             step,
             normal: Default::default(),
             model_check: None,
@@ -111,6 +114,14 @@ impl Onboarding {
 
     pub(super) fn active(&self) -> bool {
         self.step.is_some()
+    }
+
+    pub(super) fn observe_package_selection(&mut self, settings: &GuiSettings) {
+        self.packages.observe_selection(settings);
+    }
+
+    pub(super) fn invalidate_package_application(&mut self) {
+        self.packages.invalidate_application();
     }
 
     fn check_support(&mut self, settings: &GuiSettings) -> Option<Result<(), String>> {

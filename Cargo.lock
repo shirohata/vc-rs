@@ -4355,6 +4355,7 @@ dependencies = [
  "tracing-subscriber",
  "vc-app",
  "vc-core",
+ "vc-models",
 ]
 
 [[package]]
@@ -4405,7 +4406,20 @@ dependencies = [
  "vc-app",
  "vc-convert",
  "vc-core",
+ "vc-models",
  "wgpu",
+]
+
+[[package]]
+name = "vc-models"
+version = "0.5.4"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "sha2",
+ "ureq",
+ "zip",
 ]
 
 [[package]]
