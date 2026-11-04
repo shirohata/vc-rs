@@ -249,9 +249,9 @@ fallback. An endpoint change stops and joins the old worker, then transfers its
 loaded model to a new worker when the input/output rates and hop match. Fresh
 streams, rings and a new clock servo discard the previous endpoint timeline;
 either endpoint change discards the old relative-clock estimate. Changed rates
-instead load the pipeline for the newly negotiated contract. Audio
-stream failure retains models for another explicit device selection. Stop or
-Apply invalidates pending changes, and obsolete preparation cannot acknowledge
+instead load the pipeline for the newly negotiated contract. Audio stream failure
+in either direction retains healthy models for another explicit device selection.
+Stop or Apply invalidates pending changes, and obsolete preparation cannot acknowledge
 the latest GUI selection. The OS default is resolved on selection, not followed.
 
 Off/Gate retains its per-chunk live path without stream restart. Stateful denoiser

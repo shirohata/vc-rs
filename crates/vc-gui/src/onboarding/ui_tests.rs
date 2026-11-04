@@ -37,6 +37,183 @@ fn ready_main_fixture(language: text::Language) -> Fixture {
 }
 
 #[test]
+fn ui_runtime_edits_during_start_wait_for_the_loaded_revision_and_apply_once() {
+    for restarting in [false, true] {
+        let mut fixture = ready_main_fixture(text::Language::English);
+        fixture.app.settings.input_device = "Old microphone".into();
+        fixture.app.settings.output_device = "Old speaker".into();
+        fixture.devices.inputs = vec!["Old microphone".into(), "New microphone".into()];
+        fixture.devices.outputs = vec!["Old speaker".into(), "New speaker".into()];
+        if restarting {
+            fixture.status.state = EngineState::Running;
+            fixture.status.session_revision = 7;
+            fixture.status.input_recoverable = true;
+            fixture.app.onboarding.normal.applied = Some(fixture.app.settings.clone());
+        }
+        let mut h = harness(fixture);
+        h.get_by_label(if restarting { "Restart" } else { text::START })
+            .click();
+        h.run_steps(4);
+        let revision = h.state().app.onboarding.normal.expected_revision;
+        // Editing before the controller publishes Starting is possible, too.
+        h.get_by_value("Old microphone").click();
+        h.run_steps(4);
+        h.get_by_label("New microphone").click();
+        h.run_steps(4);
+        h.state_mut().status.state = EngineState::Starting;
+        h.run_steps(4);
+        h.get_by_value("Old speaker").click();
+        h.run_steps(4);
+        h.get_by_label("New speaker").click();
+        h.run_steps(4);
+        let original = h.state().app.onboarding.normal.requested.clone().unwrap();
+        {
+            let fixture = h.state_mut();
+            fixture.app.settings.denoiser = "noise-gate".into();
+            fixture.app.request_denoiser_change(&fixture.status);
+            // Repeated edits should coalesce to the latest field values.
+            fixture.app.settings.input_device = "Final microphone".into();
+            fixture.app.request_input_change(&fixture.status);
+            fixture.app.settings.provider = "staged backend".into();
+            fixture.app.settings.model = "staged voice.onnx".into();
+            fixture.status.state = EngineState::Running;
+            fixture.status.session_revision = revision - 1;
+        }
+        h.run_steps(4);
+        assert!(h.state().app.onboarding.effects.input_requests.is_empty());
+        assert!(h.state().app.onboarding.effects.output_requests.is_empty());
+        assert!(h
+            .state()
+            .app
+            .onboarding
+            .effects
+            .denoiser_requests
+            .is_empty());
+        // Even a matching revision must not acknowledge an unfinished load.
+        h.state_mut().status.state = EngineState::Starting;
+        h.state_mut().status.session_revision = revision;
+        h.run_steps(4);
+        assert!(h.state().app.onboarding.normal.requested.is_some());
+        h.state_mut().status.state = EngineState::Running;
+        h.run_steps(8);
+        let fixture = h.state();
+        assert_eq!(fixture.app.onboarding.effects.start_requests, 1);
+        assert_eq!(
+            fixture.app.onboarding.effects.input_requests,
+            [(AudioHost::default(), Some("Final microphone".into()))]
+        );
+        assert_eq!(
+            fixture.app.onboarding.effects.output_requests,
+            [(AudioHost::default(), Some("New speaker".into()))]
+        );
+        assert_eq!(
+            fixture.app.onboarding.effects.denoiser_requests,
+            [(DenoiserMode::NoiseGate, None)]
+        );
+        assert_eq!(fixture.app.onboarding.normal.requested_runtime, Some(3));
+        let applied = fixture.app.onboarding.normal.applied.as_ref().unwrap();
+        assert_eq!(applied.model, original.model);
+        assert_eq!(applied.provider, original.provider);
+        assert_eq!(applied.input_device, "Old microphone");
+        assert_eq!(applied.output_device, "Old speaker");
+        assert_eq!(applied.denoiser, "off");
+        {
+            let fixture = h.state_mut();
+            fixture.status.reconfiguration_revision = 3;
+            fixture.status.applied_runtime = Some(AppliedRuntimeConfig {
+                input_device: Some("Final microphone".into()),
+                output_device: Some("New speaker".into()),
+                denoiser_mode: DenoiserMode::NoiseGate,
+                ..Default::default()
+            });
+        }
+        h.run_steps(4);
+        let fixture = h.state();
+        assert!(fixture.app.onboarding.normal.requested_runtime.is_none());
+        let applied = fixture.app.onboarding.normal.applied.as_ref().unwrap();
+        assert_eq!(applied.input_device, "Final microphone");
+        assert_eq!(applied.output_device, "New speaker");
+        assert_eq!(applied.denoiser, "noise-gate");
+        assert_eq!(applied.model, original.model);
+        assert_eq!(applied.provider, original.provider);
+        assert_eq!(fixture.app.onboarding.effects.input_requests.len(), 1);
+    }
+}
+
+#[test]
+fn ui_stop_and_load_failure_clear_deferred_runtime_edits_before_a_new_apply() {
+    for action in ["stop", "load failure", "new apply"] {
+        let mut fixture = ready_main_fixture(text::Language::English);
+        fixture.app.apply_or_start();
+        fixture.app.settings.input_device = "New microphone".into();
+        fixture.app.request_input_change(&fixture.status);
+        fixture.app.settings.output_device = "New speaker".into();
+        fixture.app.request_output_change(&fixture.status);
+        fixture.app.settings.denoiser = "noise-gate".into();
+        fixture.app.request_denoiser_change(&fixture.status);
+        let mut h = harness(fixture);
+        match action {
+            "stop" => {
+                h.get_by_label(text::STOP).click();
+                h.run_steps(4);
+            }
+            "load failure" => {
+                h.state_mut().status.state = EngineState::Error;
+                h.run_steps(4);
+            }
+            _ => {}
+        }
+        if action != "new apply" {
+            // A late Running snapshot of the abandoned attempt must not revive
+            // its deferred edits, even before a replacement Apply is submitted.
+            h.state_mut().status.state = EngineState::Running;
+            h.state_mut().status.session_revision = 1;
+            h.run_steps(4);
+            assert!(
+                h.state().app.onboarding.effects.input_requests.is_empty(),
+                "{action}"
+            );
+            assert!(
+                h.state().app.onboarding.effects.output_requests.is_empty(),
+                "{action}"
+            );
+            assert!(
+                h.state()
+                    .app
+                    .onboarding
+                    .effects
+                    .denoiser_requests
+                    .is_empty(),
+                "{action}"
+            );
+        }
+        // A fresh Apply already includes all selected runtime fields. Deferred
+        // requests from the previous attempt must not restart it a second time.
+        h.state_mut().app.apply_or_start();
+        h.state_mut().status.state = EngineState::Running;
+        h.state_mut().status.session_revision = h.state().app.onboarding.normal.expected_revision;
+        h.run_steps(8);
+        let fixture = h.state();
+        assert!(
+            fixture.app.onboarding.effects.input_requests.is_empty(),
+            "{action}"
+        );
+        assert!(
+            fixture.app.onboarding.effects.output_requests.is_empty(),
+            "{action}"
+        );
+        assert!(
+            fixture.app.onboarding.effects.denoiser_requests.is_empty(),
+            "{action}"
+        );
+        let applied = fixture.app.onboarding.normal.applied.as_ref().unwrap();
+        assert_eq!(applied.input_device, "New microphone");
+        assert_eq!(applied.output_device, "New speaker");
+        assert_eq!(applied.denoiser, "noise-gate");
+    }
+}
+
+#[test]
 fn ui_output_widget_switches_without_restart_and_keeps_staged_models() {
     for lang in [text::Language::English, text::Language::Japanese] {
         let mut fixture = ready_main_fixture(lang);

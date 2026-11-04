@@ -31,6 +31,9 @@ existing live parameters do not require Restart. Passthrough retains pitch but
 disables its controls, and respects the controller's live-switch capability.
 
 Microphone, output-device and input-denoiser selections have automatic apply requests.
+Edits made while Start or Restart is loading are coalesced and submitted after
+that session is running. Stop or a failed load discards those deferred requests;
+a new Start or Restart already includes the current selections in its snapshot.
 The GUI acknowledges only the requested fields after success, so these changes
 cannot apply staged voice-model, provider or other-device edits. Failed selections keep
 the previous applied values and expose an error. Same-rate device changes

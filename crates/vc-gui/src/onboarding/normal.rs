@@ -8,7 +8,15 @@ pub(crate) struct NormalState {
     pub applied: Option<GuiSettings>,
     pub expected_revision: u64,
     pub requested_runtime: Option<u64>,
+    pub deferred_runtime: DeferredRuntimeChanges,
     details: details::ModelDetailsState,
+}
+
+#[derive(Default)]
+pub(crate) struct DeferredRuntimeChanges {
+    input: bool,
+    output: bool,
+    denoiser: bool,
 }
 
 // Compare reload-scoped engine configuration only. Live controls and UI state
@@ -51,9 +59,15 @@ impl VcGui {
     }
 
     fn request_device_change(&mut self, status: &EngineStatusSnapshot, input: bool) {
-        if (!status.input_recoverable && status.state != EngineState::Running)
-            || self.onboarding.normal.requested.is_some()
-        {
+        if self.onboarding.normal.requested.is_some() {
+            if input {
+                self.onboarding.normal.deferred_runtime.input = true;
+            } else {
+                self.onboarding.normal.deferred_runtime.output = true;
+            }
+            return;
+        }
+        if !status.input_recoverable && status.state != EngineState::Running {
             return;
         }
         let (host, device) = if input {
@@ -95,9 +109,11 @@ impl VcGui {
     }
 
     pub(super) fn request_denoiser_change(&mut self, status: &EngineStatusSnapshot) {
-        if (!status.input_recoverable && status.state != EngineState::Running)
-            || self.onboarding.normal.requested.is_some()
-        {
+        if self.onboarding.normal.requested.is_some() {
+            self.onboarding.normal.deferred_runtime.denoiser = true;
+            return;
+        }
+        if !status.input_recoverable && status.state != EngineState::Running {
             return;
         }
         let mode = match parse_denoiser(&self.settings.denoiser) {
@@ -146,6 +162,7 @@ impl VcGui {
             self.onboarding.normal.requested = None;
             self.onboarding.normal.applied = None;
             self.onboarding.normal.requested_runtime = None;
+            self.onboarding.normal.deferred_runtime = Default::default();
         }
         if status.state == EngineState::Running
             && status.session_revision >= self.onboarding.normal.expected_revision
@@ -192,6 +209,25 @@ impl VcGui {
                     .as_ref()
                     .map(|path| path.to_string_lossy().into_owned())
                     .unwrap_or_default();
+            }
+        }
+        if status.state == EngineState::Running
+            && self.onboarding.normal.requested.is_none()
+            && status.session_revision >= self.onboarding.normal.expected_revision
+        {
+            // Full Apply owns an immutable settings snapshot. Edits made while
+            // it loads must wait for its revision, then patch only their own
+            // runtime fields through the normal coalescing mailbox. Do not
+            // promote unrelated staged model/provider settings into that load.
+            let deferred = std::mem::take(&mut self.onboarding.normal.deferred_runtime);
+            if deferred.input {
+                self.request_input_change(status);
+            }
+            if deferred.output {
+                self.request_output_change(status);
+            }
+            if deferred.denoiser {
+                self.request_denoiser_change(status);
             }
         }
         let busy = matches!(status.state, EngineState::Starting | EngineState::Stopping)

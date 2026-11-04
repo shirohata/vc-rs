@@ -883,6 +883,90 @@ mod tests {
     }
 
     #[test]
+    fn either_endpoint_loss_retains_healthy_models_but_not_failed_inference() {
+        for message in ["Input audio stream stopped", "Output audio stream stopped"] {
+            for healthy in [true, false] {
+                let config = RealtimeConfig {
+                    input_device: Some("previous microphone".into()),
+                    output_device: Some("previous speaker".into()),
+                    passthrough: true,
+                    chunk_ms: 20,
+                    ..Default::default()
+                };
+                let running = Arc::new(AtomicBool::new(healthy));
+                let wake = Arc::new(WorkerWake::default());
+                let joined = Arc::new(AtomicBool::new(false));
+                let worker = {
+                    let running = running.clone();
+                    let wake = wake.clone();
+                    let joined = joined.clone();
+                    let model = retained().model;
+                    thread::spawn(move || {
+                        wake.register_current();
+                        while running.load(Ordering::SeqCst) {
+                            thread::park_timeout(Duration::from_millis(100));
+                        }
+                        joined.store(true, Ordering::SeqCst);
+                        model
+                    })
+                };
+                let detail = (!healthy).then(|| "injected inference failure".to_string());
+                let failed = RealtimeSession {
+                    config: config.clone(),
+                    telemetry: Arc::new(Telemetry::default()),
+                    running,
+                    last_error: Arc::new(Mutex::new(detail.clone())),
+                    wake,
+                    worker: Some(worker),
+                    input_stream: None,
+                    output_stream: None,
+                    status: EngineStatusSnapshot::default(),
+                    debug_input_wav: None,
+                    debug_output_wav: None,
+                    debug_input: Arc::new(Mutex::new(Vec::new())),
+                    debug_output: Arc::new(Mutex::new(Vec::new())),
+                    input_rate: 48000,
+                    output_rate: 48000,
+                };
+                let status = Mutex::new(EngineStatusSnapshot {
+                    state: EngineState::Running,
+                    applied_runtime: Some(AppliedRuntimeConfig::from_config(&config)),
+                    ..Default::default()
+                });
+                let mut recovery = None;
+                handle_audio_failure(failed, &mut recovery, &status, message);
+                assert!(joined.load(Ordering::SeqCst), "{message}");
+                let current = status.lock().unwrap().clone();
+                assert_eq!(current.state, EngineState::Error);
+                assert_eq!(current.message, message);
+                assert_eq!(current.detail, detail);
+                assert_eq!(current.input_recoverable, healthy);
+                assert_eq!(
+                    current.applied_runtime,
+                    Some(AppliedRuntimeConfig::from_config(&config))
+                );
+                if healthy {
+                    let (previous, mut model) = recovery.expect("recoverable endpoint loss");
+                    assert_eq!(previous.input_device, config.input_device);
+                    assert_eq!(previous.output_device, config.output_device);
+                    assert!(model.as_ref().unwrap().matches(48000, 48000, 960));
+                    reuse_or_load(
+                        &mut model,
+                        48000,
+                        48000,
+                        960,
+                        &LiveParams::default(),
+                        || panic!("endpoint recovery must reuse the retained model"),
+                    )
+                    .unwrap();
+                } else {
+                    assert!(recovery.is_none(), "do not reuse failed inference");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn recycling_skips_loader_discards_audio_and_old_microphone_clock() {
         let mut old = retained();
         let mut out = Vec::new();
@@ -1239,6 +1323,47 @@ mod tests {
             );
             assert!(session.as_ref().unwrap().last_error().is_none());
         }
+
+        // Exercise the controller's output-loss path with real loaded sessions,
+        // without unplugging hardware or recording/playing any microphone audio.
+        handle_audio_failure(
+            session.take().unwrap(),
+            &mut recovery,
+            &status,
+            "Output audio stream stopped",
+        );
+        assert_eq!(status.lock().unwrap().state, EngineState::Error);
+        assert!(status.lock().unwrap().input_recoverable);
+        assert!(recovery.as_ref().unwrap().1.is_some());
+        mailbox
+            .request_output(AudioHost::Wasapi, Some(old))
+            .unwrap();
+        apply_pending(
+            &mailbox,
+            &mut session,
+            &mut recovery,
+            &telemetry,
+            &live,
+            &bypass,
+            &status,
+            1,
+        );
+        let current = status.lock().unwrap().clone();
+        assert_eq!(current.state, EngineState::Running);
+        assert!(current.reconfiguration_error.is_none(), "{current:?}");
+        assert_eq!(MODEL_LOADS.with(|count| count.get()), before_loads);
+        assert!(recovery.is_none());
+        for route in [false, true] {
+            bypass.store(route, Ordering::Relaxed);
+            let before = telemetry.chunks.load(Ordering::Relaxed);
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while telemetry.chunks.load(Ordering::Relaxed) <= before && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(20));
+            }
+            assert!(telemetry.chunks.load(Ordering::Relaxed) > before);
+            assert!(session.as_ref().unwrap().last_error().is_none());
+        }
+        println!("silent output-loss recovery: both routes resumed without model reload");
     }
 
     #[cfg(all(feature = "rnnoise", feature = "gtcrn"))]

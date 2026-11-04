@@ -791,15 +791,9 @@ fn control_loop(
             }
         }
         if let Some(message) = audio_failure {
-            let detail = session.as_ref().and_then(|s| s.last_error());
-            if let Some(mut failed) = session.take() {
-                if message == "Input audio stream stopped" && failed.running.load(Ordering::Relaxed)
-                {
-                    recovery = Some((failed.config.clone(), failed.suspend()));
-                }
+            if let Some(failed) = session.take() {
+                handle_audio_failure(failed, &mut recovery, &status, message);
             }
-            set_error_message(&status, message, detail);
-            status.lock().unwrap().input_recoverable = recovery.is_some();
         } else if session
             .as_ref()
             .is_some_and(|s| !s.running.load(Ordering::Relaxed))
@@ -812,6 +806,25 @@ fn control_loop(
         }
     }
     drop(session);
+}
+
+fn handle_audio_failure(
+    mut failed: RealtimeSession,
+    recovery: &mut Option<(RealtimeConfig, Option<RetainedModel>)>,
+    status: &Mutex<EngineStatusSnapshot>,
+    message: &str,
+) {
+    let detail = failed.last_error();
+    // Either endpoint can disappear while inference is healthy. Join before
+    // retaining its model, just as for an explicit device switch. An inference
+    // failure must still release its unusable model instead of offering reuse.
+    *recovery = if failed.running.load(Ordering::Relaxed) {
+        Some((failed.config.clone(), failed.suspend()))
+    } else {
+        None
+    };
+    set_error_message(status, message, detail);
+    status.lock().unwrap().input_recoverable = recovery.is_some();
 }
 
 fn set_status(

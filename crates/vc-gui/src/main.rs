@@ -760,6 +760,9 @@ impl VcGui {
         }) {
             Ok(()) => {
                 self.ui_error = None;
+                // This Apply already contains the latest runtime selections;
+                // discard deferred edits belonging to the previous snapshot.
+                self.onboarding.normal.deferred_runtime = Default::default();
                 self.onboarding.normal.requested = Some(self.settings.clone());
                 self.onboarding.normal.expected_revision = revision;
             }
@@ -787,6 +790,7 @@ impl VcGui {
             self.onboarding.normal.requested = None;
             self.onboarding.normal.applied = None;
             self.onboarding.normal.requested_runtime = None;
+            self.onboarding.normal.deferred_runtime = Default::default();
         }
     }
 

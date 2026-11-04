@@ -586,13 +586,13 @@ fn host_label(host: AudioHost, exclusive: bool) -> &'static str {
 }
 
 pub fn input_device(host: &cpal::Host, name: Option<&str>) -> Result<cpal::Device> {
-    find_device(host.input_devices()?, name)
+    find_device(host.input_devices()?, name, device_name)
         .or_else(|| host.default_input_device())
         .ok_or_else(|| anyhow!("input device not found"))
 }
 
 pub fn output_device(host: &cpal::Host, name: Option<&str>) -> Result<cpal::Device> {
-    find_device(host.output_devices()?, name)
+    find_device(host.output_devices()?, name, device_name)
         .or_else(|| host.default_output_device())
         .ok_or_else(|| anyhow!("output device not found"))
 }
@@ -613,20 +613,27 @@ pub fn cpal_output_names(host: AudioHost) -> Result<Vec<String>> {
         .collect())
 }
 
-fn find_device<I>(devices: I, name: Option<&str>) -> Option<cpal::Device>
-where
-    I: Iterator<Item = cpal::Device>,
-{
-    let needle = name?.to_lowercase();
-    devices
-        .filter_map(|device| {
-            let device_name = device_name(&device);
-            device_name
-                .to_lowercase()
-                .contains(&needle)
-                .then_some(device)
-        })
-        .next()
+fn find_device<D>(
+    devices: impl Iterator<Item = D>,
+    name: Option<&str>,
+    name_of: impl Fn(&D) -> String,
+) -> Option<D> {
+    let name = name?;
+    let needle = name.to_lowercase();
+    let mut partial = None;
+    for device in devices {
+        let device_name = name_of(&device);
+        // GUI selections contain the full, case-preserving display name. Keep
+        // scanning past a partial match so enumeration order cannot shadow it.
+        // The first case-insensitive substring remains the CLI fallback.
+        if device_name == name {
+            return Some(device);
+        }
+        if partial.is_none() && device_name.to_lowercase().contains(&needle) {
+            partial = Some(device);
+        }
+    }
+    partial
 }
 
 pub fn device_name(device: &cpal::Device) -> String {
@@ -920,6 +927,37 @@ where
 #[cfg(test)]
 mod error_tests {
     use super::*;
+
+    #[test]
+    fn named_device_prefers_exact_spelling_over_earlier_substring_or_case_matches() {
+        let devices = ["Mic B", "mic", "Mic"];
+        assert_eq!(
+            find_device(devices.into_iter(), Some("Mic"), |name| name.to_string()),
+            Some("Mic")
+        );
+        let devices = ["Long speaker name", "speaker name"];
+        assert_eq!(
+            find_device(devices.into_iter(), Some("speaker name"), |name| name
+                .to_string()),
+            Some("speaker name")
+        );
+    }
+
+    #[test]
+    fn named_device_keeps_cli_substring_search_and_default_resolution() {
+        let devices = ["Mic B", "mic", "Mic"];
+        for (name, expected) in [
+            (Some("MIC"), Some("Mic B")),
+            (Some(" B"), Some("Mic B")),
+            (Some("missing"), None),
+            (None, None),
+        ] {
+            assert_eq!(
+                find_device(devices.into_iter(), name, |name| name.to_string()),
+                expected
+            );
+        }
+    }
 
     #[test]
     fn fatal_stream_error_survives_consuming_the_report_counters() {
