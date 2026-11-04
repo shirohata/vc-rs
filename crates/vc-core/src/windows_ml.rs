@@ -5,9 +5,9 @@
 //! sessions can continue resolving package-graph DLLs; do not call shutdown from
 //! a model/session drop path or from realtime audio code.
 
-use std::ffi::{c_char, c_void, CStr, CString};
+use std::ffi::{c_char, c_void, CStr, CString, OsString};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::OnceLock;
 
@@ -27,6 +27,7 @@ const WINDOWS_APP_SDK_MAJOR: u32 = 0x0002_0000;
 // default in scripts/package-store-msix.ps1. Zero here accepts older runtimes.
 const WINDOWS_APP_RUNTIME_MIN_VERSION: u64 = (2u64 << 48) | (1u64 << 32);
 const WINDOWS_ML_BOOTSTRAP_ENV: &str = "VC_RS_WINDOWSML_BOOTSTRAP_DLL";
+const WINDOWS_APP_RUNTIME_FAMILY: &str = "Microsoft.WindowsAppRuntime.2_8wekyb3d8bbwe";
 
 type Hmodule = *mut c_void;
 type Farproc = *mut c_void;
@@ -67,12 +68,19 @@ struct WinMLEpInfoRaw {
 #[link(name = "kernel32")]
 extern "system" {
     fn LoadLibraryW(name: *const u16) -> Hmodule;
+    fn LoadLibraryExW(name: *const u16, file: *mut c_void, flags: u32) -> Hmodule;
     fn GetModuleHandleExW(flags: u32, address: *const u16, module: *mut Hmodule) -> i32;
     fn GetModuleFileNameW(module: Hmodule, filename: *mut u16, size: u32) -> u32;
     fn GetProcAddress(module: Hmodule, name: *const c_char) -> Farproc;
     fn GetCurrentPackageFullName(
         package_full_name_length: *mut u32,
         package_full_name: *mut u16,
+    ) -> i32;
+    fn GetCurrentPackageInfo(
+        flags: u32,
+        buffer_length: *mut u32,
+        buffer: *mut u8,
+        count: *mut u32,
     ) -> i32;
 }
 
@@ -84,6 +92,7 @@ extern "system" {
 
 struct BootstrapState {
     _module: Option<Hmodule>,
+    runtime_directory: PathBuf,
 }
 
 unsafe impl Send for BootstrapState {}
@@ -577,8 +586,22 @@ fn initialize_inner() -> Result<BootstrapState> {
         Some(module)
     };
 
-    let committed = ort::init_from("onnxruntime.dll")
-        .context("failed to load Windows ML ONNX Runtime from Windows App Runtime")?
+    // Windows 10's unpackaged DLL search can choose System32 before the paths
+    // added by bootstrap. Use only the resolved package graph, not an installed
+    // package scan (which could select a different runtime from bootstrap/MSIX).
+    let runtime_directory = runtime_directory(&current_graph_packages()?)?;
+    let ort_path = runtime_directory.join("onnxruntime.dll");
+    // DirectML is also delay-loaded by ORT. Pin the matching copy first; merely
+    // giving ORT an absolute path does not control later dependency searches.
+    load_runtime_library(&runtime_directory.join("DirectML.dll"))?;
+    load_runtime_library(&ort_path)?;
+    let committed = ort::init_from(&ort_path)
+        .with_context(|| {
+            format!(
+                "failed to load Windows ML ONNX Runtime from {}",
+                ort_path.display()
+            )
+        })?
         .commit();
     if !committed {
         bail!(
@@ -587,7 +610,131 @@ fn initialize_inner() -> Result<BootstrapState> {
     }
 
     drop(com);
-    Ok(BootstrapState { _module: module })
+    Ok(BootstrapState {
+        _module: module,
+        runtime_directory,
+    })
+}
+
+// ABI layouts from appmodel.h. The buffer returned by GetCurrentPackageInfo
+// contains PACKAGE_INFO[count] followed by the strings its pointers reference.
+#[repr(C)]
+struct PackageId {
+    reserved: u32,
+    processor_architecture: u32,
+    version: u64,
+    name: *mut u16,
+    publisher: *mut u16,
+    resource_id: *mut u16,
+    publisher_id: *mut u16,
+}
+
+#[repr(C)]
+struct PackageInfo {
+    reserved: u32,
+    flags: u32,
+    path: *mut u16,
+    full_name: *mut u16,
+    family_name: *mut u16,
+    id: PackageId,
+}
+
+struct GraphPackage {
+    family: OsString,
+    version: u64,
+    path: PathBuf,
+}
+
+fn current_graph_packages() -> Result<Vec<GraphPackage>> {
+    // HEAD | DIRECT | STATIC | DYNAMIC. Opt into dynamic dependencies explicitly:
+    // Windows App SDK hooks this API on Windows 10; Windows 11 provides it natively.
+    // STATIC also includes the declared framework dependency in Store/MSIX apps.
+    const FLAGS: u32 = 0x10 | 0x20 | 0x0008_0000 | 0x0010_0000;
+    let mut bytes = 0;
+    let mut count = 0;
+    let mut rc = unsafe { GetCurrentPackageInfo(FLAGS, &mut bytes, ptr::null_mut(), &mut count) };
+    loop {
+        if rc != ERROR_INSUFFICIENT_BUFFER {
+            bail!("failed to read Windows App Runtime package graph: GetCurrentPackageInfo returned 0x{rc:08X}");
+        }
+        // u64 storage provides PACKAGE_INFO alignment, unlike Vec<u8>. A host
+        // may add dependencies concurrently, so retry if the required size grows.
+        let mut buffer = vec![0u64; (bytes as usize).div_ceil(8)];
+        rc = unsafe {
+            GetCurrentPackageInfo(FLAGS, &mut bytes, buffer.as_mut_ptr().cast(), &mut count)
+        };
+        if rc == ERROR_INSUFFICIENT_BUFFER {
+            continue;
+        }
+        if rc != ERROR_SUCCESS {
+            bail!("failed to read Windows App Runtime package graph: GetCurrentPackageInfo returned 0x{rc:08X}");
+        }
+        if count as usize > buffer.len() * 8 / std::mem::size_of::<PackageInfo>() {
+            bail!("Windows App Runtime package graph returned an invalid package count");
+        }
+        let packages = unsafe {
+            std::slice::from_raw_parts(buffer.as_ptr().cast::<PackageInfo>(), count as usize)
+        };
+        return packages
+            .iter()
+            .map(|package| {
+                Ok(GraphPackage {
+                    family: graph_string(&buffer, package.family_name)?,
+                    version: package.id.version,
+                    path: PathBuf::from(graph_string(&buffer, package.path)?),
+                })
+            })
+            .collect();
+    }
+}
+
+fn graph_string(buffer: &[u64], value: *const u16) -> Result<OsString> {
+    let start = buffer.as_ptr() as usize;
+    let end = start + std::mem::size_of_val(buffer);
+    let address = value as usize;
+    if address < start || address >= end || !address.is_multiple_of(2) {
+        bail!("Windows App Runtime package graph returned an invalid string pointer");
+    }
+    // Bound the scan to the owning buffer, which remains alive until all graph
+    // strings have been copied. No raw package pointers escape this function.
+    let units = unsafe { std::slice::from_raw_parts(value, (end - address) / 2) };
+    let len = units
+        .iter()
+        .position(|&unit| unit == 0)
+        .context("Windows App Runtime package graph returned an unterminated string")?;
+    Ok(OsString::from_wide(&units[..len]))
+}
+
+fn runtime_directory(packages: &[GraphPackage]) -> Result<PathBuf> {
+    let package = packages
+        .iter()
+        .find(|package| {
+            package.family == WINDOWS_APP_RUNTIME_FAMILY
+                && package.version >= WINDOWS_APP_RUNTIME_MIN_VERSION
+        })
+        .context("Windows App Runtime 2.1 or newer was not found in the current package graph")?;
+    if !package.path.is_absolute() {
+        bail!("Windows App Runtime package graph returned a non-absolute runtime path");
+    }
+    Ok(package.path.clone())
+}
+
+fn load_runtime_library(path: &Path) -> Result<Hmodule> {
+    let name: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    // DLL_LOAD_DIR | SYSTEM32: resolve immediate dependencies beside this DLL
+    // and in Windows, without changing the DAW's process-wide search policy.
+    let module = unsafe { LoadLibraryExW(name.as_ptr(), ptr::null_mut(), 0x100 | 0x800) };
+    if module.is_null() {
+        return Err(std::io::Error::last_os_error()).with_context(|| {
+            format!(
+                "failed to load Windows ML runtime library {}",
+                path.display()
+            )
+        });
+    }
+    // Deliberately retain this reference for the process lifetime, like bootstrap
+    // and ORT. Sessions/catalog callbacks can outlive any one frontend worker.
+    Ok(module)
 }
 
 fn has_package_identity() -> Result<bool> {
@@ -897,13 +1044,15 @@ struct CatalogApi {
 
 impl CatalogApi {
     fn load() -> Result<Self> {
-        let module_name = wide("Microsoft.Windows.AI.MachineLearning.dll");
-        let module = unsafe { LoadLibraryW(module_name.as_ptr()) };
-        if module.is_null() {
-            bail!(
-                "failed to load Microsoft.Windows.AI.MachineLearning.dll from Windows App SDK Runtime"
-            );
-        }
+        let state = WINDOWS_ML_BOOTSTRAP
+            .get_or_init(initialize)
+            .as_ref()
+            .map_err(|err| anyhow!(err.clone()))?;
+        let module = load_runtime_library(
+            &state
+                .runtime_directory
+                .join("Microsoft.Windows.AI.MachineLearning.dll"),
+        )?;
         Ok(Self {
             _module: module,
             create: unsafe { load_symbol(module, b"WinMLEpCatalogCreate\0")? },
@@ -1008,13 +1157,133 @@ fn check_hr(hr: Hresult, what: &str) -> Result<()> {
     Ok(())
 }
 
-fn wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn graph_package(family: &str, version: u64, path: &str) -> GraphPackage {
+        GraphPackage {
+            family: family.into(),
+            version,
+            path: path.into(),
+        }
+    }
+
+    #[test]
+    fn runtime_selection_uses_graph_order_and_required_family_and_version() {
+        let packages = [
+            graph_package("Other.Framework_8wekyb3d8bbwe", u64::MAX, r"C:\other"),
+            graph_package(WINDOWS_APP_RUNTIME_FAMILY, 2u64 << 48, r"C:\old"),
+            graph_package(
+                WINDOWS_APP_RUNTIME_FAMILY,
+                WINDOWS_APP_RUNTIME_MIN_VERSION,
+                r"C:\selected",
+            ),
+            graph_package(WINDOWS_APP_RUNTIME_FAMILY, u64::MAX, r"C:\newer"),
+        ];
+        assert_eq!(
+            runtime_directory(&packages).unwrap(),
+            Path::new(r"C:\selected")
+        );
+        assert!(runtime_directory(&packages[..2]).is_err());
+        assert!(runtime_directory(&[]).is_err());
+        assert!(runtime_directory(&[graph_package(
+            WINDOWS_APP_RUNTIME_FAMILY,
+            WINDOWS_APP_RUNTIME_MIN_VERSION,
+            "relative",
+        )])
+        .is_err());
+    }
+
+    #[test]
+    fn graph_strings_are_copied_within_the_owning_buffer() {
+        let mut buffer = [u64::MAX; 2];
+        let units = unsafe { std::slice::from_raw_parts_mut(buffer.as_mut_ptr().cast::<u16>(), 8) };
+        units[..3].copy_from_slice(&[0x65E5, 0x672C, 0]);
+        let value = buffer.as_ptr().cast::<u16>();
+        assert_eq!(
+            graph_string(&buffer, value).unwrap(),
+            OsString::from("日本")
+        );
+        assert!(graph_string(&buffer, ptr::null()).is_err());
+        assert!(graph_string(&buffer, unsafe { value.add(8) }).is_err());
+        assert!(graph_string(&buffer, unsafe { value.add(3) }).is_err());
+    }
+
+    #[test]
+    #[ignore = "requires an installed Windows App Runtime and bootstrap DLL"]
+    fn runtime_ignores_executable_adjacent_onnxruntime() {
+        // Reproduce the name collision even on Windows 11: ort::init_from with
+        // a basename prefers an EXE-adjacent DLL. A renamed system DLL is valid
+        // to load but has no OrtGetApiBase, like the Windows 10 System32 stub.
+        // Run in a fresh process so another test cannot initialize ORT first.
+        let bootstrap = std::env::var_os(WINDOWS_ML_BOOTSTRAP_ENV)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| bundled_bootstrap_path().unwrap())
+            .canonicalize()
+            .unwrap();
+        let directory = std::env::temp_dir().join(format!(
+            "vc-rs-runtime-shadow-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let executable = directory.join("runtime-test.exe");
+        let decoy = directory.join("onnxruntime.dll");
+        std::fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
+        let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap());
+        std::fs::copy(system.join("System32/version.dll"), &decoy).unwrap();
+        let result = std::process::Command::new(&executable)
+            .env(WINDOWS_ML_BOOTSTRAP_ENV, bootstrap)
+            .args([
+                "--exact",
+                "windows_ml::tests::runtime_libraries_load_from_the_resolved_package_graph",
+                "--ignored",
+                "--nocapture",
+            ])
+            .output();
+        std::fs::remove_file(&decoy).unwrap();
+        std::fs::remove_file(&executable).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+        let result = result.unwrap();
+        assert!(
+            result.status.success(),
+            "child failed: {}\n{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+
+    #[test]
+    #[ignore = "requires an installed Windows App Runtime and bootstrap DLL"]
+    fn runtime_libraries_load_from_the_resolved_package_graph() {
+        ensure_initialized().unwrap();
+        let expected = runtime_directory(&current_graph_packages().unwrap()).unwrap();
+        let catalog = CatalogApi::load().unwrap();
+        for (name, symbol) in [
+            ("onnxruntime.dll", b"OrtGetApiBase\0".as_slice()),
+            ("DirectML.dll", b"DMLCreateDevice\0".as_slice()),
+            (
+                "Microsoft.Windows.AI.MachineLearning.dll",
+                b"WinMLEpCatalogCreate\0".as_slice(),
+            ),
+        ] {
+            let module = load_runtime_library(&expected.join(name)).unwrap();
+            assert!(!unsafe { GetProcAddress(module, symbol.as_ptr().cast()) }.is_null());
+            let mut path = vec![0u16; 32768];
+            let len = unsafe { GetModuleFileNameW(module, path.as_mut_ptr(), path.len() as u32) };
+            assert!(len > 0 && (len as usize) < path.len());
+            let loaded = PathBuf::from(OsString::from_wide(&path[..len as usize]));
+            assert_eq!(loaded, expected.join(name));
+            eprintln!("Windows ML loaded {}", loaded.display());
+        }
+        assert!(!catalog._module.is_null());
+        // A real ORT environment is also created; the tiny-RVC tests cover inference.
+        Environment::current().unwrap();
+    }
 
     #[test]
     fn bundled_bootstrap_is_next_to_the_containing_module() {

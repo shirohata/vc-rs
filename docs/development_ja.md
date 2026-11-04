@@ -125,3 +125,29 @@ cargo test --workspace model_rvc::tests::vc_convert_ort -- --nocapture
 テスト3件が実際に実行されたことを確認してください。`cargo test -p vc-core` だけでは
 feature 構成が変わり、該当テストが0件のまま成功することがあります。
 CPU のみのテスト成功は Windows ML の検証を代替しません。
+
+### Windows 10 で System32 の ONNX Runtime が選ばれる場合
+
+Issue [#2](https://github.com/shirohata/vc-rs/issues/2) の
+`onnxruntime.dll does not export OrtGetApiBase` は、Windows 10 の通常の DLL
+検索が Windows App Runtime より先に System32 の同名 DLL を選ぶことで発生します。
+共有ローダーは bootstrap 後のパッケージグラフ（MSIX の静的依存と、ZIP/VST3 の
+動的依存）から Windows App Runtime 2.1 以降の場所を取得し、ONNX Runtime、
+DirectML、Windows ML カタログ DLL を同じパッケージの絶対パスで読み込みます。
+インストール済みパッケージの最新版を独自に選んだり、ホストの DLL 検索設定を
+変更したりしません。System32 の DLL を削除・置換する必要はありません。
+
+bootstrap DLL の環境変数を設定した開発シェルでは、次で実際のロード先と
+`OrtGetApiBase` / カタログ API のエクスポートを検証できます。
+
+```powershell
+. scripts/activate.ps1
+. scripts/rustflags.ps1
+cargo test -p vc-core --no-default-features --features windowsml windows_ml::tests::runtime_ -- --ignored --nocapture
+```
+
+実行ファイルの隣に `OrtGetApiBase` を持たない同名 DLL を置く回帰テストも、
+一時ディレクトリ内の子プロセスで実行します。通常のロジックテストに加え、
+これらのテストと上記の tiny-RVC 推論テストを実行して
+ください。Windows 10 の報告環境での `vc-rs.exe doctor`、MSIX の静的依存、
+DAW 内の VST3 ロードは、それぞれの環境での追加確認が必要です。
