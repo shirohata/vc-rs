@@ -145,6 +145,12 @@ and the worker clears model context, smoothing, and rate adapters before publish
 its ready acknowledgement. Old queued input and in-flight output cannot enter the
 new timeline; the realtime callback uses only preallocated storage, rings and atomics.
 
+Conversion and streaming-reset errors invalidate that audio generation and release
+the failed pipeline, while keeping the worker available for explicit Load / Reload.
+Native file-picker threads are owned jointly by the plugin and editor and joined
+at final teardown, so closing an editor cannot leave plugin code running after
+its library is unloaded. Neither path adds work to the realtime callback.
+
 Offline VST3 callbacks wait for that same worker and consume exactly the converted
 samples due after one input hop of host scheduling delay. This waiting is confined
 to offline mode; realtime callbacks retain bounded drop/silence behavior. The worker

@@ -23,6 +23,8 @@ use crate::params::VcRvcParams;
 use crate::plugin_identity;
 use crate::runtime::{PluginStatus, ReloadWaker, MAX_CHUNK_MS, MIN_CHUNK_MS};
 
+pub(crate) mod pickers;
+
 /// Granularity for the millisecond sliders.
 const MS_STEP: u32 = 10;
 const MIN_EXTRA_CONVERT_MS: u32 = PLUGIN_MIN_EXTRA_CONVERT_MS;
@@ -50,6 +52,7 @@ pub struct EditorState {
     gpu_devices: Arc<Mutex<GpuDeviceDiscovery>>,
     gpu_discovery_thread: Option<std::thread::JoinHandle<()>>,
     openvino_devices: vc_core::openvino::DeviceDiscovery,
+    model_pickers: Arc<pickers::ModelPickers>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -65,6 +68,7 @@ pub fn create(
     dirty: Arc<AtomicBool>,
     status: Arc<Mutex<PluginStatus>>,
     reload_waker: Arc<ReloadWaker>,
+    model_pickers: Arc<pickers::ModelPickers>,
 ) -> Option<Box<dyn Editor>> {
     let egui_state = params.editor_state.clone();
     let (gpu_devices, gpu_discovery_thread) = spawn_gpu_device_discovery();
@@ -77,6 +81,7 @@ pub fn create(
             dirty,
             status,
             reload_waker,
+            model_pickers,
             gpu_devices,
             gpu_discovery_thread,
             openvino_devices: vc_core::openvino::DeviceDiscovery::default(),
@@ -472,7 +477,7 @@ enum ModelKind {
     F0,
 }
 
-/// Open the native file dialog on a separate thread and stage the chosen path
+/// Open the native file dialog on a plugin-owned thread and stage the chosen path
 /// into the persisted settings (marking it dirty; not applied until the user
 /// clicks Load / Reload). Running the modal dialog off the GUI thread is
 /// required: rfd pumps a nested message loop, and doing that inside the
@@ -481,7 +486,7 @@ enum ModelKind {
 fn spawn_picker(state: &EditorState, kind: ModelKind) {
     let params = state.params.clone();
     let dirty = state.dirty.clone();
-    std::thread::spawn(move || {
+    let result = state.model_pickers.spawn(move || {
         if let Some(path) = rfd::FileDialog::new()
             .add_filter("ONNX model", &["onnx"])
             .pick_file()
@@ -496,6 +501,12 @@ fn spawn_picker(state: &EditorState, kind: ModelKind) {
             dirty.store(true, Ordering::SeqCst);
         }
     });
+    if let Err(error) = result {
+        *state.status.lock().unwrap() = PluginStatus {
+            summary: "file picker failed".into(),
+            detail: Some(error.to_string()),
+        };
+    }
 }
 
 fn spawn_gpu_device_discovery() -> (

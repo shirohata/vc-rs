@@ -23,7 +23,7 @@ use vc_core::Provider;
 pub const CONFIG_ENV: &str = "VC_RS_VST3_CONFIG";
 pub const PLUGIN_MIN_EXTRA_CONVERT_MS: u32 = 100;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 // Lenient: unknown/legacy keys (e.g. `pitch_shift`, now a DAW parameter) are
 // ignored rather than rejected, so older config files keep parsing.
 #[serde(default)]

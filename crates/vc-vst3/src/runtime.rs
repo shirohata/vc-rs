@@ -758,14 +758,16 @@ impl WorkerCtx {
             let requested_generation = self.state.generation.load(Ordering::Acquire);
             if requested_generation != generation {
                 input_acc.clear();
-                if let Some(converter) = converter.as_mut() {
-                    if let Err(err) = converter.reset() {
-                        self.set_error("stream reset failed", format!("{err:#}"));
-                        break;
+                if let Some(current) = converter.as_mut() {
+                    if let Err(err) = current.reset() {
+                        generation = self.fail_conversion("stream reset failed", err);
+                        converter = None;
+                        continue;
                     }
-                    if let Err(err) = self.prepare_offline(converter.as_mut(), &zero_input) {
-                        self.set_error("offline preroll failed", format!("{err:#}"));
-                        break;
+                    if let Err(err) = self.prepare_offline(current.as_mut(), &zero_input) {
+                        generation = self.fail_conversion("offline preroll failed", err);
+                        converter = None;
+                        continue;
                     }
                 }
                 generation = requested_generation;
@@ -810,7 +812,7 @@ impl WorkerCtx {
             }
 
             let chunk = &input_acc[..chunk_samples];
-            let Some(converter) = converter.as_mut() else {
+            let Some(current) = converter.as_mut() else {
                 // No pipeline: discard input and stay silent.
                 input_acc.clear();
                 continue;
@@ -819,18 +821,19 @@ impl WorkerCtx {
             // Apply automatable parameters before converting this chunk. Builds
             // the same `LiveParams` the standalone worker does, so both drive the
             // single `apply_live` entry point rather than diverging set_* calls.
-            converter.apply_live(&self.live_params());
+            current.apply_live(&self.live_params());
 
-            if let Err(err) = converter.process(chunk, self.sample_rate, &mut chunk_out) {
-                nice_plug::nice_error!("vc-vst3: chunk conversion failed: {err:#}");
-                self.set_error("chunk conversion failed", format!("{err:#}"));
-                break;
+            if let Err(err) = current.process(chunk, self.sample_rate, &mut chunk_out) {
+                generation = self.fail_conversion("chunk conversion failed", err);
+                converter = None;
+                input_acc.clear();
+                continue;
             }
             // The shared converter now knows the model's native rate, actual
             // capped overlap, and both rate-adapter delays. Report these once
             // available; the callback only relays this precomputed atomic value.
             // SOLA's bounded search can advance audio within that nominal hold.
-            let content_delay = converter.content_delay();
+            let content_delay = current.content_delay();
             self.latency.store(
                 u32::try_from(chunk_samples.saturating_add(content_delay)).unwrap_or(u32::MAX),
                 Ordering::Relaxed,
@@ -864,6 +867,26 @@ impl WorkerCtx {
                 thread::park_timeout(Duration::from_millis(100));
             }
         }
+    }
+
+    fn fail_conversion(&self, summary: &str, error: anyhow::Error) -> u32 {
+        nice_plug::nice_error!("vc-vst3: {summary}: {error:#}");
+        self.set_error(summary, format!("{error:#}"));
+        // Silence every queued sample from the failed timeline, and release
+        // offline waiters. Keep this worker alive to service explicit Reload;
+        // retain the last successful settings for host-driven reinitialization.
+        self.state.has_converter.store(false, Ordering::Release);
+        let generation = self
+            .state
+            .generation
+            .fetch_add(1, Ordering::AcqRel)
+            .wrapping_add(1);
+        self.state
+            .ready_generation
+            .store(generation, Ordering::Release);
+        self.dirty.store(true, Ordering::SeqCst);
+        self.state.notify_offline();
+        generation
     }
 
     fn load_conversion(
@@ -1144,6 +1167,230 @@ mod tests {
 
     const RATE: u32 = 16_000;
     const HOP: usize = 320;
+
+    #[derive(Clone, Copy)]
+    enum FailurePoint {
+        Process,
+        Reset,
+        OfflinePrime,
+    }
+
+    struct FailingConversion {
+        point: FailurePoint,
+        primes: usize,
+    }
+
+    impl WorkerConversion for FailingConversion {
+        fn apply_live(&mut self, _: &LiveParams) {}
+        fn reset(&mut self) -> anyhow::Result<()> {
+            if matches!(self.point, FailurePoint::Reset) {
+                anyhow::bail!("injected reset failure");
+            }
+            Ok(())
+        }
+        fn prime(&mut self, _: &[f32], _: u32) -> anyhow::Result<()> {
+            self.primes += 1;
+            if self.primes > 1 && matches!(self.point, FailurePoint::OfflinePrime) {
+                anyhow::bail!("injected preroll failure");
+            }
+            Ok(())
+        }
+        fn process(&mut self, _: &[f32], _: u32, _: &mut Vec<f32>) -> anyhow::Result<ChunkStats> {
+            anyhow::bail!("injected conversion failure");
+        }
+        fn content_delay(&self) -> usize {
+            0
+        }
+    }
+
+    #[test]
+    fn conversion_errors_release_audio_and_keep_reload_responsive() {
+        for (point, mode, message) in [
+            (
+                FailurePoint::Process,
+                ProcessMode::Offline,
+                "chunk conversion failed",
+            ),
+            (
+                FailurePoint::Process,
+                ProcessMode::Realtime,
+                "chunk conversion failed",
+            ),
+            (
+                FailurePoint::Reset,
+                ProcessMode::Offline,
+                "stream reset failed",
+            ),
+            (
+                FailurePoint::OfflinePrime,
+                ProcessMode::Offline,
+                "offline preroll failed",
+            ),
+        ] {
+            let params = configured_params(0, 0, "sola");
+            let applied = params.settings.read().unwrap().clone();
+            let reload = Arc::new(AtomicBool::new(false));
+            let loading = Arc::new(AtomicBool::new(false));
+            let dirty = Arc::new(AtomicBool::new(false));
+            let status = Arc::new(Mutex::new(PluginStatus::new("test")));
+            let waker = Arc::new(ReloadWaker::default());
+            let mut runtime = PluginRuntime::start_inner(
+                params.clone(),
+                reload.clone(),
+                loading.clone(),
+                dirty.clone(),
+                status.clone(),
+                &waker,
+                RATE,
+                HOP * 2,
+                mode,
+                None,
+                Some(Box::new(FailingConversion { point, primes: 0 })),
+            );
+            wait_for(|| {
+                runtime.state.has_converter.load(Ordering::Acquire)
+                    && runtime.state.ready_generation.load(Ordering::Acquire) == 1
+            });
+            if matches!(point, FailurePoint::Process) {
+                let mut audio = [0.25; HOP * 2];
+                runtime.process_block(&mut [&mut audio]);
+                assert_eq!(audio, [0.0; HOP * 2]);
+            } else {
+                runtime.reset();
+            }
+            wait_for(|| {
+                !runtime.state.has_converter.load(Ordering::Acquire)
+                    && dirty.load(Ordering::Acquire)
+                    && runtime.state.ready_generation.load(Ordering::Acquire)
+                        == runtime.state.generation.load(Ordering::Acquire)
+            });
+            assert!(runtime.running.load(Ordering::Acquire));
+            assert!(dirty.load(Ordering::Acquire));
+            assert!(runtime.state.generation.load(Ordering::Acquire) > 1);
+            assert_eq!(status.lock().unwrap().summary, message);
+            assert!(status
+                .lock()
+                .unwrap()
+                .detail
+                .as_ref()
+                .unwrap()
+                .contains("injected"));
+            assert_eq!(runtime.applied_settings().unwrap(), applied);
+            let mut silent = [0.5; HOP * 2];
+            runtime.process_block(&mut [&mut silent]);
+            assert_eq!(silent, [0.0; HOP * 2]);
+
+            // Removing a model is a valid explicit reload with no inference.
+            // It must be handled by the same worker after the backend error,
+            // clearing both the loading flag and the previous load authority.
+            params.settings.write().unwrap().model.clear();
+            loading.store(true, Ordering::SeqCst);
+            reload.store(true, Ordering::SeqCst);
+            waker.wake();
+            wait_for(|| !loading.load(Ordering::Acquire));
+            assert!(!reload.load(Ordering::Acquire));
+            assert_eq!(status.lock().unwrap().summary, "no models configured");
+            assert!(!dirty.load(Ordering::Acquire));
+            assert!(runtime.applied_settings().is_none());
+        }
+    }
+
+    #[test]
+    #[ignore = "requires VC_RS_DIAG_MODEL/EMBEDDER/F0/PROVIDER and the selected backend runtime"]
+    fn reload_real_models_after_conversion_error() {
+        let settings = PluginConfig {
+            model: std::env::var_os("VC_RS_DIAG_MODEL")
+                .expect("voice model")
+                .into(),
+            embedder: std::env::var_os("VC_RS_DIAG_EMBEDDER")
+                .expect("embedder")
+                .into(),
+            f0_model: std::env::var_os("VC_RS_DIAG_F0").expect("F0 model").into(),
+            provider: std::env::var("VC_RS_DIAG_PROVIDER").expect("explicit provider"),
+            ..Default::default()
+        };
+        let rate = 48_000;
+        let hop = settings.validated_chunk_samples(rate).unwrap();
+        let params = Arc::new(VcRvcParams::default());
+        *params.settings.write().unwrap() = settings.clone();
+        let reload = Arc::new(AtomicBool::new(false));
+        let loading = Arc::new(AtomicBool::new(false));
+        let dirty = Arc::new(AtomicBool::new(false));
+        let status = Arc::new(Mutex::new(PluginStatus::new("test")));
+        let waker = Arc::new(ReloadWaker::default());
+        let mut runtime = PluginRuntime::start_inner(
+            params,
+            reload.clone(),
+            loading.clone(),
+            dirty.clone(),
+            status.clone(),
+            &waker,
+            rate,
+            hop * 2,
+            ProcessMode::Offline,
+            None,
+            Some(Box::new(FailingConversion {
+                point: FailurePoint::Process,
+                primes: 0,
+            })),
+        );
+        wait_for(|| {
+            runtime.state.has_converter.load(Ordering::Acquire)
+                && runtime.state.ready_generation.load(Ordering::Acquire) == 1
+        });
+        runtime.process_block(&mut [&mut vec![0.25; hop * 2]]);
+        wait_for(|| {
+            !runtime.state.has_converter.load(Ordering::Acquire) && dirty.load(Ordering::Acquire)
+        });
+        assert_eq!(status.lock().unwrap().summary, "chunk conversion failed");
+        let worker = runtime.worker_thread.id();
+        loading.store(true, Ordering::SeqCst);
+        reload.store(true, Ordering::SeqCst);
+        waker.wake();
+        let deadline = Instant::now() + Duration::from_secs(180);
+        let mut previous_status = String::new();
+        while loading.load(Ordering::Acquire) {
+            let current = status.lock().unwrap().summary.clone();
+            if current != previous_status {
+                println!("reload recovery: {current}");
+                previous_status = current;
+            }
+            assert!(Instant::now() < deadline, "model reload timed out");
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            runtime.state.has_converter.load(Ordering::Acquire),
+            "{:?}",
+            status.lock().unwrap()
+        );
+        assert_eq!(runtime.worker_thread.id(), worker);
+        assert!(!dirty.load(Ordering::Acquire));
+        assert_eq!(runtime.applied_settings().unwrap(), settings);
+
+        // No devices or recordings: exercise real inference on a fixed harmonic
+        // waveform through the same offline host callback after explicit Reload.
+        for block in 0..3 {
+            let mut audio: Vec<f32> = (0..hop * 2)
+                .map(|i| {
+                    let phase = 2.0 * std::f32::consts::PI * 220.0 * (block * hop * 2 + i) as f32
+                        / rate as f32;
+                    0.1 * phase.sin() + 0.03 * (phase * 2.0).sin()
+                })
+                .collect();
+            runtime.process_block(&mut [&mut audio]);
+            assert!(audio.iter().all(|sample| sample.is_finite()));
+            assert!(
+                runtime.state.has_converter.load(Ordering::Acquire),
+                "{:?}",
+                status.lock().unwrap()
+            );
+        }
+        println!(
+            "{} recovered on the same worker; real audio is finite; latency={}",
+            settings.provider,
+            runtime.current_latency()
+        );
+    }
 
     #[derive(Default)]
     pub(super) struct TestControl {

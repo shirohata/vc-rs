@@ -68,6 +68,10 @@ pub struct VcRvcPlugin {
     /// Successful explicit Load survives host deactivate/reinitialize, but is
     /// never persisted or inferred merely from a restored project's model paths.
     applied_settings: Option<PluginConfig>,
+    config_seed_checked: bool,
+    /// Plugin and editor share ownership, but picker threads never own this
+    /// tracker: its final host-side drop joins them before DLL unload.
+    model_pickers: Arc<editor::pickers::ModelPickers>,
 }
 
 impl Default for VcRvcPlugin {
@@ -81,6 +85,19 @@ impl Default for VcRvcPlugin {
             status: Arc::new(Mutex::new(PluginStatus::new("idle"))),
             reload_waker: Arc::new(ReloadWaker::default()),
             applied_settings: None,
+            config_seed_checked: false,
+            model_pickers: Arc::new(editor::pickers::ModelPickers::default()),
+        }
+    }
+}
+
+impl VcRvcPlugin {
+    fn seed_settings(&mut self, discover: impl FnOnce() -> PluginConfig) {
+        if !self.config_seed_checked {
+            self.config_seed_checked = true;
+            if self.runtime.is_none() && self.applied_settings.is_none() {
+                self.params.settings.seed_if_pristine(discover);
+            }
         }
     }
 }
@@ -128,6 +145,7 @@ impl Plugin for VcRvcPlugin {
             self.dirty.clone(),
             self.status.clone(),
             self.reload_waker.clone(),
+            self.model_pickers.clone(),
         )
     }
 
@@ -141,18 +159,9 @@ impl Plugin for VcRvcPlugin {
         // before any ONNX Runtime session is created on the worker thread.
         dll_path::add_plugin_dir_to_dll_search_path();
 
-        // Bootstrap: if the persisted settings have no models yet (fresh
-        // instance), seed them from the headless TOML config when present. A
-        // restored project already has its own settings and is left untouched.
-        if self.runtime.is_none()
-            && self.applied_settings.is_none()
-            && !self.params.settings.read().unwrap().has_models()
-        {
-            let seed = PluginConfig::discover();
-            if seed.has_models() {
-                *self.params.settings.write().unwrap() = seed;
-            }
-        }
+        // Only untouched fresh instances consult the optional seed, once. A
+        // saved project can intentionally contain empty or partial model paths.
+        self.seed_settings(PluginConfig::discover);
 
         let sample_rate = buffer_config.sample_rate.round() as u32;
         let max_block = buffer_config.max_buffer_size as usize;
@@ -279,6 +288,63 @@ mod tests {
             },
             &mut TestInitContext
         ));
+    }
+
+    #[test]
+    fn saved_empty_partial_and_complete_settings_always_override_config_seed() {
+        let complete = configured_plugin(0).params.settings.read().unwrap().clone();
+        for saved in [
+            PluginConfig::default(),
+            PluginConfig {
+                model: "saved-voice.onnx".into(),
+                smoother: "psola".into(),
+                ..Default::default()
+            },
+            complete.clone(),
+        ] {
+            let original = VcRvcPlugin::default();
+            *original.params.settings.write().unwrap() = saved.clone();
+            let serialized = original.params.serialize_fields();
+            let mut restored = VcRvcPlugin::default();
+            restored.params.deserialize_fields(&serialized);
+            restored.seed_settings(|| panic!("restored projects must not read the config seed"));
+            assert_eq!(*restored.params.settings.read().unwrap(), saved);
+        }
+    }
+
+    #[test]
+    fn fresh_seed_is_checked_once_and_never_overwrites_edits_or_racing_restore() {
+        let seed = configured_plugin(0).params.settings.read().unwrap().clone();
+        let mut fresh = VcRvcPlugin::default();
+        fresh.seed_settings(|| seed.clone());
+        assert_eq!(*fresh.params.settings.read().unwrap(), seed);
+        fresh.params.settings.write().unwrap().model.clear();
+        fresh.seed_settings(|| panic!("host reinitialization must not re-read the seed"));
+        assert!(fresh
+            .params
+            .settings
+            .read()
+            .unwrap()
+            .model
+            .as_os_str()
+            .is_empty());
+
+        let mut edited = VcRvcPlugin::default();
+        edited.params.settings.write().unwrap().smoother = "psola".into();
+        edited.seed_settings(|| panic!("editor settings must be preserved"));
+        assert_eq!(edited.params.settings.read().unwrap().smoother, "psola");
+
+        let mut racing = VcRvcPlugin::default();
+        let params = racing.params.clone();
+        let saved = params.serialize_fields();
+        racing.seed_settings(|| {
+            params.deserialize_fields(&saved);
+            seed
+        });
+        assert_eq!(
+            *racing.params.settings.read().unwrap(),
+            PluginConfig::default()
+        );
     }
 
     #[test]
