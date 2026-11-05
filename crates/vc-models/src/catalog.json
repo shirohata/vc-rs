@@ -4,22 +4,22 @@
     "version": "0.1.0",
     "label": "ContentVec (RVC fairseq)",
     "license": "MIT",
-    "url": null,
+    "url": "https://github.com/shirohata/rvc-embedders-onnx/releases/download/v0.1.0/vc-embedders-0.1.0-rvc-fairseq-base.zip",
     "archive": {
       "name": "vc-embedders-0.1.0-rvc-fairseq-base.zip",
-      "size": 231022771,
-      "sha256": "c6b681d311daf662c122c4fe21568323635d0458956c88cb83109330c2675c1a"
+      "size": 231023923,
+      "sha256": "242b9fdec3d4e350158a5493094a9bc4cdda09ce15d2da44f7caa377cdb79377"
     },
     "members": [
       {
         "name": "README.md",
-        "size": 840,
-        "sha256": "d9bcdcf1bed5f5948c5c2a6a068bafc49ab7698f88a14b05de1ac2a06595852a"
+        "size": 1943,
+        "sha256": "71735e834fdc3c23da9b8ad90bab42c9ae7ed45c0cddc711d023f30c1a7b7353"
       },
       {
-        "name": "NOTICE.md",
-        "size": 1274,
-        "sha256": "a8aaf51fc287dd92b52adfeaf46ff7da2242bff6b391252290a376c205a4f906"
+        "name": "README.ja.md",
+        "size": 2278,
+        "sha256": "35b3b2555107c316cab678ecb4c8317c3c34e69286cd872423ea66d4fcf469d6"
       },
       {
         "name": "LICENSE.txt",
@@ -73,22 +73,22 @@
     "version": "0.1.0",
     "label": "ContentVec (RVC Transformers)",
     "license": "MIT",
-    "url": null,
+    "url": "https://github.com/shirohata/rvc-embedders-onnx/releases/download/v0.1.0/vc-embedders-0.1.0-rvc-hubert-base.zip",
     "archive": {
       "name": "vc-embedders-0.1.0-rvc-hubert-base.zip",
-      "size": 231022764,
-      "sha256": "055ea81ed4e52460f88ebbdcec31b81e0377a8f3757f5ed089d10b289cdd8811"
+      "size": 231023933,
+      "sha256": "ff6892d02904f923922d978f15a24e9a20951912dfcb6d03fca4abcc43eca6b8"
     },
     "members": [
       {
         "name": "README.md",
-        "size": 839,
-        "sha256": "82f38626e3032971224ad103b4300d299411ee0ba47b1b1aad56067c122f0a47"
+        "size": 1948,
+        "sha256": "8922de2235823f8bf07c3ab80901ac00d0333e6140653d641c3a23c11be84a89"
       },
       {
-        "name": "NOTICE.md",
-        "size": 1273,
-        "sha256": "f039e19237814222f073ffb31afc0d0226bf5c92bd7dbf614aa76c3a532e2a60"
+        "name": "README.ja.md",
+        "size": 2283,
+        "sha256": "954192d2522593f9604fe49c86eaed29a864d0730bc083e1fd1bd318c02fc439"
       },
       {
         "name": "LICENSE.txt",
@@ -142,22 +142,22 @@
     "version": "0.1.0",
     "label": "ContentVec (Applio)",
     "license": "MIT",
-    "url": null,
+    "url": "https://github.com/shirohata/rvc-embedders-onnx/releases/download/v0.1.0/vc-embedders-0.1.0-applio-contentvec.zip",
     "archive": {
       "name": "vc-embedders-0.1.0-applio-contentvec.zip",
-      "size": 230560362,
-      "sha256": "f0475096332486193ccc688d040fc2e8428353243c4530d24dd55926a86a8b9b"
+      "size": 230561465,
+      "sha256": "fe3ad19eaa04a3a0556c09cdbc858c75aff822ac4b332aa5bd3bf6de6f08c768"
     },
     "members": [
       {
         "name": "README.md",
-        "size": 856,
-        "sha256": "620bd8caffee73b151956abb3eb35442ff337fef9cc020961f87a0f0fff5358e"
+        "size": 1883,
+        "sha256": "89ffdacdb49d0b8992929e1b066ab39b526b51d100c8839f03b539b0f1d0a139"
       },
       {
-        "name": "NOTICE.md",
-        "size": 1260,
-        "sha256": "6b24c2d689e414599cb86537327eb769de58bd3badc26e71f9f78decefecbe39"
+        "name": "README.ja.md",
+        "size": 2212,
+        "sha256": "22f4223ad70b82d244adff569ae867e509f0fe4df71f288c7508e7dc6d5aa141"
       },
       {
         "name": "LICENSE.txt",
@@ -205,22 +205,22 @@
     "version": "0.1.0",
     "label": "Chinese HuBERT (Applio)",
     "license": "MIT",
-    "url": null,
+    "url": "https://github.com/shirohata/rvc-embedders-onnx/releases/download/v0.1.0/vc-embedders-0.1.0-applio-chinese-hubert-base.zip",
     "archive": {
       "name": "vc-embedders-0.1.0-applio-chinese-hubert-base.zip",
-      "size": 230817727,
-      "sha256": "56436af1f0f2d2da0f4a12c2b8eb71ff9aa1c553f119c89ffa2fe945a73bd498"
+      "size": 230818778,
+      "sha256": "a0b61e93ec136fd287a7a18ee7199170e89ec07dfc783a600af3dfdc8d0759a0"
     },
     "members": [
       {
         "name": "README.md",
-        "size": 861,
-        "sha256": "4c59406d4d5dc6a131d3d049958426a233446ba3a5a0854672a4fb9257b379d5"
+        "size": 1850,
+        "sha256": "4802c5506d10157a1cd97911ff9b33af76c40aff823686886e576fda6f2ddad3"
       },
       {
-        "name": "NOTICE.md",
-        "size": 1277,
-        "sha256": "90223e504bdf7ba8fe0c36e18c0f4d3b2dc217e7bdf8237dc9c0d6370b34e835"
+        "name": "README.ja.md",
+        "size": 2203,
+        "sha256": "61dc78e8233a506e0bcd27743fbd830a034d938d3efa09ee442393d5582e26cd"
       },
       {
         "name": "LICENSE.txt",
@@ -272,22 +272,22 @@
     "version": "0.1.0",
     "label": "Korean HuBERT (Applio)",
     "license": "Apache-2.0",
-    "url": null,
+    "url": "https://github.com/shirohata/rvc-embedders-onnx/releases/download/v0.1.0/vc-embedders-0.1.0-applio-korean-hubert-base.zip",
     "archive": {
       "name": "vc-embedders-0.1.0-applio-korean-hubert-base.zip",
-      "size": 351370450,
-      "sha256": "b6ba13fbb8ae2644cd87258d6939bcb2255e5bdf66d3250a532ebd71863bdeb8"
+      "size": 351371458,
+      "sha256": "b9213c70c5aa848b4d0daec651869535619d4a16aead19edf111eb36f7e12b80"
     },
     "members": [
       {
         "name": "README.md",
-        "size": 868,
-        "sha256": "5ca2cbc0ab4e35f30c83969ece42ef4014fc27f2fc45008e38b22ae0b305ee06"
+        "size": 1767,
+        "sha256": "e326396d130195576abc0e83ce3356c33ff41187527983e00054e47c8fd5ef87"
       },
       {
-        "name": "NOTICE.md",
-        "size": 1165,
-        "sha256": "f4c82c0b6f355c6508f32080af6cd4b0237594a7b519d86a300023537e38bb1a"
+        "name": "README.ja.md",
+        "size": 2097,
+        "sha256": "e24e92512fa44cda57df96a878246cd37e54073b998eb238ee524dd29fdc8356"
       },
       {
         "name": "LICENSE.txt",
@@ -339,22 +339,22 @@
     "version": "0.1.0",
     "label": "SPIN (Applio)",
     "license": "MIT",
-    "url": null,
+    "url": "https://github.com/shirohata/rvc-embedders-onnx/releases/download/v0.1.0/vc-embedders-0.1.0-applio-spin.zip",
     "archive": {
       "name": "vc-embedders-0.1.0-applio-spin.zip",
-      "size": 287613968,
-      "sha256": "79622c23ae5bbbe93544fc85157350567ec99cc8205c3edb3f8d610894e8e217"
+      "size": 287615059,
+      "sha256": "50bac61da561626f3f5d793c2c611f4779ea6a5640b712097cd6e11daf1d49d4"
     },
     "members": [
       {
         "name": "README.md",
-        "size": 850,
-        "sha256": "5489820514aa21288d6f6830a45f2ceab8a8e70354e36f83c2c656999e426f39"
+        "size": 2094,
+        "sha256": "47767fa998cdc33470e4ea4e85ccd7cb6dce3fe9e9289e3c7dbc542969a3f135"
       },
       {
-        "name": "NOTICE.md",
-        "size": 1677,
-        "sha256": "c2763abd95b20f9824abbe9bc842e0cbaec5f8ed33f6e87a91df24fabbf74346"
+        "name": "README.ja.md",
+        "size": 2444,
+        "sha256": "5f04b478e0c7143198410c97d3232216639e9d146f8c6d3e805ba09b4d900bef"
       },
       {
         "name": "LICENSE.txt",
@@ -406,22 +406,22 @@
     "version": "0.1.0",
     "label": "SPIN v2 (Applio)",
     "license": "MIT",
-    "url": null,
+    "url": "https://github.com/shirohata/rvc-embedders-onnx/releases/download/v0.1.0/vc-embedders-0.1.0-applio-spin-v2.zip",
     "archive": {
       "name": "vc-embedders-0.1.0-applio-spin-v2.zip",
-      "size": 306799493,
-      "sha256": "9e8d8c5f3237e632bc7fac5dd3fe8ba7db185a8ca4eaf8cc5768ba8873467692"
+      "size": 306800583,
+      "sha256": "616faea4ced7fea61c14c6e60797fb1605d4f188c1b1ade00a6606c5be6d9b93"
     },
     "members": [
       {
         "name": "README.md",
-        "size": 853,
-        "sha256": "d31781669870c4f1cd7b80b7454e7337adacc34fe0f1a710f6c7fd36ce7da05f"
+        "size": 2097,
+        "sha256": "aff4a88a19e5946ca7d81204ea2d541dcf2eb77f83300220f9d62ae32aea5ad6"
       },
       {
-        "name": "NOTICE.md",
-        "size": 1680,
-        "sha256": "c3ddf6bc89c4bcda498c21a265846d07ac9de065b25e95b6252e34f11e60ebfa"
+        "name": "README.ja.md",
+        "size": 2447,
+        "sha256": "65ebbdae0accb28dd860296ba5d0c315109269ab80736966a5e10d76e8d62543"
       },
       {
         "name": "LICENSE.txt",

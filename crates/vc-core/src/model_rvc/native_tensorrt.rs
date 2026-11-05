@@ -1581,6 +1581,7 @@ mod tests {
     #[ignore = "requires NVIDIA CUDA/TensorRT SDK and vc-tensorrt-builder"]
     fn native_tensorrt_defers_capture_until_complete_inputs() {
         use crate::model_rvc::tests::{legacy_streaming_tiny, with_temp_model, TinyPhaseOutput};
+        use crate::model_rvc::time_state::{RvcTimeState, StreamParams};
 
         let bytes = legacy_streaming_tiny(TinyPhaseOutput::PerSample);
         with_temp_model("native-staged-inputs", &bytes, |path| {
@@ -1683,12 +1684,23 @@ mod tests {
                 assert!(!message.text().contains("CUDA graph enabled"));
             };
             reject_missing_stream_inputs(&engine);
+            let mut state = RvcTimeState::new(
+                None,
+                Some(StreamParams {
+                    frame_hop: 400,
+                    sample_rate: 40_000,
+                    ..StreamParams::default()
+                }),
+            );
+            assert!(engine.stream.as_ref().unwrap().phase_out_name.is_some());
             let mut previous = None;
-            for (call, phase_in) in [0.125, 0.375].into_iter().enumerate() {
+            for call in 0..3 {
+                state.roll(2, FRAMES);
+                let phase_in = state.phase_in().unwrap();
                 let noise: Vec<f32> = (0..FRAMES * 400)
                     .map(|i| ((i + call * 37) as f32 * 0.13).sin() * 0.7)
                     .collect();
-                let mut phase = Vec::new();
+                let mut phase = vec![0.9; FRAMES * 400];
                 let started = std::time::Instant::now();
                 let audio = engine
                     .infer(
@@ -1698,7 +1710,7 @@ mod tests {
                         0,
                         Some(&rnd),
                         Some(&noise),
-                        Some(&[phase_in]),
+                        state.phase_inputs(),
                         Some(&mut phase),
                     )
                     .unwrap();
@@ -1706,26 +1718,45 @@ mod tests {
                     "native staged-input smoke call={call} elapsed_us={}",
                     started.elapsed().as_micros()
                 );
+                assert_eq!(audio.len(), FRAMES * 400);
                 assert!(audio.iter().chain(&phase).all(|value| value.is_finite()));
-                assert_eq!(phase.len(), FRAMES * 400);
-                for index in [0, 799, 1599] {
-                    let expected =
-                        (phase_in + 113.0 * (index + 1) as f32 / 40_000.0).rem_euclid(1.0);
-                    let delta = (phase[index] - expected).abs().rem_euclid(1.0);
-                    assert!(
-                        delta.min(1.0 - delta) < 1e-5,
-                        "native phase trace call={call} index={index}: {} vs {expected}",
-                        phase[index]
-                    );
+                assert!(audio.iter().any(|value| *value != 0.0));
+                // Some native plans leave the auxiliary trace unwritten. Keep
+                // this staging/capture regression aligned with infer_rvc and
+                // tests.rs's legacy-streaming check: a discarded trace must
+                // select the shared CPU carry, never stale phase or no advance.
+                if phase.is_empty() {
+                    assert!(engine.phase_fallback_warned);
+                    assert!(!state.set_phase_from_output(&phase));
+                    state.advance_phase(&pitchf);
+                    eprintln!("native staged-input CPU phase carry call={call}");
+                } else {
+                    assert_eq!(phase.len(), FRAMES * 400);
+                    for index in [0, 799, 1599] {
+                        let expected =
+                            (phase_in + 113.0 * (index + 1) as f32 / 40_000.0).rem_euclid(1.0);
+                        let delta = (phase[index] - expected).abs().rem_euclid(1.0);
+                        assert!(
+                            delta.min(1.0 - delta) < 1e-5,
+                            "native phase trace call={call} index={index}: {} vs {expected}",
+                            phase[index]
+                        );
+                    }
+                    assert!(state.set_phase_from_output(&phase));
                 }
+                let expected_carry = ((call + 1) as f32 * 113.0 * 800.0 / 40_000.0).rem_euclid(1.0);
+                let delta = (state.phase_in().unwrap() - expected_carry)
+                    .abs()
+                    .rem_euclid(1.0);
+                assert!(delta.min(1.0 - delta) < 1e-5);
                 if let Some(previous) = previous {
                     assert_ne!(audio, previous, "later inputs must update");
                 }
                 previous = Some(audio);
+                // A failed call after capture/replay must also leave the next
+                // complete inference usable, not just reject stale inputs.
+                reject_missing_stream_inputs(&engine);
             }
-            // Every inference must stage every input again, including after a
-            // successful call/capture; stale device data cannot satisfy it.
-            reject_missing_stream_inputs(&engine);
         });
     }
 }

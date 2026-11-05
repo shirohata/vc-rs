@@ -11,6 +11,52 @@ Version numbers come from `[workspace.package].version` in the root
 release archives. See [`docs/distribution.md`](docs/distribution.md) for the full
 versioning and publishing procedure.
 
+## [0.5.5] - 2026-11-06
+
+### Added
+
+- Built-in PTH-to-ONNX conversion for Applio MRF HiFi-GAN and RefineGAN
+  checkpoints, with shared streaming inference support.
+- Verified embedder profile downloads in the GUI, CLI, and VST3 editor. The
+  frontends share a cache, check pinned archive/member hashes, and retain each
+  model package's documentation and license. Custom embedder paths and output
+  overrides remain available and are preserved in saved settings.
+- Audio device and input-denoiser switching during standalone conversion,
+  including recovery when the selected output device becomes unavailable.
+
+### Changed
+
+- Kept advanced smoother selection in configuration files and the CLI, and
+  removed its controls from the GUI and VST3 editor. Existing saved choices,
+  including those selected in v0.5.4, are preserved. Missing settings continue
+  to default to phase vocoder.
+- Clarified backend names and device requirements in the GUI and VST3 editor.
+
+### Fixed
+
+- Preserved quiet RMS tails and clamped the final converted output after
+  chunk joining and resampling.
+- Supported long Unicode paths for native TensorRT engine and timing caches.
+- Loaded Windows ML runtime DLLs from the resolved Windows App SDK package
+  graph instead of relying on the host's DLL search path.
+- Preserved audio device selections when devices are temporarily unavailable.
+- Recovered VST3 conversion failures through Load / Reload and preserved
+  restored project settings, including settings restored during model picking
+  or embedder preparation.
+
+### Security
+
+- Updated vulnerable and yanked transitive dependencies.
+
+### Distribution notes
+
+- A retained TensorRT plan was observed to omit its auxiliary phase output.
+  The existing CPU phase-carry fallback handles a discarded trace; the SDK/plan
+  cause remains unresolved. Passing fallback tests does not establish correct
+  auxiliary outputs for every engine.
+- Windows binaries are not code-signed; Windows may display a security warning
+  when downloading or running them.
+
 ## [0.5.4] - 2026-10-20
 
 ### Added
@@ -318,6 +364,7 @@ Initial release.
 - One-shot distribution packaging scripts for all four Windows x64 variants.
 - Auto-generated bundled third-party license notices during packaging.
 
+[0.5.5]: https://github.com/shirohata/vc-rs/compare/v0.5.4...v0.5.5
 [0.5.4]: https://github.com/shirohata/vc-rs/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/shirohata/vc-rs/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/shirohata/vc-rs/compare/v0.5.1...v0.5.2

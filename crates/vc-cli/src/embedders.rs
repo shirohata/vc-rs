@@ -45,7 +45,7 @@ pub fn run(args: EmbeddersArgs) -> Result<()> {
             let (model, root) = resolve(&package)?;
             let cancel = cancellation()?;
             vc_models::verify_cached(model, &root, &cancel)?;
-            println!("Verified ONNX, README, LICENSE and NOTICE.");
+            println!("Verified ONNX, English/Japanese READMEs and LICENSE.");
             println!("{}", model.model_path(&root).display());
             Ok(())
         }

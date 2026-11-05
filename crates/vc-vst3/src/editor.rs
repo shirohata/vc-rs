@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use egui::{self, Vec2};
-use nice_plug::prelude::{Editor, ParamSetter};
+use nice_plug::prelude::{AsyncExecutor, Editor, ParamSetter};
 use nice_plug_egui::{create_egui_editor, resizable_window::ResizableWindow, widgets};
 use vc_core::gpu::{list_cuda_devices, GpuDevice};
 use vc_core::validation::CONVERSION_TIMING_LIMITS;
@@ -23,6 +23,7 @@ use crate::params::VcRvcParams;
 use crate::plugin_identity;
 use crate::runtime::{PluginStatus, ReloadWaker, MAX_CHUNK_MS, MIN_CHUNK_MS};
 
+pub(crate) mod embedders;
 pub(crate) mod pickers;
 
 /// Granularity for the millisecond sliders.
@@ -52,6 +53,8 @@ pub struct EditorState {
     gpu_devices: Arc<Mutex<GpuDeviceDiscovery>>,
     gpu_discovery_thread: Option<std::thread::JoinHandle<()>>,
     openvino_devices: vc_core::openvino::DeviceDiscovery,
+    embedders: embedders::EmbedderPicker,
+    async_executor: AsyncExecutor<crate::VcRvcPlugin>,
     model_pickers: Arc<pickers::ModelPickers>,
 }
 
@@ -61,6 +64,7 @@ struct GpuDeviceDiscovery {
     error: Option<String>,
 }
 
+#[allow(clippy::too_many_arguments)] // Independent plugin-owned handles, shared with the editor.
 pub fn create(
     params: Arc<VcRvcParams>,
     reload: Arc<AtomicBool>,
@@ -69,6 +73,7 @@ pub fn create(
     status: Arc<Mutex<PluginStatus>>,
     reload_waker: Arc<ReloadWaker>,
     model_pickers: Arc<pickers::ModelPickers>,
+    async_executor: AsyncExecutor<crate::VcRvcPlugin>,
 ) -> Option<Box<dyn Editor>> {
     let egui_state = params.editor_state.clone();
     let (gpu_devices, gpu_discovery_thread) = spawn_gpu_device_discovery();
@@ -85,6 +90,10 @@ pub fn create(
             gpu_devices,
             gpu_discovery_thread,
             openvino_devices: vc_core::openvino::DeviceDiscovery::default(),
+            embedders: embedders::EmbedderPicker::new(
+                vc_models::cache_dir().map_err(|e| format!("{e:#}")),
+            ),
+            async_executor,
         },
         Default::default(),
         |_, _, _| {},
@@ -115,6 +124,11 @@ fn draw(ui: &mut egui::Ui, setter: &ParamSetter, state: &mut EditorState) {
 }
 
 fn draw_contents(ui: &mut egui::Ui, setter: &ParamSetter, state: &mut EditorState) {
+    state.poll_embedders();
+    if state.embedders.working() {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(100));
+    }
     ui.heading(plugin_identity::NAME);
 
     // Status line (updated by the worker thread).
@@ -178,12 +192,19 @@ fn draw_contents(ui: &mut egui::Ui, setter: &ParamSetter, state: &mut EditorStat
     });
 
     ui.separator();
+    draw_setup(ui, state);
+}
+
+fn draw_setup(ui: &mut egui::Ui, state: &mut EditorState) {
     ui.heading("Setup");
     ui.small("Models, backend, chunk, Extra convert, and gate timing apply on Load / Reload.");
     ui.horizontal_wrapped(|ui| {
         let loading = state.loading.load(Ordering::SeqCst);
         if ui
-            .add_enabled(!loading, egui::Button::new("Load / Reload"))
+            .add_enabled(
+                !loading && !state.embedders.pending(),
+                egui::Button::new("Load / Reload"),
+            )
             .clicked()
             && state
                 .loading
@@ -199,6 +220,9 @@ fn draw_contents(ui: &mut egui::Ui, setter: &ParamSetter, state: &mut EditorStat
             ui.colored_label(egui::Color32::from_rgb(220, 180, 60), "Unapplied changes");
         }
     });
+    if state.embedders.pending() {
+        ui.small("Acquire the selected embedder before loading.");
+    }
 
     // New instances expose setup; configured instances prioritize live controls.
     // The apply action stays outside the fold so pending edits remain actionable.
@@ -217,11 +241,10 @@ fn draw_contents(ui: &mut egui::Ui, setter: &ParamSetter, state: &mut EditorStat
 
 fn draw_staged_settings(ui: &mut egui::Ui, state: &mut EditorState) {
     // Snapshot current settings for display, releasing the lock immediately.
-    let (model, embedder, f0_model, provider, gpu_device_id) = {
+    let (model, f0_model, provider, gpu_device_id) = {
         let s = state.params.settings.read().unwrap();
         (
             s.model.clone(),
-            s.embedder.clone(),
             s.f0_model.clone(),
             s.provider.clone(),
             s.gpu_device_id,
@@ -232,9 +255,7 @@ fn draw_staged_settings(ui: &mut egui::Ui, state: &mut EditorState) {
     if file_row(ui, "RVC model", &model) {
         spawn_picker(state, ModelKind::Rvc);
     }
-    if file_row(ui, "Embedder", &embedder) {
-        spawn_picker(state, ModelKind::Embedder);
-    }
+    state.draw_embedder(ui);
     if file_row(ui, "F0 (RMVPE)", &f0_model) {
         spawn_picker(state, ModelKind::F0);
     }
@@ -494,7 +515,10 @@ fn spawn_picker(state: &EditorState, kind: ModelKind) {
             if let Ok(mut settings) = params.settings.write() {
                 match kind {
                     ModelKind::Rvc => settings.model = path,
-                    ModelKind::Embedder => settings.embedder = path,
+                    ModelKind::Embedder => {
+                        settings.embedder = path;
+                        settings.embedder_package = None;
+                    }
                     ModelKind::F0 => settings.f0_model = path,
                 }
             }

@@ -52,12 +52,12 @@ pwsh .\download-models.ps1
 
 ### Embedderパッケージ
 
-`embedders list` はvc-embedders 0.1.0の固定候補を表示します。公開ダウンロード先は
-未設定です。対応するローカルZIPがある場合に取り込めます。カタログへの収録は
-公開済みという意味ではありません。
+`embedders list` は[rvc-embedders-onnx v0.1.0](https://github.com/shirohata/rvc-embedders-onnx/releases/tag/v0.1.0)
+の固定パッケージを表示します。`fetch`で選んだパッケージを取得するか、対応するローカルZIPを取り込めます。
 
 ```powershell
 .\vc-rs.exe embedders list
+.\vc-rs.exe embedders fetch applio-spin --version 0.1.0
 .\vc-rs.exe embedders import applio-spin --version 0.1.0 --zip .\vc-embedders-0.1.0-applio-spin.zip
 .\vc-rs.exe embedders verify applio-spin --version 0.1.0
 ```
@@ -65,11 +65,11 @@ pwsh .\download-models.ps1
 表示された`model.onnx`のパスを`run`／`wav`の`--embedder`やGUI／VST3で指定します。
 保存先は通常`%LOCALAPPDATA%\vc-rs\models`、未設定なら`%APPDATA%`配下です。
 `--cache-dir`で保存先のルートを変更できます。ID・version・ONNXハッシュごとに分離し、
-ONNXとREADME・LICENSE・NOTICEを揃えて保存します。ZIPと4ファイルのサイズ・SHA-256を
+ONNXと日英のREADME・LICENSEを揃えて保存します。ZIPと4ファイルのサイズ・SHA-256を
 内蔵カタログと照合し、検証済みキャッシュは再利用します。取得失敗やキャンセルで
 既存ファイルを破壊せず、中断した転送は再試行時に最初から取得します。
 Ctrl+Cでキャンセルを要求できます。
-`embedders fetch`は固定された公開先を設定した場合だけ取得し、未設定ならその旨を表示します。
+`embedders fetch`は固定されたRelease URLから取得します。
 起動時の自動取得・最新版の検索・既存選択の自動差し替えは行いません。
 
 音声モデルの学習時と同じ重み・特徴層・射影・波形前処理を選んでください。

@@ -57,13 +57,22 @@ fn install_fixture(model: &Model, bytes: &[u8], root: &Path) -> Result<Installed
 }
 
 #[test]
-fn catalog_identifies_exact_profiles_and_preserves_prepublication_status() {
+fn catalog_identifies_exact_profiles_and_pins_published_release_assets() {
     assert_eq!(catalog().len(), 7);
     let mut ids = std::collections::HashSet::new();
     for model in catalog() {
         validate_contract(model).unwrap();
         assert!(ids.insert(&model.id));
-        assert!(model.url.is_none());
+        assert_eq!(
+            model.url.as_deref(),
+            Some(
+                format!(
+                    "https://github.com/shirohata/rvc-embedders-onnx/releases/download/v{}/{}",
+                    model.version, model.archive.name
+                )
+                .as_str()
+            )
+        );
         assert_eq!(model.input.sample_rate, 16_000);
         assert_eq!(model.input.dtype, "float32");
         assert_eq!(model.input.normalization, "none");
@@ -222,16 +231,17 @@ fn rejects_paths_missing_extra_members_links_size_and_member_hash_mismatch() {
     let (mut model, _) = fixture();
     let temp = Temp::new();
     for names in [
-        vec!["../model.onnx", "README.md", "LICENSE.txt", "NOTICE.md"],
-        vec!["/model.onnx", "README.md", "LICENSE.txt", "NOTICE.md"],
-        vec!["C:\\model.onnx", "README.md", "LICENSE.txt", "NOTICE.md"],
-        vec!["sub/model.onnx", "README.md", "LICENSE.txt", "NOTICE.md"],
+        vec!["model.onnx", "README.md", "LICENSE.txt", "NOTICE.md"],
+        vec!["../model.onnx", "README.md", "LICENSE.txt", "README.ja.md"],
+        vec!["/model.onnx", "README.md", "LICENSE.txt", "README.ja.md"],
+        vec!["C:\\model.onnx", "README.md", "LICENSE.txt", "README.ja.md"],
+        vec!["sub/model.onnx", "README.md", "LICENSE.txt", "README.ja.md"],
         vec!["model.onnx", "README.md", "LICENSE.txt"],
         vec![
             "model.onnx",
             "README.md",
             "LICENSE.txt",
-            "NOTICE.md",
+            "README.ja.md",
             "extra",
         ],
     ] {
@@ -240,7 +250,7 @@ fn rejects_paths_missing_extra_members_links_size_and_member_hash_mismatch() {
         assert!(install_fixture(&model, &bytes, &temp.0).is_err());
         assert!(!model.directory(&temp.0).exists());
     }
-    let names = ["model.onnx", "README.md", "LICENSE.txt", "NOTICE.md"];
+    let names = ["model.onnx", "README.md", "LICENSE.txt", "README.ja.md"];
     for (link, wrong_data) in [(true, false), (false, true)] {
         let bytes = custom_zip(&names, link, wrong_data);
         pin_zip(&mut model, &bytes);
@@ -259,7 +269,7 @@ fn rejects_paths_missing_extra_members_links_size_and_member_hash_mismatch() {
 fn duplicate_zip_names_are_rejected() {
     // Writer rejects duplicates itself. Mutate equal-length names in both local
     // and central records to exercise the reader rather than the fixture writer.
-    let names = ["model.onnx", "README.md", "NOTICE.md", "readme.md"];
+    let names = ["model.onnx", "README.md", "README.ja.md", "readme.md"];
     let mut bytes = custom_zip(&names, false, false);
     for offset in 0..bytes.len() - 9 {
         if &bytes[offset..offset + 9] == b"readme.md" {
@@ -356,13 +366,32 @@ fn http_body_uses_the_same_checked_installer() {
 #[test]
 fn unpublished_download_has_no_network_fallback() {
     let temp = Temp::new();
-    assert!(
-        download(&catalog()[0], &temp.0, &AtomicBool::new(false), |_| {})
-            .unwrap_err()
-            .to_string()
-            .contains("No published download source")
-    );
-    assert!(!catalog()[0].directory(&temp.0).exists());
+    let mut model = catalog()[0].clone();
+    model.url = None;
+    assert!(download(&model, &temp.0, &AtomicBool::new(false), |_| {})
+        .unwrap_err()
+        .to_string()
+        .contains("No published download source"));
+    assert!(!model.directory(&temp.0).exists());
+}
+
+#[test]
+fn published_documents_repair_a_prepublication_cache_without_changing_model_path() {
+    let (mut model, bytes) = fixture();
+    let temp = Temp::new();
+    let installed = install_fixture(&model, &bytes, &temp.0).unwrap();
+    let directory = model.directory(&temp.0);
+    fs::rename(directory.join("README.ja.md"), directory.join("NOTICE.md")).unwrap();
+    assert!(verify_cached(&model, &temp.0, &AtomicBool::new(false)).is_err());
+    model.url = None;
+    assert!(download(&model, &temp.0, &AtomicBool::new(false), |_| {}).is_err());
+    assert_eq!(fs::read(&installed.path).unwrap(), b"model.onnx");
+    assert!(directory.join("NOTICE.md").is_file());
+    let repaired = install_fixture(&model, &bytes, &temp.0).unwrap();
+    assert_eq!(repaired.path, installed.path);
+    assert!(!repaired.reused);
+    assert!(!directory.join("NOTICE.md").exists());
+    verify_cached(&model, &temp.0, &AtomicBool::new(false)).unwrap();
 }
 
 #[test]

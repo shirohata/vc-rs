@@ -53,12 +53,13 @@ This downloads `.\assets\content_vec_500.onnx` and `.\assets\rmvpe.onnx`.
 
 ### Embedder packages
 
-`embedders list` lists the fixed vc-embedders 0.1.0 candidates. No public
-download source is configured yet; import an already available matching ZIP.
-The catalog does not claim that these candidates are publicly released.
+`embedders list` lists the fixed packages from
+[rvc-embedders-onnx v0.1.0](https://github.com/shirohata/rvc-embedders-onnx/releases/tag/v0.1.0).
+Use `fetch` to download an exact package, or import its matching local ZIP.
 
 ```powershell
 .\vc-rs.exe embedders list
+.\vc-rs.exe embedders fetch applio-spin --version 0.1.0
 .\vc-rs.exe embedders import applio-spin --version 0.1.0 --zip .\vc-embedders-0.1.0-applio-spin.zip
 .\vc-rs.exe embedders verify applio-spin --version 0.1.0
 ```
@@ -67,11 +68,11 @@ The command prints the installed `model.onnx` path; pass it through `--embedder`
 to `run`/`wav`, or select it in the GUI/VST3. `--cache-dir` overrides the shared
 model-cache root (normally `%LOCALAPPDATA%\vc-rs\models`, falling back to
 `%APPDATA%`). Each ID/version/ONNX hash has a separate directory containing the
-ONNX, README, LICENSE, and NOTICE. Imports verify all four members and the ZIP
-against the built-in catalog, reuse verified entries, and preserve existing
-files on failed or cancelled acquisition. Interrupted transfers restart when
-retried. Ctrl+C requests cancellation. `embedders fetch` uses only a pinned published source when configured;
-it reports the missing source otherwise. There is no startup acquisition,
+ONNX, English/Japanese READMEs, and LICENSE. Acquisition verifies the ZIP and all
+four members against the built-in catalog, reuses verified entries, and preserves
+existing files on failure or cancellation. Interrupted transfers restart when
+retried. Ctrl+C requests cancellation. `embedders fetch` uses the pinned Release
+URL. There is no startup acquisition,
 latest-version lookup, or automatic replacement of an existing selection.
 
 Select the weights, feature layer, projection, and waveform preprocessing used

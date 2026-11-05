@@ -755,65 +755,43 @@ fn ui_normal_transport_pending_and_passthrough() {
 }
 
 #[test]
-fn ui_support_sources_preserve_custom_path_and_download_only_selected_role() {
+fn ui_f0_sources_preserve_custom_path_and_download_only_selected_role() {
     for lang in [text::Language::English, text::Language::Japanese] {
-        for (index, label, reference) in [(0, "Embedder", "ContentVec"), (1, "F0 model", "RMVPE")] {
-            let mut h = harness(ready_main_fixture(lang));
-            h.get_by_label(lang.text("Model")).click();
-            h.run_steps(4);
-            let original = h.state().app.settings.embedder.clone();
-            // Combo controls have distinct labels even though both offer Custom.
-            h.get_by_label(lang.text(label)).click();
-            h.run_steps(2);
-            h.get_by_label(reference).click();
-            h.run_steps(4);
-            assert_eq!(h.state().app.settings.support_custom_paths[index], original);
-            assert_eq!(
-                h.state().app.settings.support_custom_mode[index],
-                "downloaded"
-            );
-            h.get_by_label(lang.text("Agree and download")).click();
-            h.run_steps(4);
-            assert_eq!(h.state().app.onboarding.effects.download_requests, 1);
-            assert_eq!(h.state().app.onboarding.effects.download_indices, [index]);
-            let saved = h.state().app.onboarding.effects.saved.last().unwrap();
-            assert_eq!(
-                if index == 0 {
-                    &saved.f0_model
-                } else {
-                    &saved.embedder
-                },
-                &original
-            );
-            let expected = h
-                .state()
-                .app
-                .onboarding
-                .effects
-                .support_cache_dir
-                .join(model_setup::MODELS[index].file);
-            assert_eq!(
-                if index == 0 {
-                    &saved.embedder
-                } else {
-                    &saved.f0_model
-                },
-                &expected.to_string_lossy()
-            );
-            h.get_by_label(lang.text(label)).click();
-            h.run_steps(2);
-            h.get_by_label(lang.text("Custom")).click();
-            h.run_steps(4);
-            let settings = &h.state().app.settings;
-            assert_eq!(
-                if index == 0 {
-                    &settings.embedder
-                } else {
-                    &settings.f0_model
-                },
-                &original
-            );
-        }
+        let index = 1;
+        let mut h = harness(ready_main_fixture(lang));
+        h.get_by_label(lang.text("Model")).click();
+        h.run_steps(4);
+        let original = h.state().app.settings.embedder.clone();
+        // Combo controls have distinct labels even though both offer Custom.
+        h.get_by_label(lang.text("F0 model")).click();
+        h.run_steps(2);
+        h.get_by_label("RMVPE").click();
+        h.run_steps(4);
+        assert_eq!(h.state().app.settings.support_custom_paths[index], original);
+        assert_eq!(
+            h.state().app.settings.support_custom_mode[index],
+            "downloaded"
+        );
+        h.get_by_label(lang.text("Agree and download")).click();
+        h.run_steps(4);
+        assert_eq!(h.state().app.onboarding.effects.download_requests, 1);
+        assert_eq!(h.state().app.onboarding.effects.download_indices, [index]);
+        let saved = h.state().app.onboarding.effects.saved.last().unwrap();
+        assert_eq!(&saved.embedder, &original);
+        let expected = h
+            .state()
+            .app
+            .onboarding
+            .effects
+            .support_cache_dir
+            .join(model_setup::MODELS[index].file);
+        assert_eq!(&saved.f0_model, &expected.to_string_lossy());
+        h.get_by_label(lang.text("F0 model")).click();
+        h.run_steps(2);
+        h.get_by_label(lang.text("Custom")).click();
+        h.run_steps(4);
+        let settings = &h.state().app.settings;
+        assert_eq!(&settings.f0_model, &original);
     }
 }
 
@@ -851,6 +829,322 @@ fn ui_small_screen_scroll_keeps_transport_and_reaches_language_and_setup() {
 }
 
 #[test]
+fn ui_embedder_picker_lists_every_package_before_download_and_applies_after_verification() {
+    for lang in [text::Language::English, text::Language::Japanese] {
+        let fixture = ready_main_fixture(lang);
+        let original = fixture.app.settings.embedder.clone();
+        let mut h = harness(fixture);
+        h.get_by_label(lang.text("Model")).click();
+        h.run_steps(4);
+        h.get_by_label(lang.text("Embedder")).click();
+        h.run_steps(4);
+        assert!(h.query_by_label("ContentVec").is_none());
+        let mut previous_y = 0.0;
+        for model in vc_models::catalog() {
+            let node = h.get_by_label(lang.text(&model.label));
+            assert!(node.rect().min.y > previous_y);
+            previous_y = node.rect().min.y;
+        }
+        assert!(h.get_by_label(lang.text("Custom")).rect().min.y > previous_y);
+        h.get_by_label(lang.text("SPIN v2 (Applio)")).click();
+        h.run_steps(4);
+        assert_eq!(h.state().app.settings.embedder, original);
+        assert!(h.state().app.settings.embedder_package.is_none());
+        assert!(h.state().app.onboarding.effects.package_requests.is_empty());
+        assert!(h
+            .get_by_label(lang.text(text::START))
+            .accesskit_node()
+            .is_disabled());
+        assert!(h.query_by_label(lang.text("Embedder packages")).is_none());
+        h.get_by_label(lang.text("Download and use")).click();
+        h.run_steps(4);
+        assert_eq!(
+            h.state().app.onboarding.effects.package_requests,
+            ["applio-spin-v2"]
+        );
+        assert_eq!(h.state().app.settings.embedder, original);
+        packages::tests::finish(&mut h.state_mut().app, true);
+        h.run_steps(4);
+        let model = vc_models::find("applio-spin-v2", "0.1.0").unwrap();
+        let settings = &h.state().app.settings;
+        assert_eq!(settings.embedder_package, Some(model.selection()));
+        assert_eq!(settings.support_custom_paths[0], original);
+        assert_eq!(settings.support_custom_mode[0], "package");
+        assert!(!h
+            .get_by_label(lang.text(text::START))
+            .accesskit_node()
+            .is_disabled());
+    }
+}
+
+#[test]
+fn ui_cached_embedder_selection_verifies_without_download_and_preserves_settings_on_failure() {
+    for lang in [text::Language::English, text::Language::Japanese] {
+        for outcome in ["success", "failure", "cancel"] {
+            let model = vc_models::find("applio-spin-v2", "0.1.0").unwrap();
+            let cache = packages::tests::CacheFixture::new(model);
+            let mut fixture = ready_main_fixture(lang);
+            let original = fixture.app.settings.embedder.clone();
+            fixture.app.onboarding.effects.support_cache_dir = cache.0.clone();
+            let mut h = harness(fixture);
+            h.get_by_label(lang.text("Model")).click();
+            h.run_steps(4);
+            h.get_by_label(lang.text("Embedder")).click();
+            h.run_steps(4);
+            h.get_by_label(lang.text(&model.label)).click();
+            h.run_steps(4);
+            assert_eq!(h.state().app.settings.embedder, original);
+            assert!(h.state().app.onboarding.effects.package_requests.is_empty());
+            assert_eq!(
+                h.state()
+                    .app
+                    .onboarding
+                    .effects
+                    .package_cache_checks
+                    .as_slice(),
+                std::slice::from_ref(&model.id)
+            );
+            assert!(h.query_by_label(lang.text("Download and use")).is_none());
+            assert!(h
+                .get_by_label(lang.text(text::START))
+                .accesskit_node()
+                .is_disabled());
+            if outcome == "cancel" {
+                h.get_by_label(lang.text(text::CANCEL)).click();
+                h.run_steps(4);
+                assert_eq!(h.state().app.settings.embedder, original);
+                assert!(h.state().app.settings.embedder_package.is_none());
+                assert!(!h
+                    .get_by_label(lang.text(text::START))
+                    .accesskit_node()
+                    .is_disabled());
+            } else {
+                packages::tests::finish(&mut h.state_mut().app, outcome == "success");
+                h.run_steps(4);
+                if outcome == "success" {
+                    assert_eq!(
+                        h.state().app.settings.embedder_package,
+                        Some(model.selection())
+                    );
+                    assert_eq!(h.state().app.settings.support_custom_paths[0], original);
+                    h.get_by_label(lang.text("Downloaded"));
+                    assert!(h.query_by_label(lang.text("Download and use")).is_none());
+                    assert!(!h
+                        .get_by_label(lang.text(text::START))
+                        .accesskit_node()
+                        .is_disabled());
+                    // Restore the settings in a fresh GUI, without doing work just
+                    // to render the already selected, downloaded profile.
+                    let mut restored = ready_main_fixture(lang);
+                    restored.app.settings = h.state().app.settings.clone();
+                    restored.app.onboarding.effects.support_cache_dir = cache.0.clone();
+                    let mut restored = harness(restored);
+                    restored.get_by_label(lang.text("Model")).click();
+                    restored.run_steps(4);
+                    restored.get_by_label(lang.text("Downloaded"));
+                    assert!(restored
+                        .query_by_label(lang.text("Download and use"))
+                        .is_none());
+                    assert!(restored
+                        .state()
+                        .app
+                        .onboarding
+                        .effects
+                        .package_cache_checks
+                        .is_empty());
+                    // Re-selecting the active model must also finish the preview
+                    // when verification leaves every saved setting unchanged.
+                    restored.get_by_label(lang.text("Embedder")).click();
+                    restored.run_steps(4);
+                    restored.get_by_label(lang.text(&model.label)).click();
+                    restored.run_steps(4);
+                    packages::tests::finish(&mut restored.state_mut().app, true);
+                    restored.run_steps(4);
+                    assert!(!restored
+                        .get_by_label(lang.text(text::START))
+                        .accesskit_node()
+                        .is_disabled());
+                } else {
+                    assert_eq!(h.state().app.settings.embedder, original);
+                    assert!(h.state().app.settings.embedder_package.is_none());
+                    h.get_by_label(lang.text("Download and use")).click();
+                    h.run_steps(4);
+                    assert_eq!(
+                        h.state().app.onboarding.effects.package_requests.as_slice(),
+                        std::slice::from_ref(&model.id)
+                    );
+                    assert_eq!(h.state().app.settings.embedder, original);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn ui_embedder_download_cancel_restores_running_choice_without_showing_its_docs_for_another() {
+    for lang in [text::Language::English, text::Language::Japanese] {
+        let installed = vc_models::find("applio-spin-v2", "0.1.0").unwrap();
+        let cache = packages::tests::CacheFixture::new(installed);
+        let mut fixture = ready_main_fixture(lang);
+        let installed_path = installed
+            .model_path(&cache.0)
+            .to_string_lossy()
+            .into_owned();
+        fixture.app.settings.embedder = installed_path.clone();
+        fixture.app.settings.embedder_package = Some(installed.selection());
+        fixture.app.settings.support_custom_mode[0] = "package".into();
+        fixture.app.onboarding.effects.support_cache_dir = cache.0.clone();
+        fixture.status.state = EngineState::Running;
+        fixture.app.onboarding.normal.applied = Some(fixture.app.settings.clone());
+        let mut h = harness(fixture);
+        h.get_by_label(lang.text("Model")).click();
+        h.run_steps(4);
+        h.get_by_label(lang.text("Embedder")).click();
+        h.run_steps(4);
+        h.get_by_label(lang.text("SPIN (Applio)")).click();
+        h.run_steps(4);
+        assert_eq!(h.state().app.settings.embedder, installed_path);
+        assert!(h
+            .get_by_label(lang.text("Restart"))
+            .accesskit_node()
+            .is_disabled());
+        assert!(!h
+            .get_by_label(lang.text(text::STOP))
+            .accesskit_node()
+            .is_disabled());
+        assert!(h
+            .query_by_label(lang.text("Package documents (README / README.ja / LICENSE):"))
+            .is_none());
+        h.get_by_label(lang.text("Download and use")).click();
+        h.run_steps(4);
+        h.get_by_label(lang.text(text::CANCEL)).click();
+        h.run_steps(4);
+        h.get_by_value(lang.text(&installed.label));
+        assert!(!h
+            .get_by_label(lang.text("Restart"))
+            .accesskit_node()
+            .is_disabled());
+        assert_eq!(h.state().app.settings.embedder, installed_path);
+        assert_eq!(h.state().app.onboarding.effects.start_requests, 0);
+        assert_eq!(h.state().app.onboarding.effects.stop_requests, 0);
+        assert_eq!(h.state().status.state, EngineState::Running);
+    }
+}
+
+#[test]
+fn ui_embedder_pending_choice_can_return_to_custom_after_failed_download() {
+    for lang in [text::Language::English, text::Language::Japanese] {
+        let fixture = ready_main_fixture(lang);
+        let original = fixture.app.settings.embedder.clone();
+        let mut h = harness(fixture);
+        h.get_by_label(lang.text("Model")).click();
+        h.run_steps(4);
+        h.get_by_label(lang.text("Embedder")).click();
+        h.run_steps(4);
+        h.get_by_label(lang.text("SPIN (Applio)")).click();
+        h.run_steps(4);
+        h.get_by_label(lang.text("Download and use")).click();
+        h.run_steps(4);
+        packages::tests::finish(&mut h.state_mut().app, false);
+        h.run_steps(4);
+        h.get_by_label(lang.text("Package acquisition failed. Your current selection was kept."));
+        h.get_by_label(lang.text("Embedder")).click();
+        h.run_steps(4);
+        h.get_by_label(lang.text("Custom")).click();
+        h.run_steps(4);
+        assert_eq!(h.state().app.settings.embedder, original);
+        assert!(h.state().app.settings.embedder_package.is_none());
+        assert!(h
+            .state()
+            .app
+            .onboarding
+            .packages
+            .pending_choice(&h.state().app.settings)
+            .is_none());
+        assert!(!h
+            .get_by_label(lang.text(text::START))
+            .accesskit_node()
+            .is_disabled());
+    }
+}
+
+#[test]
+fn ui_legacy_contentvec_configuration_survives_picker_simplification() {
+    for lang in [text::Language::English, text::Language::Japanese] {
+        let mut fixture = ready_main_fixture(lang);
+        let legacy_path = fixture
+            .app
+            .onboarding
+            .effects
+            .support_cache_dir
+            .join(model_setup::MODELS[0].file)
+            .to_string_lossy()
+            .into_owned();
+        fixture.app.settings.embedder = legacy_path.clone();
+        fixture.app.settings.support_custom_mode[0] = "downloaded".into();
+        fixture.app.settings.support_custom_paths[0] = "remembered-custom.onnx".into();
+        fixture.app.settings.smoother = "psola".into();
+        let mut h = harness(fixture);
+        h.get_by_label(lang.text("Model")).click();
+        h.run_steps(4);
+        let settings = &h.state().app.settings;
+        assert_eq!(settings.embedder, legacy_path);
+        assert_eq!(settings.support_custom_mode[0], "downloaded");
+        assert_eq!(settings.support_custom_paths[0], "remembered-custom.onnx");
+        assert_eq!(settings.smoother, "psola");
+        assert!(settings.embedder_package.is_none());
+        assert!(h.state().app.onboarding.effects.package_requests.is_empty());
+        assert_eq!(h.state().app.onboarding.effects.download_requests, 0);
+    }
+}
+
+#[cfg(feature = "ui-snapshots")]
+#[test]
+#[ignore = "Render the ordinary Embedder picker; no acquisition or settings writes"]
+fn render_normal_embedder_picker() {
+    let destination =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/embedder-picker-ui");
+    fs::create_dir_all(&destination).unwrap();
+    for lang in [text::Language::English, text::Language::Japanese] {
+        for width in [880.0, 520.0] {
+            let mut h = harness_sized(ready_main_fixture(lang), egui::vec2(width, 720.0));
+            install_system_japanese_font(&h.ctx);
+            h.run_steps(4);
+            h.get_by_label(lang.text("Model")).click();
+            h.run_steps(4);
+            h.get_by_label(lang.text("Embedder")).scroll_to_me();
+            h.run_steps(8);
+            h.get_by_label(lang.text("Embedder")).click();
+            h.run_steps(4);
+            h.render()
+                .unwrap()
+                .save(destination.join(format!("{lang:?}-{width}-choices.png")))
+                .unwrap();
+            h.get_by_label(lang.text("SPIN v2 (Applio)")).click();
+            h.run_steps(4);
+            h.get_by_label(lang.text("Download and use")).scroll_to_me();
+            h.run_steps(8);
+            h.render()
+                .unwrap()
+                .save(destination.join(format!("{lang:?}-{width}-selected.png")))
+                .unwrap();
+            let model = vc_models::find("applio-spin-v2", "0.1.0").unwrap();
+            let cache = packages::tests::CacheFixture::new(model);
+            h.state_mut().app.onboarding.effects.support_cache_dir = cache.0.clone();
+            h.state_mut().app.select_embedder_package(model);
+            packages::tests::finish(&mut h.state_mut().app, true);
+            h.run_steps(4);
+            h.get_by_label(lang.text("Downloaded")).scroll_to_me();
+            h.run_steps(8);
+            h.render()
+                .unwrap()
+                .save(destination.join(format!("{lang:?}-{width}-downloaded.png")))
+                .unwrap();
+        }
+    }
+}
+
+#[test]
 fn ui_installed_package_and_custom_remain_distinct_saved_choices() {
     for lang in [text::Language::English, text::Language::Japanese] {
         let mut fixture = ready_main_fixture(lang);
@@ -866,7 +1160,7 @@ fn ui_installed_package_and_custom_remain_distinct_saved_choices() {
         let mut h = harness(fixture);
         h.get_by_label(lang.text("Model")).click();
         h.run_steps(4);
-        // A missing managed package offers import, not a GPL reference download.
+        // A missing managed package offers its published download.
         assert!(h.query_by_label(lang.text("Agree and download")).is_none());
         h.get_by_label(lang.text("Embedder")).click();
         h.run_steps(2);

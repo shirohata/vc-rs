@@ -21,8 +21,15 @@ default = ["windowsml"]
 cuda = ["vc-core/cuda", "dep:ort"]
 windowsml = ["vc-core/windowsml", "dep:ort"]
 tensorrt = ["vc-core/tensorrt"]
+ui-snapshots = ["egui_kittest/snapshot", "dep:egui-wgpu", "dep:wgpu", "dep:image", "dep:pollster"]
 
 [dependencies]
+vc-models = { path = "../vc-models" }
+# Same test-only Vulkan renderer as the standalone GUI; absent from packages.
+egui-wgpu = { version = "0.34.3", default-features = false, optional = true }
+wgpu = { version = "29.0.3", default-features = false, features = ["std", "vulkan", "wgsl"], optional = true }
+image = { version = "0.25", default-features = false, features = ["png"], optional = true }
+pollster = { version = "0.4", optional = true }
 # The VST3 SDK bindings (via nice-plug) are ISC-licensed, so the .vst3 keeps the
 # workspace's MIT license.
 nice-plug = { version = "0.1.8", features = ["vst3"] }
@@ -38,3 +45,6 @@ ort = { workspace = true, optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_System_LibraryLoader"] }
+
+[dev-dependencies]
+egui_kittest = "0.34.3"

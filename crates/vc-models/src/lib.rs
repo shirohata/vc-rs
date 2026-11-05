@@ -1,7 +1,7 @@
 //! Acquisition only: never called from an audio callback or an inference chunk.
 //! Catalog hashes identify exported bytes, not compatibility with a voice model's
 //! training. Selection of matching weights/layers/projection/preprocessing remains
-//! explicit. The local 0.1.0 candidates have no published download URL yet.
+//! explicit. Catalog URLs pin published release assets and their exact bytes.
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -215,7 +215,7 @@ fn validate_contract(model: &Model) -> Result<()> {
         "Invalid archive contract"
     );
     ensure!(model.members.len() == 4, "Invalid member contract");
-    for name in ["model.onnx", "README.md", "LICENSE.txt", "NOTICE.md"] {
+    for name in ["model.onnx", "README.md", "README.ja.md", "LICENSE.txt"] {
         let matching: Vec<_> = model.members.iter().filter(|f| f.name == name).collect();
         ensure!(matching.len() == 1, "Invalid member contract");
         let spec = matching[0];

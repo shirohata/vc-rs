@@ -23,6 +23,12 @@ use vc_core::Provider;
 pub const CONFIG_ENV: &str = "VC_RS_VST3_CONFIG";
 pub const PLUGIN_MIN_EXTRA_CONVERT_MS: u32 = 100;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CustomEmbedder {
+    pub path: PathBuf,
+    pub output: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 // Lenient: unknown/legacy keys (e.g. `pitch_shift`, now a DAW parameter) are
 // ignored rather than rejected, so older config files keep parsing.
@@ -32,6 +38,10 @@ pub struct PluginConfig {
     pub embedder: PathBuf,
     pub f0_model: PathBuf,
     pub embedder_output: Option<String>,
+    /// Optional managed identity; old paths remain Custom until explicitly changed.
+    pub embedder_package: Option<vc_models::Selection>,
+    /// Remember both path and advanced output override when leaving Custom.
+    pub custom_embedder: Option<CustomEmbedder>,
     /// Legacy config key kept for lenient parsing only. TensorRT engine paths
     /// are no longer user-provided; native TensorRT builds cache entries from
     /// the ONNX model and fixed profile.
@@ -75,6 +85,8 @@ impl Default for PluginConfig {
             embedder: PathBuf::new(),
             f0_model: PathBuf::new(),
             embedder_output: None,
+            embedder_package: None,
+            custom_embedder: None,
             rvc_engine: None,
             provider: default_provider().to_string(),
             gpu_priority: "high".to_string(),

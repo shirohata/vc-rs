@@ -300,7 +300,13 @@ vc-vst3 — RVC voice conversion plugin ($Variant build, v$version)
 Install — copy the $installBundleName bundle into a standard VST3 search path:
   %CommonProgramFiles%\VST3\   (e.g. C:\Program Files\Common Files\VST3)
 
-Models — get the shared embedder + F0 models (optional helper):
+Models — choose your voice model and its training embedder:
+In the plugin editor, select an Embedder profile. For an uninstalled profile,
+click Download and use. Installed profiles use the shared GUI/CLI/VST3 cache.
+Custom (last) lets you browse for your own embedder ONNX. Load / Reload applies
+the selection. Downloaded model packages keep their own READMEs and licenses.
+
+To download the legacy ContentVec + RMVPE files instead (optional helper):
     pwsh .\download-models.ps1
 Run it from THIS folder (not from inside the installed plugin). It downloads
 ContentVec + RMVPE into .\assets\. In the plugin GUI, browse to

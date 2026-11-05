@@ -25,7 +25,10 @@ experimental OpenVINO / MIGraphX options.
 1. Add the plugin to an audio track and open its editor.
 2. Under **Setup → Models and conversion settings**, browse for your RVC voice
    model's `.onnx` file.
-3. Browse for the **Embedder** `.onnx` file used to train that voice model.
+3. Choose the **Embedder** used to train that voice model. Select a published
+   profile and click **Download and use** when needed, or choose **Custom** to
+   browse for your own embedder `.onnx` file. A downloaded profile is checked
+   when selected. Wait for preparation to finish before loading.
 4. Browse for the **F0 (RMVPE)** model. If you need the reference models, run
    `pwsh .\download-models.ps1` from the extracted ZIP folder. It places RMVPE
    and the reference ContentVec embedder under `assets\`; keep that folder in a
@@ -34,7 +37,11 @@ experimental OpenVINO / MIGraphX options.
    Wait for the status to show that conversion is running.
 
 Choose an embedder with the weights and preprocessing used for training your
-voice model. Matching channel counts alone do not establish compatibility.
+voice model. Matching channel counts alone do not establish compatibility. The
+published profiles are shared with the standalone GUI; downloaded packages
+include model-specific documentation and a license. **Custom** remembers your
+previous custom path and output override when you switch back from a profile.
+Existing projects with custom paths keep them.
 
 The Windows ML package offers **Windows ML (automatic)**, **DirectML (GPU)**,
 CPU options, and backends available in this PC's Windows ML catalog. For
@@ -58,10 +65,11 @@ correct the settings or missing files, and press **Load / Reload** again.
 
 The DAW saves the plugin's parameters, model paths, and conversion settings with
 the project or preset. Model files are not embedded. Keep the referenced files
-available at the saved locations when reopening or moving a project.
+available at the saved locations, including downloaded embedders, when reopening
+or moving a project.
 
 Reopened projects retain their selections; press **Load / Reload** to start
-conversion. Changing a model stages the selection
+conversion. Changing a model or downloading an embedder stages the selection
 until you press that button.
 
 ## Monitoring delay and offline export

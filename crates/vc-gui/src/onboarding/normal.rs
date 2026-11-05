@@ -233,6 +233,11 @@ impl VcGui {
         let busy = matches!(status.state, EngineState::Starting | EngineState::Stopping)
             || self.onboarding.normal.requested.is_some()
             || self.onboarding.normal.requested_runtime.is_some();
+        let package_pending = self
+            .onboarding
+            .packages
+            .pending_choice(&self.settings)
+            .is_some();
         let running = status.state == EngineState::Running;
         ui.horizontal_wrapped(|ui| {
             if busy {
@@ -261,7 +266,10 @@ impl VcGui {
         ui.horizontal_wrapped(|ui| {
             let label = if running { "Restart" } else { text::START };
             if ui
-                .add_enabled(!busy, egui::Button::new(lang.text(label)))
+                .add_enabled(
+                    !busy && !package_pending,
+                    egui::Button::new(lang.text(label)),
+                )
                 .clicked()
             {
                 self.apply_or_start();
@@ -307,6 +315,9 @@ impl VcGui {
         }
         if busy {
             ui.small(lang.text("Preparing or stopping. Stop requests are handled after the current preparation step."));
+        }
+        if package_pending {
+            ui.small(lang.text("Acquire the selected embedder before starting."));
         }
         if let Some(error) = &self.ui_error {
             ui.colored_label(
@@ -538,7 +549,7 @@ impl VcGui {
         }
     }
 
-    fn support_selector(&mut self, ui: &mut egui::Ui, index: usize) {
+    pub(super) fn support_selector(&mut self, ui: &mut egui::Ui, index: usize) {
         let lang = self.settings.language;
         let path = if index == 0 {
             self.settings.embedder.clone()
@@ -579,23 +590,61 @@ impl VcGui {
             }
         };
         let before = source;
+        let pending = (index == 0)
+            .then(|| self.onboarding.packages.pending_choice(&self.settings))
+            .flatten();
+        if pending.is_some() {
+            source = "pending";
+        }
+        let mut requested_package = None;
         egui::ComboBox::new(
             ("support-source", index),
             lang.text(if index == 0 { "Embedder" } else { "F0 model" }),
         )
         .selected_text(match source {
             "custom" => lang.text("Custom"),
+            "pending" => lang.text(&pending.unwrap().label),
             "package" => lang.text(&package.unwrap().label),
             _ => name,
         })
         .show_ui(ui, |ui| {
-            ui.selectable_value(&mut source, "downloaded", name);
-            ui.selectable_value(&mut source, "custom", lang.text("Custom"));
-            if let Some(model) = package {
-                ui.selectable_value(&mut source, "package", lang.text(&model.label));
+            // Preserve restored legacy ContentVec paths and their source key,
+            // while offering only the published profiles for new selections.
+            if index != 0 {
+                ui.selectable_value(&mut source, "downloaded", name);
             }
+            if index == 0 {
+                for model in vc_models::catalog() {
+                    let selected = pending
+                        .map(|m| m.id.as_str())
+                        .or_else(|| (source == "package").then(|| package.unwrap().id.as_str()));
+                    if ui
+                        .selectable_label(
+                            selected == Some(model.id.as_str()),
+                            lang.text(&model.label),
+                        )
+                        .clicked()
+                    {
+                        requested_package = Some(model);
+                        ui.close();
+                    }
+                }
+            }
+            ui.selectable_value(&mut source, "custom", lang.text("Custom"));
         });
-        if source != before {
+        if let Some(model) = requested_package {
+            if !self.embedder_package_cached(model)
+                && package.is_some_and(|installed| installed.id == model.id)
+            {
+                source = "package";
+            } else {
+                self.select_embedder_package(model);
+            }
+        }
+        if source != "pending" && (source != before || pending.is_some()) {
+            if index == 0 {
+                self.onboarding.packages.cancel();
+            }
             if before == "custom" {
                 self.settings.support_custom_paths[index] = path.clone();
             }
@@ -624,6 +673,17 @@ impl VcGui {
             }
             self.settings.support_custom_mode[index] = source.into();
             self.changed();
+        }
+        if index == 0 {
+            let selected = self
+                .onboarding
+                .packages
+                .pending_choice(&self.settings)
+                .or_else(|| (source == "package").then_some(package).flatten());
+            if let Some(model) = selected {
+                self.embedder_package_controls_ui(ui, model);
+                return;
+            }
         }
         ui.push_id(("support", index), |ui| {
             if source == "custom" {
@@ -676,9 +736,6 @@ impl VcGui {
                 }
             }
         });
-        if index == 0 {
-            self.embedder_packages_ui(ui);
-        }
     }
 
     fn download_support_role(&mut self, index: usize, path: &str) {

@@ -14,9 +14,9 @@ use nice_plug_egui::EguiState;
 
 use crate::config::PluginConfig;
 
-/// Preserve the serialized `settings` object while observing host restores,
-/// including identical or empty saved settings. The revision is session-only
-/// and checked under the existing settings lock.
+/// Preserve the existing serialized `settings` object while observing host
+/// restores, including restoring identical bytes during a pending UI download.
+/// The revision is session-only and checked under the existing settings lock.
 #[derive(Default)]
 pub struct SettingsState {
     value: RwLock<PluginConfig>,

@@ -6,8 +6,8 @@ use vc_app::{DeviceTestConfig, TestOutput};
 #[cfg(test)]
 #[derive(Default)]
 pub(crate) struct TestEffects {
-    pub package_zip: Option<PathBuf>,
     pub package_requests: Vec<String>,
+    pub package_cache_checks: Vec<String>,
     pub catalog_providers: Vec<Provider>,
     pub session_revision: u64,
     pub stop_requests: usize,

@@ -17,6 +17,17 @@ mod editor;
 mod params;
 mod runtime;
 
+// Share the standalone GUI's test-only renderer to exercise both real editors
+// with the same Vulkan setup, without changing shipped plugin dependencies.
+#[cfg(all(test, feature = "ui-snapshots"))]
+#[path = "../../vc-gui/src/onboarding/texture_to_image.rs"]
+mod texture_to_image;
+#[cfg(all(test, feature = "ui-snapshots"))]
+#[path = "../../vc-gui/src/onboarding/ui_renderer.rs"]
+mod ui_renderer;
+
+pub use editor::embedders::EmbedderJob;
+
 use config::PluginConfig;
 use params::VcRvcParams;
 use runtime::{PluginRuntime, PluginStatus, ReloadWaker};
@@ -131,13 +142,17 @@ impl Plugin for VcRvcPlugin {
     ];
 
     type SysExMessage = ();
-    type BackgroundTask = ();
+    type BackgroundTask = EmbedderJob;
+
+    fn task_executor(&mut self) -> TaskExecutor<Self> {
+        Box::new(EmbedderJob::run)
+    }
 
     fn params(&self) -> Arc<dyn Params> {
         self.params.clone()
     }
 
-    fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
+    fn editor(&mut self, async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
         editor::create(
             self.params.clone(),
             self.reload.clone(),
@@ -146,6 +161,7 @@ impl Plugin for VcRvcPlugin {
             self.status.clone(),
             self.reload_waker.clone(),
             self.model_pickers.clone(),
+            async_executor,
         )
     }
 
@@ -257,7 +273,7 @@ mod tests {
         fn plugin_api(&self) -> PluginApi {
             PluginApi::Vst3
         }
-        fn execute(&self, _: ()) {}
+        fn execute(&self, _: EmbedderJob) {}
         fn set_latency_samples(&self, _: u32) {}
         fn set_current_voice_capacity(&self, _: u32) {}
     }

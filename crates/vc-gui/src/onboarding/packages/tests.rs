@@ -4,6 +4,32 @@ use egui_kittest::{
     Harness,
 };
 
+pub(in crate::onboarding) struct CacheFixture(pub PathBuf);
+
+impl CacheFixture {
+    pub(in crate::onboarding) fn new(model: &vc_models::Model) -> Self {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "vc-gui-package-cache-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).unwrap();
+        fs::create_dir_all(model.directory(&root)).unwrap();
+        // UI tests mock the worker completion, not real package verification.
+        fs::write(model.model_path(&root), b"cache-existence fixture").unwrap();
+        Self(root)
+    }
+}
+
+impl Drop for CacheFixture {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
 fn app(language: text::Language) -> VcGui {
     let settings = GuiSettings {
         language,
@@ -17,7 +43,6 @@ fn app(language: text::Language) -> VcGui {
     let mut onboarding = Onboarding::new(&settings);
     onboarding.effects.support_cache_dir =
         std::env::temp_dir().join("vc-gui-package-uncreated-fixture");
-    onboarding.effects.package_zip = Some("selected.zip".into());
     VcGui {
         controller: EngineController::new(settings.live()),
         settings,
@@ -63,11 +88,11 @@ fn render_embedder_packages() {
     for language in [text::Language::English, text::Language::Japanese] {
         for width in [880.0, 520.0] {
             let mut fixture = app(language);
-            // A long generic path exercises wrapping without exposing the
-            // rendering machine's username or creating any cache files.
-            fixture.onboarding.effects.support_cache_dir =
-                PathBuf::from(r"C:\Users\Example\AppData\Local\vc-rs\models");
             let model = vc_models::find("applio-chinese-hubert-base", "0.1.0").unwrap();
+            // Use an isolated dummy cache so the downloaded state and its long
+            // document path render without touching any real model packages.
+            let cache = CacheFixture::new(model);
+            fixture.onboarding.effects.support_cache_dir = cache.0.clone();
             fixture.settings.embedder_package = Some(model.selection());
             fixture.settings.embedder = model
                 .model_path(&fixture.onboarding.effects.support_cache_dir)
@@ -104,7 +129,7 @@ fn render_embedder_packages() {
     }
 }
 
-fn finish(app: &mut VcGui, success: bool) {
+pub(in crate::onboarding) fn finish(app: &mut VcGui, success: bool) {
     let task = app.onboarding.packages.task.as_ref().unwrap();
     let result = if success {
         Ok(vc_models::Installed {
@@ -118,24 +143,24 @@ fn finish(app: &mut VcGui, success: bool) {
 }
 
 #[test]
-fn ui_package_import_is_explicit_localized_and_keeps_custom_until_success() {
+fn ui_package_acquisition_is_explicit_localized_and_keeps_custom_until_success() {
     for language in [text::Language::English, text::Language::Japanese] {
         let mut h = harness(app(language));
         assert!(h.state().onboarding.effects.package_requests.is_empty());
         h.get_by_label(language.text("Embedder packages")).click();
         h.run_steps(4);
-        h.get_by_label(
-            language.text("No public download source is configured. Import a matching local ZIP."),
-        );
         assert!(h
-            .query_by_label(language.text("Download and use"))
+            .query_by_label(language.text("No public download source is configured."),)
             .is_none());
+        h.get_by_label(language.text("Download and use"));
         h.get_by_label(language.text("Package")).click();
         h.run_steps(4);
         h.get_by_label(language.text("SPIN v2 (Applio)")).click();
         h.run_steps(4);
         assert!(h.state().onboarding.effects.package_requests.is_empty());
-        h.get_by_label(language.text("Import ZIP and use…")).click();
+        assert!(h.query_by_label("Import ZIP and use…").is_none());
+        assert!(h.query_by_label("ZIPを取り込んで使用…").is_none());
+        h.get_by_label(language.text("Download and use")).click();
         h.run_steps(4);
         assert_eq!(
             h.state().onboarding.effects.package_requests,
@@ -166,7 +191,7 @@ fn package_completion_cannot_overwrite_changed_or_aba_restored_selections() {
         let mut app = app(text::Language::English);
         let model = vc_models::find("applio-spin", "0.1.0").unwrap();
         app.onboarding.packages.selected = model.id.clone();
-        app.start_embedder_package(model, Source::Zip("spin.zip".into()));
+        app.start_embedder_package(model, false);
         if change_voice {
             app.settings.model = "new-voice.onnx".into();
         } else {
@@ -196,14 +221,13 @@ fn ui_package_failure_retry_and_cancel_preserve_selection_and_ignore_late_result
     let mut h = harness(app(language));
     h.get_by_label(language.text("Embedder packages")).click();
     h.run_steps(4);
-    h.get_by_label(language.text("Import ZIP and use…")).click();
+    h.get_by_label(language.text("Download and use")).click();
     h.run_steps(4);
     finish(h.state_mut(), false);
     h.run_steps(4);
     h.get_by_label(language.text("Package acquisition failed. Your current selection was kept."));
     assert_eq!(h.state().settings.embedder, "my-custom.onnx");
-    h.get_by_label(language.text("Retry package import"))
-        .click();
+    h.get_by_label(language.text("Download and use")).click();
     h.run_steps(4);
     assert_eq!(h.state().onboarding.effects.package_requests.len(), 2);
     let task = h.state().onboarding.packages.task.as_ref().unwrap();
@@ -226,10 +250,10 @@ fn ui_package_choice_change_cancels_previous_work_without_changing_active_path()
     let mut h = harness(app(text::Language::English));
     h.get_by_label("Embedder packages").click();
     h.run_steps(4);
-    h.get_by_label("Import ZIP and use…").click();
+    h.get_by_label("Download and use").click();
     h.run_steps(4);
     assert!(h
-        .get_by_label("Import ZIP and use…")
+        .get_by_label("Download and use")
         .accesskit_node()
         .is_disabled());
     let cancel = h
@@ -278,7 +302,7 @@ fn staging_a_voice_export_invalidates_a_package_before_model_path_changes() {
     let mut app = app(text::Language::English);
     let model = vc_models::find("applio-spin", "0.1.0").unwrap();
     app.onboarding.packages.selected = model.id.clone();
-    app.start_embedder_package(model, Source::Zip("spin.zip".into()));
+    app.start_embedder_package(model, false);
     app.onboarding.invalidate_package_application();
     finish(&mut app, true);
     app.poll_embedder_package();

@@ -100,21 +100,32 @@ checks model-role compatibility. Completed reference files are reused; partial
 transfers are not resumed. Obsolete checks are associated with their original
 paths, and download/selection changes invalidate readiness.
 
-The normal screen's Model fold and Preparation's Details offer **Embedder
-packages**. Select an exact vc-embedders profile, then **Import ZIP and use…**
-to import its matching local archive. No public download source is configured
-for the fixed 0.1.0 candidates. Merely opening setup or selecting an entry does
-not acquire anything. A successful import selects the verified ONNX only if
+The normal screen's **Model → Embedder** picker includes all published profiles
+with Custom last. Saved legacy ContentVec settings retain their paths and source
+values, without a duplicate entry for new selections. Select a profile there;
+its acquisition controls appear directly below the picker. Preparation's Details
+also offer **Embedder packages**. Use **Download and use** to
+acquire the pinned [v0.1.0 release package](https://github.com/shirohata/rvc-embedders-onnx/releases/tag/v0.1.0).
+Merely opening
+setup or selecting an entry does not acquire anything. A new package choice is
+previewed without replacing the saved ONNX path; Start/Restart waits for verified
+acquisition, or for returning to the existing source. A successful acquisition selects the verified ONNX only if
 the voice/embedder selection has remained unchanged; otherwise it just fills
-the cache. Failed/cancelled jobs keep the current selection. Custom paths remain
+the cache. Failed jobs keep the current selection; cancelling a download or
+verification also dismisses the pending choice and restores its previous display.
+Custom paths remain
 available when switching back from a package. Identity/version is saved beside
 the existing path without migrating older selections. Apply through the normal
-Start/Restart operation. The package directory retains README, LICENSE and
-NOTICE, and **Verify cache and use** rechecks all four files.
+Start/Restart operation. The package directory retains the English/Japanese
+READMEs and LICENSE. **Download and use** verifies and reuses all four cached
+files when available, without downloading them again. Downloaded profiles hide
+the download button. Selecting a cached profile verifies it locally in the
+background; failed verification keeps the previous selection and offers an
+explicit download. Merely opening the screen does not hash files or download.
 
 Use the embedder weights, layer, projection and preprocessing used for training.
 SPIN/SPIN v2 are not substitutes for ContentVec-trained models. Generator and
-vocoder support is an independent requirement; importing a package does not
+vocoder support is an independent requirement; acquiring a package does not
 establish backend compatibility or audio quality. CLI `embedders` commands use
 the same package cache and verification path (see [the CLI reference](cli.md#embedder-packages)).
 

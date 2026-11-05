@@ -4,9 +4,20 @@ The standalone GUI has one set of transport, model, pitch and audio controls.
 The body alone scrolls; transport stays above it and language/Setup scroll with the body.
 Input/output are side by side when space permits and stack in narrower windows.
 
-Model settings sit under voice selection. ContentVec and RMVPE each offer the
-reference download or a custom path. Existing paths are inferred on migration;
-custom paths are remembered when switching away and retained in GUI settings.
+Model settings sit under voice selection. RMVPE offers the reference download or
+a custom path. Existing paths are inferred on migration; custom paths are
+remembered when switching away and retained in GUI settings. Saved reference
+ContentVec paths/source settings remain usable, without a separate legacy entry
+for new selections. The Embedder picker lists the published profiles before
+Custom, which appears last. Profiles are visible before
+installation. Selecting an uninstalled profile exposes its download button
+in place; downloaded profiles show their status without that button. Selecting
+a cached profile verifies it on a background worker without downloading.
+A failed check offers the download button for explicit repair.
+A new package choice preserves the saved path until verification
+succeeds; Start/Restart waits while that choice is pending. Returning to Custom
+cancels the pending choice. Cancelling either a download or local verification
+also restores the previous selection, keeping a running conversion active.
 Reference downloads require consent, show size/license, and use the existing
 verified cache worker. Normal rendering only checks file existence; it does not
 scan model structure or hash existing files. Setup retains structural validation,
